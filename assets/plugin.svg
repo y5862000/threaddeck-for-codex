@@ -18,12 +18,14 @@
     <rect x="52" y="158" width="78" height="78" rx="23"/>
     <rect x="158" y="158" width="78" height="78" rx="23"/>
   </g>
-  <path d="M88 91H196V197H92" fill="none" stroke="#0B1715" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
-  <path d="M88 91H196V197H92" fill="none" stroke="url(#thread)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
-  <g fill="#F7F7F7">
-    <circle cx="88" cy="91" r="12"/>
-    <circle cx="196" cy="91" r="12"/>
-    <circle cx="196" cy="197" r="12"/>
-    <circle cx="92" cy="197" r="12"/>
+  <g transform="rotate(180 144 144)">
+    <path d="M88 91H196V197H92" fill="none" stroke="#0B1715" stroke-width="22" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M88 91H196V197H92" fill="none" stroke="url(#thread)" stroke-width="12" stroke-linecap="round" stroke-linejoin="round"/>
+    <g fill="#F7F7F7">
+      <circle cx="88" cy="91" r="12"/>
+      <circle cx="196" cy="91" r="12"/>
+      <circle cx="196" cy="197" r="12"/>
+      <circle cx="92" cy="197" r="12"/>
+    </g>
   </g>
 </svg>
