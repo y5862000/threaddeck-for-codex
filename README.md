@@ -92,7 +92,21 @@ The bundled profile contains three pages. You can rearrange the supplied actions
 2. Double-click the file and approve installation in Stream Deck.
 3. Import the bundled **ThreadDeck for Codex** Neo profile when prompted.
 4. In **System Settings → Privacy & Security → Accessibility**, allow **Stream Deck**. This is required for keyboard/media actions and the local queue counter.
-5. Open Codex Desktop and press a task key to confirm navigation.
+5. In Codex Desktop, open **Settings → Keyboard Shortcuts**, check the shortcuts below, and explicitly assign push-to-talk to `⌃⇧D`.
+6. Open Codex Desktop and test a task key and the microphone key to confirm both navigation and dictation.
+
+### Required Codex shortcut setup
+
+The current beta sends the following fixed key combinations. If your Codex shortcuts differ, the matching ThreadDeck actions will not work. Setting names may vary slightly between Codex versions and localizations.
+
+| Codex function | Keys sent by ThreadDeck | Used by |
+|---|---:|---|
+| Voice input / push-to-talk | `⌃⇧D` | Dedicated microphone key and long-press task dictation |
+| Open a new task outside the project | `⌥⌘O` | New task key |
+| Open Side Chat | `⌥⌘S` | Side Chat key |
+
+> [!IMPORTANT]
+> Voice input is not configured automatically. Assign `Control+Shift+D` in Codex before using it. If pressing the microphone key only types `D` or does nothing, check this shortcut and Stream Deck's Accessibility permission first.
 
 The public plugin uses its own identifier and will not overwrite the author's private development prototype.
 
