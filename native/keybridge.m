@@ -37,6 +37,7 @@ enum {
 };
 
 static bool stop_codex_composer_dictation_if_visible(void);
+static bool codex_audio_input_is_running(void);
 
 static CGEventRef create_key_event(
   CGKeyCode key,
@@ -100,6 +101,10 @@ static void voice_up(void) {
   // hold would otherwise keep recording forever. Activate the visible stop
   // control on release; older builds with a true global hold shortcut have
   // already stopped after the physical key-up, making this a safe no-op.
+  // Give a true global hold shortcut a moment to stop on its own. The helper
+  // below additionally requires an active Codex input stream, so an idle
+  // composer microphone can never be mistaken for the stop control.
+  usleep(50000);
   stop_codex_composer_dictation_if_visible();
 }
 
@@ -210,6 +215,44 @@ static void print_running_audio_processes(AudioObjectPropertySelector running_se
     printf("%d\t%s\n", pid, bundle);
   }
   free(processes);
+}
+
+static bool codex_audio_input_is_running(void) {
+  AudioObjectPropertyAddress address = {
+    kAudioHardwarePropertyProcessObjectList,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  UInt32 size = 0;
+  if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, NULL, &size) != noErr
+      || size == 0) return false;
+  AudioObjectID *processes = malloc(size);
+  if (processes == NULL) return false;
+  if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, NULL, &size, processes) != noErr) {
+    free(processes);
+    return false;
+  }
+
+  bool active = false;
+  UInt32 count = size / sizeof(AudioObjectID);
+  for (UInt32 index = 0; index < count && !active; index += 1) {
+    UInt32 is_running = 0;
+    UInt32 value_size = sizeof(is_running);
+    address.mSelector = kAudioProcessPropertyIsRunningInput;
+    if (AudioObjectGetPropertyData(processes[index], &address, 0, NULL, &value_size, &is_running) != noErr
+        || !is_running) continue;
+
+    CFStringRef bundle_id = NULL;
+    value_size = sizeof(bundle_id);
+    address.mSelector = kAudioProcessPropertyBundleID;
+    if (AudioObjectGetPropertyData(processes[index], &address, 0, NULL, &value_size, &bundle_id) == noErr
+        && bundle_id != NULL) {
+      active = CFStringHasPrefix(bundle_id, CFSTR("com.openai.codex"));
+      CFRelease(bundle_id);
+    }
+  }
+  free(processes);
+  return active;
 }
 
 static void app_switch(void) {
@@ -1128,6 +1171,7 @@ static bool codex_is_frontmost(void) {
 }
 
 static bool stop_codex_composer_dictation_if_visible(void) {
+  if (!codex_audio_input_is_running()) return false;
   AXUIElementRef application = copy_codex_application();
   if (application == NULL) return false;
   AXUIElementSetMessagingTimeout(application, 0.5);
