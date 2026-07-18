@@ -20,7 +20,7 @@ ThreadDeck is intentionally small. A dependency-free Node.js process owns local 
 It:
 
 - connects to Stream Deck through the localhost plugin WebSocket;
-- discovers pinned and recent tasks from conservative read-only views of Codex SQLite and JSON state;
+- merges pinned and recent local SQLite tasks with cached remote task summaries from Codex JSON state, deduplicating by conversation ID;
 - normalizes working, completed, queued, error, and idle states;
 - tracks start/end timestamps and freezes completed durations;
 - tracks the active Desktop session so closed temporary Side Chats do not reappear as ordinary tasks;
@@ -29,6 +29,7 @@ It:
 - invokes CodexBar for the optional weekly quota value;
 - delegates keyboard, media, and push-to-talk operations to `keybridge`.
 - lets a held task key open that task, dictate a follow-up, detect transcription completion using text fingerprints, and submit it on release.
+- opens remote tasks through Codex's own visible sidebar result when available, then falls back to the unified task search so Codex activates the result's host before navigation.
 
 No Codex file is opened for writing.
 
@@ -40,10 +41,11 @@ It:
 
 - emits Codex shortcuts and Return;
 - holds and releases push-to-talk modifiers across Stream Deck key-down/key-up events;
+- attaches an explicit Latin `D` to push-to-talk events while retaining the physical key code, making the shortcut independent of the active keyboard input source;
 - sends app-switch and media-key events;
 - finds processes currently producing Core Audio output;
 - suspends those process IDs during dictation and resumes the same IDs on release.
-- traverses the visible Codex accessibility tree to fingerprint the current task title and count localized queue-action buttons without returning message text.
+- traverses the visible Codex accessibility tree to fingerprint task titles, select one unambiguous remote task result, and count localized queue-action buttons without returning message text.
 
 The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input.
 
@@ -56,11 +58,12 @@ ThreadDeck owns the bundled previous-page actions and exposes a next-page action
 ## Data refresh and rendering
 
 - Task metadata refreshes every 3 seconds while a task action is visible.
+- Local and cached remote summaries share one recency-sorted task list; a local record wins if the same conversation ID appears in both sources.
 - The same refresh observes the open Codex task's queue count. Cached counts follow that task key and decrement when a queued turn starts.
 - Active task timers and animation frames render at device-appropriate intervals.
 - Weekly usage refreshes every 60 seconds while the quota action is visible.
 - macOS appearance is checked every 2 seconds and swaps the renderer between the existing dark and light palettes.
-- Completion is detected by comparing end timestamps with an overlapping observation window and a startup grace period. Queue decreases are also treated as a completed turn. ThreadDeck-owned keys receive a global pulse; the matching task key receives the longer task pulse.
+- Completion is detected by comparing end timestamps with an overlapping observation window and a startup grace period. Queue decreases are also treated as a completed turn. The first global frame is fanned out to every visible ThreadDeck-owned key before later frames are split into device-safe groups; the matching task key receives the longer task pulse.
 
 The plugin caches the last image for each context and avoids sending unchanged frames.
 

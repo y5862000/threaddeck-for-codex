@@ -11,11 +11,14 @@
 #include <unistd.h>
 
 enum {
+  KEY_A = 0x00,
   KEY_S = 0x01,
   KEY_D = 0x02,
   KEY_O = 0x1F,
+  KEY_K = 0x28,
   KEY_RETURN = 0x24,
   KEY_TAB = 0x30,
+  KEY_ESCAPE = 0x35,
   KEY_COMMAND = 0x37,
   KEY_SHIFT = 0x38,
   KEY_OPTION = 0x3A,
@@ -33,10 +36,38 @@ enum {
   MEDIA_REWIND = 20
 };
 
-static void post_key(CGKeyCode key, bool down, CGEventFlags flags) {
+static CGEventRef create_key_event(
+  CGKeyCode key,
+  bool down,
+  CGEventFlags flags,
+  const UniChar *characters,
+  UniCharCount character_count
+) {
   CGEventRef event = CGEventCreateKeyboardEvent(NULL, key, down);
-  if (event == NULL) return;
+  if (event == NULL) return NULL;
   CGEventSetFlags(event, flags);
+  if (characters != NULL && character_count > 0) {
+    CGEventKeyboardSetUnicodeString(event, character_count, characters);
+  }
+  return event;
+}
+
+static void post_key(CGKeyCode key, bool down, CGEventFlags flags) {
+  CGEventRef event = create_key_event(key, down, flags, NULL, 0);
+  if (event == NULL) return;
+  CGEventPost(kCGHIDEventTap, event);
+  CFRelease(event);
+  usleep(9000);
+}
+
+static void post_latin_key(
+  CGKeyCode key,
+  bool down,
+  CGEventFlags flags,
+  UniChar character
+) {
+  CGEventRef event = create_key_event(key, down, flags, &character, 1);
+  if (event == NULL) return;
   CGEventPost(kCGHIDEventTap, event);
   CFRelease(event);
   usleep(9000);
@@ -45,13 +76,38 @@ static void post_key(CGKeyCode key, bool down, CGEventFlags flags) {
 static void voice_down(void) {
   post_key(KEY_CONTROL, true, kCGEventFlagMaskControl);
   post_key(KEY_SHIFT, true, kCGEventFlagMaskControl | kCGEventFlagMaskShift);
-  post_key(KEY_D, true, kCGEventFlagMaskControl | kCGEventFlagMaskShift);
+  // Electron's shortcut matching can use the layout-dependent character.
+  // Attach an explicit Latin "D" while retaining the physical D key code so
+  // Control+Shift+D works under Korean and other non-Latin input sources.
+  post_latin_key(KEY_D, true, kCGEventFlagMaskControl | kCGEventFlagMaskShift, 'D');
 }
 
 static void voice_up(void) {
-  post_key(KEY_D, false, kCGEventFlagMaskControl | kCGEventFlagMaskShift);
+  post_latin_key(KEY_D, false, kCGEventFlagMaskControl | kCGEventFlagMaskShift, 'D');
   post_key(KEY_SHIFT, false, kCGEventFlagMaskControl);
   post_key(KEY_CONTROL, false, 0);
+}
+
+static bool voice_event_is_layout_independent(bool down) {
+  UniChar expected = 'D';
+  CGEventRef event = create_key_event(
+    KEY_D,
+    down,
+    kCGEventFlagMaskControl | kCGEventFlagMaskShift,
+    &expected,
+    1
+  );
+  if (event == NULL) return false;
+  UniChar actual[2] = { 0, 0 };
+  UniCharCount actual_count = 0;
+  CGEventKeyboardGetUnicodeString(event, 2, &actual_count, actual);
+  bool matches = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == KEY_D
+    && actual_count == 1
+    && actual[0] == expected
+    && (CGEventGetFlags(event) & (kCGEventFlagMaskControl | kCGEventFlagMaskShift))
+      == (kCGEventFlagMaskControl | kCGEventFlagMaskShift);
+  CFRelease(event);
+  return matches;
 }
 
 static void tap_key(CGKeyCode key, CGEventFlags flags) {
@@ -856,7 +912,420 @@ static int print_codex_queue_state(void) {
   return emitted > 0 ? 0 : 1;
 }
 
+#define CODEX_THREAD_TARGET_MAX 64
+
+typedef struct {
+  const char *uuid;
+  StringFingerprint fingerprint;
+  bool use_uuid;
+  AXUIElementRef targets[CODEX_THREAD_TARGET_MAX];
+  unsigned target_count;
+  unsigned matched_elements;
+  unsigned visited;
+} CodexThreadTargetState;
+
+static bool copy_cfstring_utf8(CFTypeRef value, char **result) {
+  *result = NULL;
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return false;
+  CFStringRef string = (CFStringRef)value;
+  CFIndex capacity = CFStringGetMaximumSizeForEncoding(
+    CFStringGetLength(string),
+    kCFStringEncodingUTF8
+  ) + 1;
+  char *utf8 = calloc((size_t)capacity, sizeof(char));
+  if (utf8 == NULL || !CFStringGetCString(string, utf8, capacity, kCFStringEncodingUTF8)) {
+    free(utf8);
+    return false;
+  }
+  *result = utf8;
+  return true;
+}
+
+static bool element_supports_press(AXUIElementRef element) {
+  CFArrayRef actions = NULL;
+  if (AXUIElementCopyActionNames(element, &actions) != kAXErrorSuccess || actions == NULL) {
+    if (actions != NULL) CFRelease(actions);
+    return false;
+  }
+  bool supports_press = CFArrayContainsValue(
+    actions,
+    CFRangeMake(0, CFArrayGetCount(actions)),
+    kAXPressAction
+  );
+  CFRelease(actions);
+  return supports_press;
+}
+
+static AXUIElementRef copy_nearest_press_target(AXUIElementRef element) {
+  AXUIElementRef current = (AXUIElementRef)CFRetain(element);
+  for (unsigned depth = 0; depth < 8 && current != NULL; depth += 1) {
+    if (element_supports_press(current)) return current;
+    CFTypeRef parent_value = NULL;
+    if (AXUIElementCopyAttributeValue(current, kAXParentAttribute, &parent_value) != kAXErrorSuccess
+        || parent_value == NULL || CFGetTypeID(parent_value) != AXUIElementGetTypeID()) {
+      if (parent_value != NULL) CFRelease(parent_value);
+      CFRelease(current);
+      return NULL;
+    }
+    CFRelease(current);
+    current = (AXUIElementRef)parent_value;
+  }
+  if (current != NULL) CFRelease(current);
+  return NULL;
+}
+
+static bool element_attribute_matches_uuid(
+  AXUIElementRef element,
+  CFStringRef attribute,
+  const char *uuid
+) {
+  CFTypeRef value = NULL;
+  if (AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess
+      || value == NULL) {
+    if (value != NULL) CFRelease(value);
+    return false;
+  }
+  char *utf8 = NULL;
+  bool found = copy_cfstring_utf8(value, &utf8) && strstr(utf8, uuid) != NULL;
+  free(utf8);
+  CFRelease(value);
+  return found;
+}
+
+static bool element_matches_thread_target(
+  AXUIElementRef element,
+  CodexThreadTargetState *state
+) {
+  CFStringRef attributes[] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    kAXURLAttribute,
+    CFSTR("AXDOMIdentifier")
+  };
+  for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+    if (state->use_uuid) {
+      if (element_attribute_matches_uuid(element, attributes[index], state->uuid)) return true;
+      continue;
+    }
+    StringFingerprint fingerprint = { 0 };
+    if (copy_element_fingerprint(element, attributes[index], &fingerprint)
+        && fingerprints_equal(fingerprint, state->fingerprint)) return true;
+  }
+  return false;
+}
+
+static void add_codex_thread_target(
+  CodexThreadTargetState *state,
+  AXUIElementRef target
+) {
+  for (unsigned index = 0; index < state->target_count; index += 1) {
+    if (CFEqual(state->targets[index], target)) return;
+  }
+  if (state->target_count >= CODEX_THREAD_TARGET_MAX) return;
+  state->targets[state->target_count++] = (AXUIElementRef)CFRetain(target);
+}
+
+static void collect_codex_thread_targets(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexThreadTargetState *state
+) {
+  if (element == NULL || depth > 30 || state->visited >= 8000) return;
+  state->visited += 1;
+  if (!element_is_hidden(element) && element_matches_thread_target(element, state)) {
+    state->matched_elements += 1;
+    AXUIElementRef target = copy_nearest_press_target(element);
+    if (target != NULL) {
+      add_codex_thread_target(state, target);
+      CFRelease(target);
+    }
+  }
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value) != kAXErrorSuccess
+      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  CFIndex count = CFArrayGetCount(children);
+  for (CFIndex index = 0; index < count; index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_codex_thread_targets((AXUIElementRef)child, depth + 1, state);
+    }
+  }
+  CFRelease(children_value);
+}
+
+static void release_codex_thread_targets(CodexThreadTargetState *state) {
+  for (unsigned index = 0; index < state->target_count; index += 1) {
+    CFRelease(state->targets[index]);
+  }
+  state->target_count = 0;
+}
+
+static bool parse_fingerprint(const char *input, StringFingerprint *fingerprint) {
+  if (input == NULL || fingerprint == NULL) return false;
+  char trailing = '\0';
+  unsigned long long hash = 0;
+  size_t length = 0;
+  if (sscanf(input, "%zu:%llx%c", &length, &hash, &trailing) != 2 || length == 0) return false;
+  fingerprint->length = length;
+  fingerprint->hash = (uint64_t)hash;
+  return true;
+}
+
+static int find_or_open_codex_thread(
+  const char *uuid,
+  const char *fingerprint_input,
+  bool press
+) {
+  StringFingerprint fingerprint = { 0 };
+  if (uuid == NULL || strlen(uuid) != 36 || !parse_fingerprint(fingerprint_input, &fingerprint)) {
+    return 64;
+  }
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) return 1;
+  AXUIElementSetMessagingTimeout(application, 0.8);
+
+  CodexThreadTargetState state = {
+    .uuid = uuid,
+    .fingerprint = fingerprint,
+    .use_uuid = true,
+    .target_count = 0,
+    .matched_elements = 0,
+    .visited = 0
+  };
+  collect_codex_thread_targets(application, 0, &state);
+  const char *strategy = "uuid";
+  if (state.target_count == 0) {
+    release_codex_thread_targets(&state);
+    state.use_uuid = false;
+    state.matched_elements = 0;
+    state.visited = 0;
+    collect_codex_thread_targets(application, 0, &state);
+    strategy = "title";
+  }
+
+  printf(
+    "strategy=%s matched=%u targets=%u visited=%u\n",
+    strategy,
+    state.matched_elements,
+    state.target_count,
+    state.visited
+  );
+  int result = 1;
+  if (!press) {
+    for (unsigned index = 0; index < state.target_count; index += 1) {
+      CGPoint position = CGPointZero;
+      CGSize size = CGSizeZero;
+      bool has_position = copy_element_position(state.targets[index], &position);
+      bool has_size = copy_element_size(state.targets[index], &size);
+      printf(
+        "target=%u x=%.0f y=%.0f width=%.0f height=%.0f\n",
+        index,
+        has_position ? position.x : -1,
+        has_position ? position.y : -1,
+        has_size ? size.width : -1,
+        has_size ? size.height : -1
+      );
+    }
+    result = state.target_count > 0 ? 0 : 1;
+  } else if (state.target_count == 1) {
+    result = AXUIElementPerformAction(state.targets[0], kAXPressAction) == kAXErrorSuccess ? 0 : 1;
+  } else if (state.target_count > 1) {
+    result = 3;
+  }
+
+  release_codex_thread_targets(&state);
+  CFRelease(application);
+  return result;
+}
+
+static char *read_stdin_utf8(size_t *length_out) {
+  size_t capacity = 4096;
+  size_t length = 0;
+  char *buffer = calloc(capacity, sizeof(char));
+  if (buffer == NULL) return NULL;
+  for (;;) {
+    if (length == capacity - 1) {
+      if (capacity >= 64 * 1024) {
+        free(buffer);
+        return NULL;
+      }
+      size_t next_capacity = capacity * 2;
+      char *next = realloc(buffer, next_capacity);
+      if (next == NULL) {
+        free(buffer);
+        return NULL;
+      }
+      memset(next + capacity, 0, next_capacity - capacity);
+      buffer = next;
+      capacity = next_capacity;
+    }
+    size_t count = fread(buffer + length, 1, capacity - length - 1, stdin);
+    length += count;
+    if (count == 0) break;
+  }
+  if (ferror(stdin) || length == 0) {
+    free(buffer);
+    return NULL;
+  }
+  buffer[length] = '\0';
+  *length_out = length;
+  return buffer;
+}
+
+static bool post_unicode_text(const char *utf8, size_t length) {
+  CFStringRef string = CFStringCreateWithBytes(
+    kCFAllocatorDefault,
+    (const UInt8 *)utf8,
+    (CFIndex)length,
+    kCFStringEncodingUTF8,
+    false
+  );
+  if (string == NULL) return false;
+  CFIndex character_count = CFStringGetLength(string);
+  UniChar *characters = calloc((size_t)character_count, sizeof(UniChar));
+  if (characters == NULL) {
+    CFRelease(string);
+    return false;
+  }
+  CFStringGetCharacters(string, CFRangeMake(0, character_count), characters);
+  CGEventRef down = CGEventCreateKeyboardEvent(NULL, 0, true);
+  CGEventRef up = CGEventCreateKeyboardEvent(NULL, 0, false);
+  if (down == NULL || up == NULL) {
+    if (down != NULL) CFRelease(down);
+    if (up != NULL) CFRelease(up);
+    free(characters);
+    CFRelease(string);
+    return false;
+  }
+  CGEventKeyboardSetUnicodeString(down, character_count, characters);
+  CGEventKeyboardSetUnicodeString(up, character_count, characters);
+  CGEventPost(kCGHIDEventTap, down);
+  CGEventPost(kCGHIDEventTap, up);
+  CFRelease(down);
+  CFRelease(up);
+  free(characters);
+  CFRelease(string);
+  return true;
+}
+
+static AXUIElementRef copy_codex_focused_search_field(void) {
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) return NULL;
+  AXUIElementSetMessagingTimeout(application, 0.8);
+  CFTypeRef focused_value = NULL;
+  AXError focused_error = AXUIElementCopyAttributeValue(
+    application,
+    kAXFocusedUIElementAttribute,
+    &focused_value
+  );
+  CFRelease(application);
+  if (focused_error != kAXErrorSuccess || focused_value == NULL
+      || CFGetTypeID(focused_value) != AXUIElementGetTypeID()) {
+    if (focused_value != NULL) CFRelease(focused_value);
+    return NULL;
+  }
+  CFTypeRef role_value = NULL;
+  AXError role_error = AXUIElementCopyAttributeValue(
+    (AXUIElementRef)focused_value,
+    kAXRoleAttribute,
+    &role_value
+  );
+  bool is_search_field = role_error == kAXErrorSuccess && role_value != NULL
+    && CFGetTypeID(role_value) == CFStringGetTypeID()
+    && CFEqual(role_value, kAXComboBoxRole);
+  if (role_value != NULL) CFRelease(role_value);
+  if (!is_search_field) {
+    CFRelease(focused_value);
+    return NULL;
+  }
+  return (AXUIElementRef)focused_value;
+}
+
+static bool set_codex_search_text(
+  AXUIElementRef search_field,
+  const char *utf8,
+  size_t length
+) {
+  CFStringRef string = CFStringCreateWithBytes(
+    kCFAllocatorDefault,
+    (const UInt8 *)utf8,
+    (CFIndex)length,
+    kCFStringEncodingUTF8,
+    false
+  );
+  if (string == NULL) return false;
+  bool set = AXUIElementSetAttributeValue(
+    search_field,
+    kAXValueAttribute,
+    string
+  ) == kAXErrorSuccess;
+  CFRelease(string);
+  return set;
+}
+
+static int fill_codex_search_from_stdin(void) {
+  size_t title_length = 0;
+  char *title = read_stdin_utf8(&title_length);
+  if (title == NULL) return 64;
+
+  tap_key(KEY_K, kCGEventFlagMaskCommand);
+  usleep(300000);
+  AXUIElementRef search_field = copy_codex_focused_search_field();
+  bool typed = false;
+  if (search_field != NULL) {
+    typed = set_codex_search_text(search_field, title, title_length);
+    if (!typed) {
+      tap_key(KEY_A, kCGEventFlagMaskCommand);
+      typed = post_unicode_text(title, title_length);
+    }
+    CFRelease(search_field);
+  }
+  free(title);
+  if (!typed) {
+    tap_key(KEY_ESCAPE, 0);
+    return 1;
+  }
+  return 0;
+}
+
+static int search_and_open_codex_thread(
+  const char *uuid,
+  const char *fingerprint_input
+) {
+  StringFingerprint fingerprint = { 0 };
+  if (uuid == NULL || strlen(uuid) != 36 || !parse_fingerprint(fingerprint_input, &fingerprint)) {
+    return 64;
+  }
+  int fill_result = fill_codex_search_from_stdin();
+  if (fill_result != 0) return fill_result;
+  usleep(700000);
+  int result = find_or_open_codex_thread(uuid, fingerprint_input, true);
+  if (result != 0) tap_key(KEY_ESCAPE, 0);
+  return result;
+}
+
 int main(int argc, char **argv) {
+  if (argc < 2) return 64;
+  if (strcmp(argv[1], "codex-find-thread") == 0) {
+    if (argc != 4) return 64;
+    return find_or_open_codex_thread(argv[2], argv[3], false);
+  }
+  if (strcmp(argv[1], "codex-open-thread") == 0) {
+    if (argc != 4) return 64;
+    return find_or_open_codex_thread(argv[2], argv[3], true);
+  }
+  if (strcmp(argv[1], "codex-search-thread") == 0) {
+    if (argc != 4) return 64;
+    return search_and_open_codex_thread(argv[2], argv[3]);
+  }
   if (argc != 2) return 64;
   if (strcmp(argv[1], "preflight") == 0) {
     bool trusted = CGPreflightPostEventAccess();
@@ -881,6 +1350,12 @@ int main(int argc, char **argv) {
       && !CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, KEY_D);
     printf("held=%d released=%d\n", held ? 1 : 0, released ? 1 : 0);
     return held && released ? 0 : 1;
+  }
+  if (strcmp(argv[1], "voice-event-selftest") == 0) {
+    bool down = voice_event_is_layout_independent(true);
+    bool up = voice_event_is_layout_independent(false);
+    printf("layout_independent_down=%d layout_independent_up=%d\n", down ? 1 : 0, up ? 1 : 0);
+    return down && up ? 0 : 1;
   }
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) voice_up();

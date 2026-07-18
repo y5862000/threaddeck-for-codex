@@ -12,9 +12,21 @@ Open **System Settings → Privacy & Security → Accessibility** and allow **St
 
 For task-key dictation, keep holding the task key while speaking. Releasing it ends recording; ThreadDeck then waits for Codex transcription to stabilize and submits the ordinary follow-up. If the key shows an error, confirm Codex's push-to-talk shortcut is `Control+Shift+D` and the message editor is visible.
 
+The active keyboard input source does not need to be changed to English. ThreadDeck emits the physical D key with an explicit Latin `D`, including while Korean input is active.
+
 ## Task cards are empty
 
 Open Codex Desktop and create at least one task. If a Codex update changed its local database format, collect the Stream Deck plugin log without including task titles or session contents and open an issue.
+
+## A remote task is missing or does not open
+
+Open the remote computer in Codex once so Desktop refreshes its cached task summaries. Remote task keys require Stream Deck Accessibility permission because ThreadDeck selects the exact Codex sidebar or unified-search result. If multiple remote tasks have the same exact title, ThreadDeck fails safely instead of choosing an ambiguous result; rename one task and try again.
+
+The key now distinguishes a missing Accessibility permission, an ambiguous duplicate title, and an unavailable cached remote computer or task instead of reporting the same generic open error for all three.
+
+## Only the completed task key pulses
+
+Update to the latest build. The first completion frame is sent to every visible ThreadDeck-owned key before the animation is rate-limited. Elgato-owned actions, such as the four app launchers on the Media page, keep their native rendering and cannot receive a ThreadDeck overlay.
 
 ## The queue badge does not appear
 

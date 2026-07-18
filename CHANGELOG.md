@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+- Merged local and cached remote Codex tasks into one pinned/recent list and made remote task keys activate the correct computer through Codex's own sidebar or unified search.
+- Guaranteed the first completion pulse frame reaches every visible ThreadDeck-owned key, then reduced grouped animation traffic for reliable Neo updates.
+- Made push-to-talk independent of the active keyboard input source by attaching an explicit Latin `D` to the physical shortcut event.
+- Added actionable key feedback for missing Accessibility permission, duplicate remote titles, and unavailable remote tasks, plus regression checks for completion fan-out and voice event encoding.
+
 ## 0.2.0-beta — 2026-07-18
 
 - Added hold-to-dictate on every task key: open the task, record while held, wait for transcription, and submit on release.

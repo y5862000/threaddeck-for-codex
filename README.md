@@ -38,7 +38,7 @@ Codex can keep several long-running tasks moving at once, but the desktop app is
 
 - Which task is working, waiting, completed, queued, or in error?
 - How long has it been running, and how long did it take?
-- Which pinned or recent task do I want to open next?
+- Which pinned or recent local or remote task do I want to open next?
 - How much weekly capacity is left?
 - Can I start a task, open Side Chat, dictate, send, or switch apps without hunting for a shortcut?
 - Can I hold the task I am watching, speak a follow-up, and have it submitted to that task when I release the key?
@@ -74,7 +74,7 @@ The bundled profile contains three pages. You can rearrange the supplied actions
 - **Running timer:** elapsed time updates every second while the task is active.
 - **Amber `+N` badge:** queued follow-ups detected for that task.
 - **Check and fixed timer:** the task completed and the final duration is frozen.
-- **Green completion pulse:** all visible ThreadDeck actions acknowledge completion; the matching task pulses longer and more strongly.
+- **Green completion pulse:** every visible ThreadDeck-owned key receives the first completion frame together; the matching task then pulses longer and more strongly.
 - **Queue-advance pulse:** when Codex starts the next queued follow-up, the reduced queue count is acknowledged as another completed turn.
 
 ## Quick start
@@ -106,7 +106,7 @@ The current beta sends the following fixed key combinations. If your Codex short
 | Open Side Chat | `⌥⌘S` | Side Chat key |
 
 > [!IMPORTANT]
-> Voice input is not configured automatically. Assign `Control+Shift+D` in Codex before using it. If pressing the microphone key only types `D` or does nothing, check this shortcut and Stream Deck's Accessibility permission first.
+> Voice input is not configured automatically. Assign `Control+Shift+D` in Codex before using it. ThreadDeck supplies an explicit Latin `D`, so the shortcut also works while a Korean or another non-Latin input source is active. If the key still does nothing, check this shortcut and Stream Deck's Accessibility permission first.
 
 The public plugin uses its own identifier and will not overwrite the author's private development prototype.
 
@@ -125,7 +125,7 @@ Open CodexBar once, enable Codex in its provider settings, and confirm the comma
 
 | Action | Default behavior |
 |---|---|
-| Open task | A short press opens the selected task through its local `codex://` URL. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for transcription, and submit the ordinary follow-up automatically. |
+| Open task | A short press opens a local task through `codex://`. For a remote task, ThreadDeck selects the exact Codex sidebar or unified-search result so Codex activates that task's computer before navigating. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for transcription, and submit the ordinary follow-up automatically. |
 | New task | Sends `⌥⌘O`, opening a task outside the current project with the current Codex shortcut. |
 | Side Chat | Sends `⌥⌘S`. |
 | Push-to-talk | Holds `⌃⇧D` for exactly as long as the Stream Deck key is held. Active audio-producing apps are temporarily suspended and resumed on release. |
@@ -143,12 +143,12 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 
 | Source | Access | Purpose |
 |---|---|---|
-| Codex files and Desktop logs under `~/.codex` | Read-only | Task titles, pins, status, activity, timing, service metadata, and temporary Side Chat lifecycle. |
+| Codex files and Desktop logs under `~/.codex` | Read-only | Local and cached remote task titles, hosts, pins, status, activity, timing, service metadata, and temporary Side Chat lifecycle. |
 | CodexBar CLI | Child process, optional | Weekly remaining quota only. |
 | Stream Deck plugin WebSocket | Localhost | Receives key events and sends rendered key images. |
 | macOS Accessibility / Core Audio | Local system APIs | Keyboard shortcuts, media keys, push-to-talk audio handling, and a privacy-preserving count of visible Codex queue actions. |
 
-Queue detection hashes the current Codex window title and localized queue-action labels inside the native helper. It returns only hashes and counts to the plugin; queued message text is never returned, logged, or stored. ThreadDeck never writes to Codex databases or session files. Read [SECURITY.md](SECURITY.md) before attaching logs or screenshots to an issue.
+Queue detection and remote task selection compare title fingerprints inside the native helper. Remote titles are passed to Codex search through stdin, not command-line arguments. Queued message text is never returned, logged, or stored. ThreadDeck never writes to Codex databases or session files. Read [SECURITY.md](SECURITY.md) before attaching logs or screenshots to an issue.
 
 ## Fully open source
 

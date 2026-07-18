@@ -2,7 +2,7 @@
 
 const fs = require("node:fs/promises");
 const fsSync = require("node:fs");
-const { execFile, execFileSync } = require("node:child_process");
+const { execFile, execFileSync, spawn } = require("node:child_process");
 const os = require("node:os");
 const path = require("node:path");
 const { promisify } = require("node:util");
@@ -82,7 +82,7 @@ const THREAD_ACTIONS = [
 const THREAD_COUNT = THREAD_ACTIONS.length;
 const THREAD_COMPLETION_PULSE_DURATION_MS = 5200;
 const GLOBAL_COMPLETION_PULSE_DURATION_MS = 2600;
-const GLOBAL_COMPLETION_FRAME_INTERVAL_MS = 50;
+const GLOBAL_COMPLETION_FRAME_INTERVAL_MS = 80;
 const GLOBAL_COMPLETION_GROUP_COUNT = 2;
 const COMPLETION_STARTUP_GRACE_MS = 15_000;
 const COMPLETION_OBSERVATION_OVERLAP_MS = 1_500;
@@ -195,6 +195,7 @@ const port = argument("-port");
 const pluginUUID = argument("-pluginUUID");
 const registerEvent = argument("-registerEvent");
 const snapshotMode = process.argv.includes("--snapshot");
+const completionContractMode = process.argv.includes("--verify-completion");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
@@ -202,6 +203,7 @@ const pluginStartedAtMs = Date.now();
 
 const contexts = new Map();
 const contextImages = new Map();
+const contextSentImages = new Map();
 const contextFeedback = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
@@ -231,6 +233,7 @@ let globalCompletionStartedAtMs = null;
 let globalCompletionThreadId = null;
 let globalCompletionWasRendered = false;
 let globalCompletionRenderGroup = 0;
+let globalCompletionInitialFanoutPending = false;
 let mostRecentThreadId = null;
 let lastOpenedThreadId = null;
 let lastOpenedThreadAtMs = null;
@@ -238,6 +241,7 @@ let knownSideChatIds = new Set();
 let pendingSideChatTarget = null;
 let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
 let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
+let accessibilityTrustCache = { checkedAtMs: 0, trusted: null };
 let sideChatSessionStartMs = null;
 const sideChatParentById = new Map();
 const sideChatLifecycleCache = new Map();
@@ -256,8 +260,12 @@ function setTitle(context, title) {
 }
 
 function sendImage(context, svg) {
+  if (socket?.readyState !== WebSocket.OPEN) return false;
+  if (contextSentImages.get(context) === svg) return false;
   const image = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
   send({ event: "setImage", context, payload: { target: 0, image } });
+  contextSentImages.set(context, svg);
+  return true;
 }
 
 function feedbackOverlaySvg(svg, feedback) {
@@ -544,7 +552,7 @@ function globalCompletionPulseState(nowMs = renderTimeMs()) {
 function globalCompletionChrome(effect) {
   if (!effect || effect.strength < 0.002) return "";
   const strength = effect.strength;
-  const tintOpacity = (0.24 * strength).toFixed(3);
+  const tintOpacity = (0.34 * strength).toFixed(3);
   const outerOpacity = (0.96 * strength).toFixed(3);
   const innerOpacity = (0.48 * strength).toFixed(3);
   const outerWidth = (2.2 + strength * 2.8).toFixed(2);
@@ -954,14 +962,26 @@ function currentActionSvg(action, context = null) {
 }
 
 function runKeyBridge(command, context = null) {
+  if (!accessibilityTrustedSync()) {
+    if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
+    console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
+    return false;
+  }
   execFile(KEY_BRIDGE, [command], { timeout: 2000 }, (error) => {
     if (!error) return;
     if (context) showFeedback(context, "error", "키 입력 실패");
     console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
   });
+  return true;
 }
 
 function runKeyBridgeSync(command, context = null) {
+  const releasesHeldKeys = command === "voice-up" || command === "release";
+  if (!releasesHeldKeys && !accessibilityTrustedSync()) {
+    if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
+    console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
+    return false;
+  }
   try {
     execFileSync(KEY_BRIDGE, [command], { stdio: "ignore", timeout: 1000 });
     return true;
@@ -970,6 +990,64 @@ function runKeyBridgeSync(command, context = null) {
     console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
     return false;
   }
+}
+
+function accessibilityTrustedSync(nowMs = Date.now()) {
+  const cacheMs = accessibilityTrustCache.trusted ? 30_000 : 2_000;
+  if (typeof accessibilityTrustCache.trusted === "boolean"
+      && nowMs - accessibilityTrustCache.checkedAtMs < cacheMs) {
+    return accessibilityTrustCache.trusted;
+  }
+  let trusted = false;
+  try {
+    execFileSync(KEY_BRIDGE, ["accessibility-preflight"], {
+      stdio: "ignore",
+      timeout: 800
+    });
+    trusted = true;
+  } catch {
+    trusted = false;
+  }
+  accessibilityTrustCache = { checkedAtMs: nowMs, trusted };
+  return trusted;
+}
+
+function keyBridgeExitCode(error) {
+  const value = Number(error?.exitCode ?? error?.code);
+  return Number.isInteger(value) ? value : null;
+}
+
+function runKeyBridgeWithInput(command, args, input, timeoutMs = 6000) {
+  return new Promise((resolve, reject) => {
+    const child = spawn(KEY_BRIDGE, [command, ...args], {
+      stdio: ["pipe", "ignore", "ignore"]
+    });
+    let settled = false;
+    const finish = (error = null) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (error) reject(error);
+      else resolve();
+    };
+    const timer = setTimeout(() => {
+      child.kill("SIGTERM");
+      finish(new Error(`Key bridge ${command} timed out`));
+    }, timeoutMs);
+    child.on("error", (error) => finish(error));
+    child.on("close", (code, signal) => {
+      if (code === 0) finish();
+      else {
+        const error = new Error(`Key bridge ${command} exited with ${signal ?? code ?? "unknown status"}`);
+        error.exitCode = Number.isInteger(code) ? code : null;
+        finish(error);
+      }
+    });
+    // Remote titles may contain user text. Keep them on stdin so they never
+    // appear in process listings or command-line diagnostics.
+    child.stdin.on("error", () => {});
+    child.stdin.end(String(input ?? ""), "utf8");
+  });
 }
 
 function textInputStateSync() {
@@ -1354,9 +1432,13 @@ function stringFingerprint(value) {
   return `${bytes.length}:${hash.toString(16).padStart(16, "0")}`;
 }
 
-function titleFingerprints(value) {
+function titleVariants(value) {
   const title = String(value ?? "");
-  return new Set([title, title.normalize("NFC"), title.normalize("NFD")].map(stringFingerprint));
+  return new Set([title, title.normalize("NFC"), title.normalize("NFD")]);
+}
+
+function titleFingerprints(value) {
+  return new Set([...titleVariants(value)].map(stringFingerprint));
 }
 
 const QUEUED_MESSAGE_DELETE_FINGERPRINTS = new Set(QUEUED_MESSAGE_DELETE_LABELS.map(stringFingerprint));
@@ -2059,6 +2141,55 @@ async function readThreadRows() {
   return Array.isArray(rows) ? rows : [];
 }
 
+async function readRemoteThreadRows() {
+  try {
+    const state = JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
+    const persistedValue = state?.["electron-persisted-atom-state"];
+    const persisted = typeof persistedValue === "string"
+      ? JSON.parse(persistedValue)
+      : persistedValue;
+    if (!persisted || typeof persisted !== "object") return [];
+
+    const byId = new Map();
+    for (const [key, summaries] of Object.entries(persisted)) {
+      if (!key.startsWith("remote-thread-summaries-v2:") || !Array.isArray(summaries)) continue;
+      const cachedHostId = key.slice("remote-thread-summaries-v2:".length);
+      for (const summary of summaries) {
+        const id = summary?.conversationId;
+        const hostId = typeof summary?.hostId === "string" && summary.hostId
+          ? summary.hostId
+          : cachedHostId;
+        const title = typeof summary?.title === "string" ? summary.title.trim() : "";
+        if (!UUID_PATTERN.test(id ?? "") || !hostId || hostId === "local" || !title) continue;
+
+        const updatedAt = Number(summary?.recencyAt ?? summary?.updatedAt ?? 0);
+        const createdAt = Number(summary?.createdAt ?? updatedAt);
+        const existing = byId.get(id);
+        if (existing && threadRecencyMs(existing) >= (updatedAt > 100_000_000_000 ? updatedAt : updatedAt * 1000)) {
+          continue;
+        }
+        byId.set(id, {
+          id,
+          hostId,
+          remote: true,
+          title,
+          cwd: typeof summary?.cwd === "string" ? summary.cwd : "",
+          rollout_path: null,
+          recency_at: updatedAt,
+          updated_at: Number(summary?.updatedAt ?? updatedAt),
+          createdAtMs: createdAt > 100_000_000_000 ? createdAt : createdAt * 1000,
+          hasUnreadTurn: Boolean(summary?.hasUnreadTurn),
+          threadRuntimeStatus: summary?.threadRuntimeStatus ?? { type: "notLoaded" },
+          workspaceKind: summary?.workspaceKind ?? "project"
+        });
+      }
+    }
+    return [...byId.values()].sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+  } catch {
+    return [];
+  }
+}
+
 async function readSidebarThreadNames() {
   const names = new Map();
   try {
@@ -2247,6 +2378,47 @@ async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
 }
 
 async function statusForThread(thread, activeThreadIds) {
+  if (thread.remote) {
+    const runtimeStatus = thread.threadRuntimeStatus ?? { type: "notLoaded" };
+    if (runtimeStatus.type === "active") {
+      const flags = Array.isArray(runtimeStatus.activeFlags) ? runtimeStatus.activeFlags : [];
+      const waitingOnApproval = flags.includes("waitingOnApproval");
+      const waitingOnUserInput = flags.includes("waitingOnUserInput");
+      return {
+        status: "working",
+        startedAtMs: null,
+        endedAtMs: null,
+        reasoningEffort: null,
+        serviceTier: "default",
+        activity: waitingOnApproval
+          ? { kind: "request", label: "원격 승인 대기" }
+          : waitingOnUserInput
+            ? { kind: "request", label: "원격 입력 대기" }
+            : { kind: "command", label: "원격 작업" }
+      };
+    }
+    if (runtimeStatus.type === "systemError") {
+      return {
+        status: "error",
+        startedAtMs: null,
+        endedAtMs: null,
+        reasoningEffort: null,
+        serviceTier: "default",
+        activity: { kind: "error", label: "원격 오류" }
+      };
+    }
+    return {
+      status: "idle",
+      startedAtMs: null,
+      endedAtMs: null,
+      reasoningEffort: null,
+      serviceTier: "default",
+      activity: {
+        kind: thread.hasUnreadTurn ? "answer" : "idle",
+        label: thread.hasUnreadTurn ? "원격 확인 필요" : "원격 열기"
+      }
+    };
+  }
   const isActive = activeThreadIds.has(thread.id);
   if (!thread.rollout_path) return {
     status: isActive ? "working" : "idle",
@@ -2287,15 +2459,21 @@ async function statusForThread(thread, activeThreadIds) {
 
 async function readTopThreads() {
   const queueWindowsPromise = readCodexQueueWindows();
-  const [rows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
+  const [rows, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
     readThreadRows(),
+    readRemoteThreadRows(),
     readPinnedIds(),
     readActiveThreadIds(),
     readSidebarThreadNames()
   ]);
-  const visibleRows = rows
+  const localRows = rows
     .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
     .filter((row) => !isInternalAmbientTitle(row.title));
+  const localIds = new Set(localRows.map((row) => row.id));
+  const visibleRows = [
+    ...localRows,
+    ...remoteRows.filter((row) => !localIds.has(row.id) && !isInternalAmbientTitle(row.title))
+  ];
   const sideChats = await readEphemeralSideChats(visibleRows, visibleRows[0]?.id ?? null);
   const sideChatLifecycles = await readSideChatLifecycles(sideChats);
   const openSideChats = sideChats.filter((thread) => !closedSideChatAtMs.has(thread.id)
@@ -2419,6 +2597,7 @@ function startCompletionEffects(threadId, nowMs = Date.now(), reason = "completi
   globalCompletionThreadId = threadId;
   globalCompletionWasRendered = false;
   globalCompletionRenderGroup = 0;
+  globalCompletionInitialFanoutPending = true;
 }
 
 function clearCompletionEffect(threadId) {
@@ -2429,22 +2608,24 @@ function clearCompletionEffect(threadId) {
 function renderGlobalCompletionContexts(nowMs = Date.now()) {
   const effect = globalCompletionPulseState(nowMs);
   if (effect) {
-    // Update alternating halves every 50 ms. Each plugin-owned key receives a
-    // steady 10 fps animation, while Stream Deck sees small image bursts
-    // instead of every SVG arriving at once. The completed key is rendered
-    // here too, preventing its old 30 fps loop from starving nearby buttons.
+    // Guarantee one strong frame on every visible plugin-owned key, then
+    // update alternating halves at a device-safe rate. Splitting the very
+    // first frame allowed the completed task's own animation to reach Neo
+    // while acknowledgements for the other keys remained queued.
     globalCompletionWasRendered = true;
     const entries = [...contexts.entries()];
     const renderGroup = globalCompletionRenderGroup;
     globalCompletionRenderGroup = (globalCompletionRenderGroup + 1) % GLOBAL_COMPLETION_GROUP_COUNT;
     for (let index = 0; index < entries.length; index += 1) {
-      if (index % GLOBAL_COMPLETION_GROUP_COUNT !== renderGroup) continue;
+      if (!globalCompletionInitialFanoutPending
+          && index % GLOBAL_COMPLETION_GROUP_COUNT !== renderGroup) continue;
       const [context, action] = entries[index];
       const svg = currentActionSvg(action, context) ?? contextImages.get(context);
       if (!svg) continue;
       contextImages.set(context, svg);
       sendImage(context, composedContextSvg(context, svg, nowMs));
     }
+    globalCompletionInitialFanoutPending = false;
     return true;
   }
 
@@ -2453,6 +2634,7 @@ function renderGlobalCompletionContexts(nowMs = Date.now()) {
   globalCompletionStartedAtMs = null;
   globalCompletionThreadId = null;
   globalCompletionRenderGroup = 0;
+  globalCompletionInitialFanoutPending = false;
   for (const [context, action] of contexts) {
     const svg = currentActionSvg(action, context) ?? contextImages.get(context);
     if (!svg) continue;
@@ -2625,18 +2807,75 @@ async function openThread(context, slot) {
   if (thread.ephemeral) {
     return openListedSideChat(context, thread);
   }
+  if (thread.remote && !accessibilityTrustedSync()) {
+    showFeedback(context, "error", "손쉬운 사용", 2200);
+    return false;
+  }
   pendingSideChatTarget = null;
   lastOpenedThreadId = thread.id;
   lastOpenedThreadAtMs = Date.now();
   showFeedback(context, "loading", "여는 중");
   try {
+    if (thread.remote) {
+      await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
+      await new Promise((resolve) => setTimeout(resolve, 350));
+      let opened = false;
+      let lastError = null;
+      let sawAmbiguousTitle = false;
+      for (const fingerprint of titleFingerprints(thread.title)) {
+        try {
+          await execFileAsync(KEY_BRIDGE, ["codex-open-thread", thread.id, fingerprint], {
+            timeout: 4000,
+            maxBuffer: 64 * 1024
+          });
+          opened = true;
+          break;
+        } catch (error) {
+          if (keyBridgeExitCode(error) === 3) sawAmbiguousTitle = true;
+          lastError = error;
+        }
+      }
+      // Remote rows outside the currently expanded sidebar are not mounted in
+      // Chromium's accessibility tree. Codex's unified task search includes
+      // every connected host, and pressing its exact result runs Codex's own
+      // host activation before navigation.
+      if (!opened) {
+        for (const title of titleVariants(thread.title)) {
+          try {
+            await runKeyBridgeWithInput(
+              "codex-search-thread",
+              [thread.id, stringFingerprint(title)],
+              title
+            );
+            opened = true;
+            break;
+          } catch (error) {
+            if (keyBridgeExitCode(error) === 3) sawAmbiguousTitle = true;
+            lastError = error;
+          }
+        }
+      }
+      if (!opened && sawAmbiguousTitle && keyBridgeExitCode(lastError) !== 3) {
+        const ambiguousError = new Error("remote thread title is ambiguous");
+        ambiguousError.exitCode = 3;
+        lastError = ambiguousError;
+      }
+      if (!opened) throw lastError ?? new Error("remote thread row unavailable");
+      showFeedback(context, "success", "원격 전환");
+      setTimeout(() => void refreshThreads(), 1000);
+      return true;
+    }
     await execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], { timeout: 5000 });
     showFeedback(context, "success", "전환 완료");
     setTimeout(() => void refreshThreads(), 1000);
     return true;
   } catch (error) {
-    showFeedback(context, "error", "열기 실패");
-    console.error(`Could not open Codex thread: ${error?.message ?? "unknown error"}`);
+    const exitCode = keyBridgeExitCode(error);
+    const label = thread.remote
+      ? exitCode === 3 ? "제목 중복" : "원격 확인"
+      : "열기 실패";
+    showFeedback(context, "error", label, thread.remote ? 1800 : undefined);
+    console.error(`Could not open Codex ${thread.remote ? "remote " : ""}thread: ${error?.message ?? "unknown error"}`);
     return false;
   }
 }
@@ -2773,6 +3012,7 @@ function registerPlugin() {
       voiceStateByContext.delete(message.context);
       contexts.delete(message.context);
       contextImages.delete(message.context);
+      contextSentImages.delete(message.context);
       contextFeedback.delete(message.context);
     } else if (message.event === "keyDown" && contexts.has(message.context)) {
       const action = contexts.get(message.context);
@@ -2856,6 +3096,9 @@ function resetDemoEffects() {
   voiceTargetThreadByContext.clear();
   globalCompletionStartedAtMs = null;
   globalCompletionThreadId = null;
+  globalCompletionWasRendered = false;
+  globalCompletionRenderGroup = 0;
+  globalCompletionInitialFanoutPending = false;
 }
 
 function demoPreviewSvg(keySvgs) {
@@ -2976,6 +3219,77 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   console.log(`Rendered ${frameCount} animation frames in ${resolvedDirectory}`);
 }
 
+function verifyCompletionFanout() {
+  const nowMs = DEMO_EPOCH_MS + 10_000;
+  const targetId = DEMO_COMPLETED_ID;
+  const actions = [
+    ACTIONS.weekly,
+    ACTIONS.thread1,
+    ACTIONS.sideChat,
+    ACTIONS.newThread,
+    ACTIONS.voice,
+    ACTIONS.send,
+    ACTIONS.appSwitch,
+    ACTIONS.pagePrevious
+  ];
+  const messages = [];
+  socket = {
+    readyState: WebSocket.OPEN,
+    send(raw) {
+      messages.push(JSON.parse(raw));
+    }
+  };
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  actions.forEach((action, index) => contexts.set(`completion-context-${index}`, action));
+  threadSlots = Array(THREAD_COUNT).fill(null);
+  threadSlots[0] = {
+    id: targetId,
+    title: "완료 전파 검증",
+    pinned: false,
+    status: "completed",
+    startedAtMs: nowMs - 20_000,
+    endedAtMs: nowMs,
+    activity: { kind: "complete", label: "작업 완료" },
+    reasoningEffort: "medium",
+    serviceTier: "default",
+    queueCount: 0
+  };
+  fixedRenderTimeMs = nowMs;
+  startCompletionEffects(targetId, nowMs, "completion");
+  renderGlobalCompletionContexts(nowMs);
+
+  const imageMessages = messages.filter((message) => message.event === "setImage");
+  const counts = new Map();
+  let globalChromeCount = 0;
+  for (const message of imageMessages) {
+    counts.set(message.context, (counts.get(message.context) ?? 0) + 1);
+    const image = String(message.payload?.image ?? "");
+    const encoded = image.startsWith("data:image/svg+xml;base64,")
+      ? image.slice("data:image/svg+xml;base64,".length)
+      : "";
+    const svg = encoded ? Buffer.from(encoded, "base64").toString("utf8") : "";
+    if (svg.includes(`<rect x="5.4" y="5.4"`) && svg.includes(`stroke="${THEME.green}"`)) {
+      globalChromeCount += 1;
+    }
+  }
+  const allContextsSentOnce = actions.every((_, index) => counts.get(`completion-context-${index}`) === 1);
+  const passed = imageMessages.length === actions.length
+    && allContextsSentOnce
+    && globalChromeCount === actions.length - 1
+    && globalCompletionInitialFanoutPending === false;
+  console.log(JSON.stringify({
+    passed,
+    visibleContexts: actions.length,
+    firstFrameImages: imageMessages.length,
+    nonTargetGlobalChrome: globalChromeCount
+  }));
+  if (!passed) process.exitCode = 1;
+  fixedRenderTimeMs = null;
+  resetDemoEffects();
+}
+
 process.once("SIGTERM", () => {
   releaseVoiceKeysSync();
   process.exit(0);
@@ -2986,17 +3300,20 @@ process.once("SIGINT", () => {
 });
 process.on("exit", releaseVoiceKeysSync);
 
-if (demoOutput || demoLightOutput || demoAnimationDirectory) {
+if (completionContractMode) {
+  verifyCompletionFanout();
+} else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
   if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
   else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
 } else if (snapshotMode) {
   readTopThreads()
     .then((threads) => {
-      console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount }) => ({
+      console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, remote, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount }) => ({
         id,
         title: normalizeTitle(title),
         pinned,
         ephemeral: Boolean(ephemeral),
+        remote: Boolean(remote),
         status,
         activity,
         reasoningEffort,
