@@ -93,6 +93,7 @@ const VOICE_TRANSCRIPTION_POLL_INTERVAL_MS = 100;
 const VOICE_TEXT_PROBE_INTERVAL_MS = 200;
 const VOICE_TRANSCRIPTION_STABLE_MS = 450;
 const VOICE_TRANSCRIPTION_TIMEOUT_MS = 12_000;
+const VOICE_START_VERIFY_MS = 1_500;
 const VOICE_COMPLETE_DISPLAY_MS = 900;
 const VOICE_ERROR_DISPLAY_MS = 1_300;
 const VOICE_TARGET_OPEN_HINT_MS = 120_000;
@@ -215,6 +216,7 @@ const voiceStateByContext = new Map();
 const voiceStateResetAtMs = new Map();
 const voiceTranscriptionByContext = new Map();
 const voiceTargetThreadByContext = new Map();
+const voiceStartVerificationTimers = new Map();
 const sendPressStartedAt = new Map();
 const sendLongPressTimers = new Map();
 const sendLongPressArmedContexts = new Set();
@@ -983,7 +985,10 @@ function runKeyBridgeSync(command, context = null) {
     return false;
   }
   try {
-    execFileSync(KEY_BRIDGE, [command], { stdio: "ignore", timeout: 1000 });
+    execFileSync(KEY_BRIDGE, [command], {
+      stdio: "ignore",
+      timeout: command === "voice-up" ? 2000 : 1000
+    });
     return true;
   } catch (error) {
     if (context) showFeedback(context, "error", "키 입력 실패");
@@ -1312,6 +1317,41 @@ function runningMediaProcessesSync() {
   return [];
 }
 
+function codexAudioInputActiveSync() {
+  try {
+    const output = execFileSync(KEY_BRIDGE, ["audio-input-processes"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 1000
+    });
+    return output.split(/\r?\n/).some((line) => {
+      const [, bundleId = ""] = line.split("\t");
+      return bundleId.trim().startsWith("com.openai.codex");
+    });
+  } catch {
+    return false;
+  }
+}
+
+function clearVoiceStartVerification(context) {
+  const timer = voiceStartVerificationTimers.get(context);
+  if (timer) clearTimeout(timer);
+  voiceStartVerificationTimers.delete(context);
+}
+
+function verifyVoiceStarted(context) {
+  clearVoiceStartVerification(context);
+  if (!voiceHeldContexts.has(context) || codexAudioInputActiveSync()) return;
+
+  const failedContexts = [...voiceHeldContexts];
+  voiceHeldContexts.clear();
+  for (const failedContext of failedContexts) clearVoiceStartVerification(failedContext);
+  runKeyBridgeSync("voice-up", context);
+  resumeMediaAfterVoiceSync();
+  for (const failedContext of failedContexts) failVoiceTranscription(failedContext);
+  console.error("Codex audio input did not start after the push-to-talk shortcut");
+}
+
 function pauseMediaForVoiceSync(context = null) {
   if (voiceSuspendedMediaPids.size > 0) return;
   for (const { pid, bundleId } of runningMediaProcessesSync()) {
@@ -1361,10 +1401,16 @@ function beginVoiceHoldSync(context, options = {}) {
   }
   voiceHeldContexts.add(context);
   setVoiceVisualState(context, "recording");
+  clearVoiceStartVerification(context);
+  voiceStartVerificationTimers.set(
+    context,
+    setTimeout(() => verifyVoiceStarted(context), VOICE_START_VERIFY_MS)
+  );
   return true;
 }
 
 function endVoiceHoldSync(context, trackTranscription = true) {
+  clearVoiceStartVerification(context);
   if (!voiceHeldContexts.delete(context)) return;
   if (voiceHeldContexts.size > 0) return;
   const released = runKeyBridgeSync("voice-up", context);
@@ -1405,6 +1451,8 @@ function releaseVoiceKeysSync() {
   voiceStateByContext.clear();
   voiceStateResetAtMs.clear();
   voiceTargetThreadByContext.clear();
+  for (const timer of voiceStartVerificationTimers.values()) clearTimeout(timer);
+  voiceStartVerificationTimers.clear();
   for (const state of threadPressByContext.values()) {
     if (state.timer) clearTimeout(state.timer);
   }

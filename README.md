@@ -92,7 +92,7 @@ The bundled profile contains three pages. You can rearrange the supplied actions
 2. Double-click the file and approve installation in Stream Deck.
 3. Import the bundled **ThreadDeck for Codex** Neo profile when prompted.
 4. In **System Settings → Privacy & Security → Accessibility**, allow **Stream Deck**. This is required for keyboard/media actions and the local queue counter.
-5. In Codex Desktop, open **Settings → Keyboard Shortcuts**, check the shortcuts below, and explicitly assign push-to-talk to `⌃⇧D`.
+5. In Codex Desktop, open **Settings → Keyboard Shortcuts** and confirm **Start dictation** is `⌃⇧D` (the current Codex default).
 6. Open Codex Desktop and test a task key and the microphone key to confirm both navigation and dictation.
 
 ### Required Codex shortcut setup
@@ -101,12 +101,12 @@ The current beta sends the following fixed key combinations. If your Codex short
 
 | Codex function | Keys sent by ThreadDeck | Used by |
 |---|---:|---|
-| Voice input / push-to-talk | `⌃⇧D` | Dedicated microphone key and long-press task dictation |
+| Start dictation | `⌃⇧D` | Dedicated microphone key and long-press task dictation |
 | Open a new task outside the project | `⌥⌘O` | New task key |
 | Open Side Chat | `⌥⌘S` | Side Chat key |
 
 > [!IMPORTANT]
-> Voice input is not configured automatically. Assign `Control+Shift+D` in Codex before using it. ThreadDeck supplies an explicit Latin `D`, so the shortcut also works while a Korean or another non-Latin input source is active. If the key still does nothing, check this shortcut and Stream Deck's Accessibility permission first.
+> Current Codex builds assign **Start dictation** to `Control+Shift+D` by default. Restore that binding if you changed it. ThreadDeck supplies an explicit Latin `D`, so the shortcut works while a Korean or another non-Latin input source is active. On release, ThreadDeck activates Codex's visible stop-dictation control because the app-scoped shortcut itself ignores key-up events.
 
 The public plugin uses its own identifier and will not overwrite the author's private development prototype.
 
@@ -128,7 +128,7 @@ Open CodexBar once, enable Codex in its provider settings, and confirm the comma
 | Open task | A short press opens a local task through `codex://`. For a remote task, ThreadDeck selects the exact Codex sidebar or unified-search result so Codex activates that task's computer before navigating. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for transcription, and submit the ordinary follow-up automatically. |
 | New task | Sends `⌥⌘O`, opening a task outside the current project with the current Codex shortcut. |
 | Side Chat | Sends `⌥⌘S`. |
-| Push-to-talk | Holds `⌃⇧D` for exactly as long as the Stream Deck key is held. Active audio-producing apps are temporarily suspended and resumed on release. |
+| Push-to-talk | Starts dictation with `⌃⇧D`, then activates Codex's stop-dictation control when the Stream Deck key is released. Active audio-producing apps are temporarily suspended and resumed around the hold. |
 | Send | Short press sends Return; holding for 0.6 seconds and releasing sends Command+Return. The key turns blue when the long-press action is armed. |
 | App switcher | Holds Command and taps Tab for a native app switch. |
 | Media | Previous/next, seek, play/pause, mute, and volume actions are available. |

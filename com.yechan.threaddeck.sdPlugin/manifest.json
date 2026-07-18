@@ -189,7 +189,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "누르는 동안 출력 장치와 무관하게 재생 중인 미디어 앱을 잠시 멈추고 Codex 음성 입력 단축키 Ctrl+Shift+D를 유지합니다. 놓으면 미디어를 그대로 재개합니다.",
+      "Tooltip": "누르면 Codex 음성 입력 단축키 Ctrl+Shift+D를 시작하고 재생 중인 미디어 앱을 잠시 멈춥니다. 놓으면 Codex 음성 입력을 끝내고 미디어를 재개합니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.voice"
     },

@@ -10,7 +10,7 @@ Install CodexBar and confirm that `codexbar usage --format json` works in Termin
 
 Open **System Settings → Privacy & Security → Accessibility** and allow **Stream Deck**. Quit and reopen Stream Deck after changing the permission.
 
-For task-key dictation, keep holding the task key while speaking. Releasing it ends recording; ThreadDeck then waits for Codex transcription to stabilize and submits the ordinary follow-up. If the key shows an error, confirm Codex's push-to-talk shortcut is `Control+Shift+D` and the message editor is visible.
+For task-key dictation, keep holding the task key while speaking. Releasing it activates Codex's visible stop-dictation control; ThreadDeck then waits for transcription to stabilize and submits the ordinary follow-up. If the key shows an error, confirm **Start dictation** is `Control+Shift+D`, Codex is frontmost, and the message editor is visible. ThreadDeck now detects when audio input never starts instead of leaving a false recording state on the key.
 
 The active keyboard input source does not need to be changed to English. ThreadDeck emits the physical D key with an explicit Latin `D`, including while Korean input is active.
 

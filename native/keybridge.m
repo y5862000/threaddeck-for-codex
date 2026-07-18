@@ -36,6 +36,8 @@ enum {
   MEDIA_REWIND = 20
 };
 
+static bool stop_codex_composer_dictation_if_visible(void);
+
 static CGEventRef create_key_event(
   CGKeyCode key,
   bool down,
@@ -82,17 +84,30 @@ static void voice_down(void) {
   post_latin_key(KEY_D, true, kCGEventFlagMaskControl | kCGEventFlagMaskShift, 'D');
 }
 
-static void voice_up(void) {
-  post_latin_key(KEY_D, false, kCGEventFlagMaskControl | kCGEventFlagMaskShift, 'D');
+static void release_voice_keys(void) {
+  // Keep the explicit Latin character on key-down so the shortcut works with
+  // non-Latin input sources, but release the physical key without a Unicode
+  // payload. Codex's global hold-hotkey watcher matches the physical key-up.
+  post_key(KEY_D, false, kCGEventFlagMaskControl | kCGEventFlagMaskShift);
   post_key(KEY_SHIFT, false, kCGEventFlagMaskControl);
   post_key(KEY_CONTROL, false, 0);
 }
 
-static bool voice_event_is_layout_independent(bool down) {
+static void voice_up(void) {
+  release_voice_keys();
+  // Current Codex builds expose Control+Shift+D as the app-scoped "Start
+  // dictation" command. Its key-up is intentionally ignored, so a Stream Deck
+  // hold would otherwise keep recording forever. Activate the visible stop
+  // control on release; older builds with a true global hold shortcut have
+  // already stopped after the physical key-up, making this a safe no-op.
+  stop_codex_composer_dictation_if_visible();
+}
+
+static bool voice_down_event_is_layout_independent(void) {
   UniChar expected = 'D';
   CGEventRef event = create_key_event(
     KEY_D,
-    down,
+    true,
     kCGEventFlagMaskControl | kCGEventFlagMaskShift,
     &expected,
     1
@@ -104,6 +119,23 @@ static bool voice_event_is_layout_independent(bool down) {
   bool matches = CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == KEY_D
     && actual_count == 1
     && actual[0] == expected
+    && (CGEventGetFlags(event) & (kCGEventFlagMaskControl | kCGEventFlagMaskShift))
+      == (kCGEventFlagMaskControl | kCGEventFlagMaskShift);
+  CFRelease(event);
+  return matches;
+}
+
+static bool voice_up_event_is_physical_release(void) {
+  CGEventRef event = create_key_event(
+    KEY_D,
+    false,
+    kCGEventFlagMaskControl | kCGEventFlagMaskShift,
+    NULL,
+    0
+  );
+  if (event == NULL) return false;
+  bool matches = CGEventGetType(event) == kCGEventKeyUp
+    && CGEventGetIntegerValueField(event, kCGKeyboardEventKeycode) == KEY_D
     && (CGEventGetFlags(event) & (kCGEventFlagMaskControl | kCGEventFlagMaskShift))
       == (kCGEventFlagMaskControl | kCGEventFlagMaskShift);
   CFRelease(event);
@@ -139,7 +171,7 @@ static void tap_media_key(int key) {
   post_media_key(key, false);
 }
 
-static void print_running_audio_processes(void) {
+static void print_running_audio_processes(AudioObjectPropertySelector running_selector) {
   AudioObjectPropertyAddress address = {
     kAudioHardwarePropertyProcessObjectList,
     kAudioObjectPropertyScopeGlobal,
@@ -158,7 +190,7 @@ static void print_running_audio_processes(void) {
   for (UInt32 index = 0; index < count; index += 1) {
     UInt32 is_running = 0;
     UInt32 value_size = sizeof(is_running);
-    address.mSelector = kAudioProcessPropertyIsRunningOutput;
+    address.mSelector = running_selector;
     if (AudioObjectGetPropertyData(processes[index], &address, 0, NULL, &value_size, &is_running) != noErr || !is_running) continue;
 
     pid_t pid = 0;
@@ -915,103 +947,289 @@ static int print_codex_queue_state(void) {
 #define CODEX_THREAD_TARGET_MAX 64
 
 typedef struct {
-  const char *uuid;
   StringFingerprint fingerprint;
-  bool use_uuid;
+  CFArrayRef attributes;
   AXUIElementRef targets[CODEX_THREAD_TARGET_MAX];
   unsigned target_count;
   unsigned matched_elements;
   unsigned visited;
 } CodexThreadTargetState;
 
-static bool copy_cfstring_utf8(CFTypeRef value, char **result) {
-  *result = NULL;
-  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return false;
-  CFStringRef string = (CFStringRef)value;
-  CFIndex capacity = CFStringGetMaximumSizeForEncoding(
-    CFStringGetLength(string),
-    kCFStringEncodingUTF8
-  ) + 1;
-  char *utf8 = calloc((size_t)capacity, sizeof(char));
-  if (utf8 == NULL || !CFStringGetCString(string, utf8, capacity, kCFStringEncodingUTF8)) {
-    free(utf8);
+enum {
+  THREAD_ATTR_TITLE = 0,
+  THREAD_ATTR_VALUE,
+  THREAD_ATTR_DESCRIPTION,
+  THREAD_ATTR_HELP,
+  THREAD_ATTR_IDENTIFIER,
+  THREAD_ATTR_URL,
+  THREAD_ATTR_DOM_IDENTIFIER,
+  THREAD_ATTR_HIDDEN,
+  THREAD_ATTR_CHILDREN,
+  THREAD_ATTR_COUNT
+};
+
+static bool click_element_center(AXUIElementRef element) {
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  if (!copy_element_position(element, &position)
+      || !copy_element_size(element, &size)
+      || size.width < 2
+      || size.height < 2) return false;
+
+  CGPoint click_position = {
+    .x = position.x + size.width / 2,
+    .y = position.y + size.height / 2
+  };
+  CGEventRef current = CGEventCreate(NULL);
+  CGPoint original_position = current != NULL
+    ? CGEventGetLocation(current)
+    : click_position;
+  if (current != NULL) CFRelease(current);
+
+  CGEventRef down = CGEventCreateMouseEvent(
+    NULL,
+    kCGEventLeftMouseDown,
+    click_position,
+    kCGMouseButtonLeft
+  );
+  CGEventRef up = CGEventCreateMouseEvent(
+    NULL,
+    kCGEventLeftMouseUp,
+    click_position,
+    kCGMouseButtonLeft
+  );
+  if (down == NULL || up == NULL) {
+    if (down != NULL) CFRelease(down);
+    if (up != NULL) CFRelease(up);
     return false;
   }
-  *result = utf8;
+  CGEventPost(kCGHIDEventTap, down);
+  usleep(20000);
+  CGEventPost(kCGHIDEventTap, up);
+  CFRelease(down);
+  CFRelease(up);
+  usleep(50000);
+  CGWarpMouseCursorPosition(original_position);
   return true;
 }
 
-static bool element_supports_press(AXUIElementRef element) {
-  CFArrayRef actions = NULL;
-  if (AXUIElementCopyActionNames(element, &actions) != kAXErrorSuccess || actions == NULL) {
-    if (actions != NULL) CFRelease(actions);
-    return false;
-  }
-  bool supports_press = CFArrayContainsValue(
-    actions,
-    CFRangeMake(0, CFArrayGetCount(actions)),
-    kAXPressAction
-  );
-  CFRelease(actions);
-  return supports_press;
+#define CODEX_DICTATION_BUTTON_MAX 96
+
+typedef struct {
+  AXUIElementRef element;
+  CGPoint position;
+  CGSize size;
+} CodexDictationButton;
+
+typedef struct {
+  CFArrayRef attributes;
+  CodexDictationButton buttons[CODEX_DICTATION_BUTTON_MAX];
+  unsigned button_count;
+  unsigned visited;
+} CodexDictationButtonState;
+
+enum {
+  DICTATION_ATTR_ROLE = 0,
+  DICTATION_ATTR_HIDDEN,
+  DICTATION_ATTR_POSITION,
+  DICTATION_ATTR_SIZE,
+  DICTATION_ATTR_CHILDREN,
+  DICTATION_ATTR_COUNT
+};
+
+static bool copy_batched_point(CFArrayRef values, CFIndex index, CGPoint *point) {
+  if (values == NULL || CFArrayGetCount(values) <= index) return false;
+  CFTypeRef value = CFArrayGetValueAtIndex(values, index);
+  return value != NULL
+    && CFGetTypeID(value) == AXValueGetTypeID()
+    && AXValueGetValue((AXValueRef)value, kAXValueCGPointType, point);
 }
 
-static AXUIElementRef copy_nearest_press_target(AXUIElementRef element) {
-  AXUIElementRef current = (AXUIElementRef)CFRetain(element);
-  for (unsigned depth = 0; depth < 8 && current != NULL; depth += 1) {
-    if (element_supports_press(current)) return current;
-    CFTypeRef parent_value = NULL;
-    if (AXUIElementCopyAttributeValue(current, kAXParentAttribute, &parent_value) != kAXErrorSuccess
-        || parent_value == NULL || CFGetTypeID(parent_value) != AXUIElementGetTypeID()) {
-      if (parent_value != NULL) CFRelease(parent_value);
-      CFRelease(current);
-      return NULL;
-    }
-    CFRelease(current);
-    current = (AXUIElementRef)parent_value;
-  }
-  if (current != NULL) CFRelease(current);
-  return NULL;
+static bool copy_batched_size(CFArrayRef values, CFIndex index, CGSize *size) {
+  if (values == NULL || CFArrayGetCount(values) <= index) return false;
+  CFTypeRef value = CFArrayGetValueAtIndex(values, index);
+  return value != NULL
+    && CFGetTypeID(value) == AXValueGetTypeID()
+    && AXValueGetValue((AXValueRef)value, kAXValueCGSizeType, size);
 }
 
-static bool element_attribute_matches_uuid(
+static void collect_codex_dictation_buttons(
   AXUIElementRef element,
-  CFStringRef attribute,
-  const char *uuid
+  unsigned depth,
+  CodexDictationButtonState *state
 ) {
-  CFTypeRef value = NULL;
-  if (AXUIElementCopyAttributeValue(element, attribute, &value) != kAXErrorSuccess
-      || value == NULL) {
-    if (value != NULL) CFRelease(value);
-    return false;
+  if (element == NULL || depth > 30 || state->visited >= 6000) return;
+  state->visited += 1;
+
+  CFArrayRef values = NULL;
+  AXError error = AXUIElementCopyMultipleAttributeValues(
+    element,
+    state->attributes,
+    0,
+    &values
+  );
+  if (error != kAXErrorSuccess || values == NULL
+      || CFArrayGetCount(values) < DICTATION_ATTR_COUNT) {
+    if (values != NULL) CFRelease(values);
+    return;
   }
-  char *utf8 = NULL;
-  bool found = copy_cfstring_utf8(value, &utf8) && strstr(utf8, uuid) != NULL;
-  free(utf8);
-  CFRelease(value);
-  return found;
+
+  CFTypeRef role = CFArrayGetValueAtIndex(values, DICTATION_ATTR_ROLE);
+  CFTypeRef hidden = CFArrayGetValueAtIndex(values, DICTATION_ATTR_HIDDEN);
+  bool is_button = role != NULL
+    && CFGetTypeID(role) == CFStringGetTypeID()
+    && CFEqual(role, kAXButtonRole);
+  bool is_hidden = hidden != NULL
+    && CFGetTypeID(hidden) == CFBooleanGetTypeID()
+    && CFBooleanGetValue((CFBooleanRef)hidden);
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  bool has_geometry = copy_batched_point(values, DICTATION_ATTR_POSITION, &position)
+    && copy_batched_size(values, DICTATION_ATTR_SIZE, &size);
+  bool is_compact_square = size.width >= 26
+    && size.width <= 32
+    && size.height >= 26
+    && size.height <= 32;
+  if (is_button && !is_hidden && has_geometry && is_compact_square
+      && state->button_count < CODEX_DICTATION_BUTTON_MAX) {
+    state->buttons[state->button_count++] = (CodexDictationButton) {
+      .element = (AXUIElementRef)CFRetain(element),
+      .position = position,
+      .size = size
+    };
+  }
+
+  CFTypeRef children_value = CFArrayGetValueAtIndex(values, DICTATION_ATTR_CHILDREN);
+  if (children_value != NULL && CFGetTypeID(children_value) == CFArrayGetTypeID()) {
+    CFArrayRef children = (CFArrayRef)children_value;
+    for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+      CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+      if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+        collect_codex_dictation_buttons((AXUIElementRef)child, depth + 1, state);
+      }
+    }
+  }
+  CFRelease(values);
 }
 
-static bool element_matches_thread_target(
-  AXUIElementRef element,
+static void release_codex_dictation_buttons(CodexDictationButtonState *state) {
+  for (unsigned index = 0; index < state->button_count; index += 1) {
+    if (state->buttons[index].element != NULL) CFRelease(state->buttons[index].element);
+    state->buttons[index].element = NULL;
+  }
+  state->button_count = 0;
+}
+
+static bool codex_is_frontmost(void) {
+  @autoreleasepool {
+    NSString *bundle_id = NSWorkspace.sharedWorkspace.frontmostApplication.bundleIdentifier;
+    return [bundle_id isEqualToString:@"com.openai.codex"];
+  }
+}
+
+static bool stop_codex_composer_dictation_if_visible(void) {
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) return false;
+  AXUIElementSetMessagingTimeout(application, 0.5);
+
+  CFTypeRef window_value = NULL;
+  if (AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute, &window_value)
+        != kAXErrorSuccess
+      || window_value == NULL
+      || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
+    if (window_value != NULL) CFRelease(window_value);
+    CFRelease(application);
+    return false;
+  }
+  AXUIElementRef window = (AXUIElementRef)window_value;
+  CGPoint window_origin = CGPointZero;
+  CGSize window_size = CGSizeZero;
+  if (!copy_element_position(window, &window_origin)
+      || !copy_element_size(window, &window_size)) {
+    CFRelease(window_value);
+    CFRelease(application);
+    return false;
+  }
+
+  const void *attribute_values[DICTATION_ATTR_COUNT] = {
+    kAXRoleAttribute,
+    kAXHiddenAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute,
+    kAXChildrenAttribute
+  };
+  CFArrayRef attributes = CFArrayCreate(
+    kCFAllocatorDefault,
+    attribute_values,
+    DICTATION_ATTR_COUNT,
+    &kCFTypeArrayCallBacks
+  );
+  if (attributes == NULL) {
+    CFRelease(window_value);
+    CFRelease(application);
+    return false;
+  }
+
+  CodexDictationButtonState state = {
+    .attributes = attributes,
+    .button_count = 0,
+    .visited = 0
+  };
+  collect_codex_dictation_buttons(window, 0, &state);
+
+  AXUIElementRef stop_button = NULL;
+  double best_y = -1;
+  double best_x = -1;
+  double lower_region = window_origin.y + window_size.height * 0.60;
+  double right_region = window_origin.x + window_size.width * 0.45;
+  for (unsigned left_index = 0; left_index < state.button_count; left_index += 1) {
+    CodexDictationButton left = state.buttons[left_index];
+    if (left.position.y < lower_region || left.position.x < right_region) continue;
+    for (unsigned right_index = 0; right_index < state.button_count; right_index += 1) {
+      if (left_index == right_index) continue;
+      CodexDictationButton right = state.buttons[right_index];
+      double row_delta = left.position.y - right.position.y;
+      if (row_delta < 0) row_delta = -row_delta;
+      double gap = right.position.x - (left.position.x + left.size.width);
+      if (row_delta > 3 || gap < 4 || gap > 18) continue;
+      if (left.position.y > best_y
+          || (left.position.y == best_y && right.position.x > best_x)) {
+        stop_button = left.element;
+        best_y = left.position.y;
+        best_x = right.position.x;
+      }
+    }
+  }
+
+  bool stopped = false;
+  if (stop_button != NULL) {
+    // Chromium currently reports AXPress success without dispatching this
+    // React button's pointer handler. Use a real click while Codex is frontmost;
+    // if focus moved during the hold, AXPress remains the safe best effort and
+    // can never land on another application's window.
+    if (codex_is_frontmost()) {
+      stopped = click_element_center(stop_button);
+    } else {
+      stopped = AXUIElementPerformAction(stop_button, kAXPressAction) == kAXErrorSuccess;
+    }
+  }
+
+  release_codex_dictation_buttons(&state);
+  CFRelease(attributes);
+  CFRelease(window_value);
+  CFRelease(application);
+  return stopped;
+}
+
+static bool batched_element_matches_thread_target(
+  CFArrayRef values,
   CodexThreadTargetState *state
 ) {
-  CFStringRef attributes[] = {
-    kAXTitleAttribute,
-    kAXValueAttribute,
-    kAXDescriptionAttribute,
-    kAXHelpAttribute,
-    kAXIdentifierAttribute,
-    kAXURLAttribute,
-    CFSTR("AXDOMIdentifier")
-  };
-  for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
-    if (state->use_uuid) {
-      if (element_attribute_matches_uuid(element, attributes[index], state->uuid)) return true;
-      continue;
-    }
+  if (values == NULL || CFArrayGetCount(values) < THREAD_ATTR_COUNT) return false;
+  for (CFIndex index = THREAD_ATTR_TITLE; index <= THREAD_ATTR_DOM_IDENTIFIER; index += 1) {
+    CFTypeRef value = CFArrayGetValueAtIndex(values, index);
     StringFingerprint fingerprint = { 0 };
-    if (copy_element_fingerprint(element, attributes[index], &fingerprint)
+    if (string_fingerprint(value, &fingerprint.length, &fingerprint.hash)
         && fingerprints_equal(fingerprint, state->fingerprint)) return true;
   }
   return false;
@@ -1035,19 +1253,34 @@ static void collect_codex_thread_targets(
 ) {
   if (element == NULL || depth > 30 || state->visited >= 8000) return;
   state->visited += 1;
-  if (!element_is_hidden(element) && element_matches_thread_target(element, state)) {
-    state->matched_elements += 1;
-    AXUIElementRef target = copy_nearest_press_target(element);
-    if (target != NULL) {
-      add_codex_thread_target(state, target);
-      CFRelease(target);
-    }
+  CFArrayRef values = NULL;
+  AXError values_error = AXUIElementCopyMultipleAttributeValues(
+    element,
+    state->attributes,
+    0,
+    &values
+  );
+  if (values_error != kAXErrorSuccess || values == NULL
+      || CFArrayGetCount(values) < THREAD_ATTR_COUNT) {
+    if (values != NULL) CFRelease(values);
+    return;
   }
 
-  CFTypeRef children_value = NULL;
-  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value) != kAXErrorSuccess
-      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
-    if (children_value != NULL) CFRelease(children_value);
+  CFTypeRef hidden_value = CFArrayGetValueAtIndex(values, THREAD_ATTR_HIDDEN);
+  bool hidden = hidden_value != NULL
+    && CFGetTypeID(hidden_value) == CFBooleanGetTypeID()
+    && CFBooleanGetValue((CFBooleanRef)hidden_value);
+  if (!hidden && batched_element_matches_thread_target(values, state)) {
+    state->matched_elements += 1;
+    // Click the exact text-bearing element. Electron's accessible parent for a
+    // command-palette result can point at the following row even though its
+    // AXPress action reports success.
+    add_codex_thread_target(state, element);
+  }
+
+  CFTypeRef children_value = CFArrayGetValueAtIndex(values, THREAD_ATTR_CHILDREN);
+  if (children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    CFRelease(values);
     return;
   }
   CFArrayRef children = (CFArrayRef)children_value;
@@ -1058,7 +1291,7 @@ static void collect_codex_thread_targets(
       collect_codex_thread_targets((AXUIElementRef)child, depth + 1, state);
     }
   }
-  CFRelease(children_value);
+  CFRelease(values);
 }
 
 static void release_codex_thread_targets(CodexThreadTargetState *state) {
@@ -1092,28 +1325,39 @@ static int find_or_open_codex_thread(
   if (application == NULL) return 1;
   AXUIElementSetMessagingTimeout(application, 0.8);
 
+  const void *attribute_values[THREAD_ATTR_COUNT] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    kAXURLAttribute,
+    CFSTR("AXDOMIdentifier"),
+    kAXHiddenAttribute,
+    kAXChildrenAttribute
+  };
+  CFArrayRef attributes = CFArrayCreate(
+    kCFAllocatorDefault,
+    attribute_values,
+    THREAD_ATTR_COUNT,
+    &kCFTypeArrayCallBacks
+  );
+  if (attributes == NULL) {
+    CFRelease(application);
+    return 1;
+  }
+
   CodexThreadTargetState state = {
-    .uuid = uuid,
     .fingerprint = fingerprint,
-    .use_uuid = true,
+    .attributes = attributes,
     .target_count = 0,
     .matched_elements = 0,
     .visited = 0
   };
   collect_codex_thread_targets(application, 0, &state);
-  const char *strategy = "uuid";
-  if (state.target_count == 0) {
-    release_codex_thread_targets(&state);
-    state.use_uuid = false;
-    state.matched_elements = 0;
-    state.visited = 0;
-    collect_codex_thread_targets(application, 0, &state);
-    strategy = "title";
-  }
 
   printf(
-    "strategy=%s matched=%u targets=%u visited=%u\n",
-    strategy,
+    "strategy=title matched=%u targets=%u visited=%u\n",
     state.matched_elements,
     state.target_count,
     state.visited
@@ -1134,14 +1378,18 @@ static int find_or_open_codex_thread(
         has_size ? size.height : -1
       );
     }
-    result = state.target_count > 0 ? 0 : 1;
+    result = state.target_count == 1 ? 0 : state.target_count > 1 ? 3 : 1;
   } else if (state.target_count == 1) {
-    result = AXUIElementPerformAction(state.targets[0], kAXPressAction) == kAXErrorSuccess ? 0 : 1;
+    // Chromium can report a successful AXPress for a sidebar task row without
+    // dispatching React's pointer handler. A real click at the verified row
+    // bounds consistently runs Codex's host activation and navigation path.
+    result = click_element_center(state.targets[0]) ? 0 : 1;
   } else if (state.target_count > 1) {
     result = 3;
   }
 
   release_codex_thread_targets(&state);
+  CFRelease(attributes);
   CFRelease(application);
   return result;
 }
@@ -1307,7 +1555,20 @@ static int search_and_open_codex_thread(
   int fill_result = fill_codex_search_from_stdin();
   if (fill_result != 0) return fill_result;
   usleep(700000);
-  int result = find_or_open_codex_thread(uuid, fingerprint_input, true);
+  // Confirm that exactly one accessibility result matches the private title
+  // fingerprint, then activate Codex's already-selected first search result.
+  // This avoids Electron's incorrect AX row coordinates while still running
+  // the result's own host-selection hook before navigation.
+  int result = find_or_open_codex_thread(uuid, fingerprint_input, false);
+  if (result == 0) {
+    tap_key(KEY_RETURN, 0);
+    usleep(300000);
+    AXUIElementRef search_field = copy_codex_focused_search_field();
+    if (search_field != NULL) {
+      CFRelease(search_field);
+      result = 1;
+    }
+  }
   if (result != 0) tap_key(KEY_ESCAPE, 0);
   return result;
 }
@@ -1343,7 +1604,7 @@ int main(int argc, char **argv) {
     bool held = CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, KEY_CONTROL)
       && CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, KEY_SHIFT)
       && CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, KEY_D);
-    voice_up();
+    release_voice_keys();
     usleep(30000);
     bool released = !CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, KEY_CONTROL)
       && !CGEventSourceKeyState(kCGEventSourceStateHIDSystemState, KEY_SHIFT)
@@ -1352,9 +1613,9 @@ int main(int argc, char **argv) {
     return held && released ? 0 : 1;
   }
   if (strcmp(argv[1], "voice-event-selftest") == 0) {
-    bool down = voice_event_is_layout_independent(true);
-    bool up = voice_event_is_layout_independent(false);
-    printf("layout_independent_down=%d layout_independent_up=%d\n", down ? 1 : 0, up ? 1 : 0);
+    bool down = voice_down_event_is_layout_independent();
+    bool up = voice_up_event_is_physical_release();
+    printf("layout_independent_down=%d physical_release_up=%d\n", down ? 1 : 0, up ? 1 : 0);
     return down && up ? 0 : 1;
   }
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
@@ -1372,14 +1633,22 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "media-volume-down") == 0) tap_media_key(MEDIA_SOUND_DOWN);
   else if (strcmp(argv[1], "media-volume-up") == 0) tap_media_key(MEDIA_SOUND_UP);
   else if (strcmp(argv[1], "media-next") == 0) tap_media_key(MEDIA_NEXT);
-  else if (strcmp(argv[1], "audio-processes") == 0) print_running_audio_processes();
+  else if (strcmp(argv[1], "audio-processes") == 0) {
+    print_running_audio_processes(kAudioProcessPropertyIsRunningOutput);
+  }
+  else if (strcmp(argv[1], "audio-input-processes") == 0) {
+    print_running_audio_processes(kAudioProcessPropertyIsRunningInput);
+  }
   else if (strcmp(argv[1], "focused-text-state") == 0) return print_focused_text_state();
   else if (strcmp(argv[1], "editable-text-state") == 0) return print_editable_text_state();
   else if (strcmp(argv[1], "focused-element-info") == 0) return print_focused_element_info();
   else if (strcmp(argv[1], "editable-element-info") == 0) return print_editable_element_info();
   else if (strcmp(argv[1], "selected-element-info") == 0) return print_selected_element_info();
   else if (strcmp(argv[1], "codex-queue-state") == 0) return print_codex_queue_state();
-  else if (strcmp(argv[1], "release") == 0) voice_up();
+  else if (strcmp(argv[1], "codex-stop-dictation") == 0) {
+    return stop_codex_composer_dictation_if_visible() ? 0 : 1;
+  }
+  else if (strcmp(argv[1], "release") == 0) release_voice_keys();
   else return 64;
   return 0;
 }
