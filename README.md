@@ -12,14 +12,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
+  <a href="https://github.com/y5862000/threaddeck-for-codex/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
   <a href="https://github.com/y5862000/threaddeck-for-codex/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/y5862000/threaddeck-for-codex/ci.yml?style=flat-square&label=build"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
   <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-111111?style=flat-square">
   <img alt="Hardware: Stream Deck Neo" src="https://img.shields.io/badge/hardware-Stream%20Deck%20Neo-111111?style=flat-square">
 </p>
 
-<p align="center"><a href="README.ko.md">한국어</a> · <a href="#quick-start">Quick start</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
+<p align="center"><a href="README.ko.md">한국어</a> · <a href="#quick-start">Quick start</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
 
 The following feature overview is generated directly by the plugin's real key renderer; it uses sanitized demonstration tasks rather than copied product artwork.
 
@@ -81,7 +81,7 @@ The bundled profile contains three pages. You can rearrange the supplied actions
 
 ### Install
 
-1. Download `com.yechan.threaddeck.streamDeckPlugin` from the [latest release](https://github.com/y5862000/threaddeck-for-codex/releases/latest).
+1. Download `com.yechan.threaddeck.streamDeckPlugin` from the [releases page](https://github.com/y5862000/threaddeck-for-codex/releases). Beta releases are marked as pre-releases.
 2. Double-click the file and approve installation in Stream Deck.
 3. Import the bundled **ThreadDeck for Codex** Neo profile when prompted.
 4. In **System Settings → Privacy & Security → Accessibility**, allow **Stream Deck**. This is required for keyboard and media actions.

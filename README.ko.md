@@ -12,14 +12,14 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest"><img alt="최신 릴리스" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
+  <a href="https://github.com/y5862000/threaddeck-for-codex/releases"><img alt="최신 릴리스" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
   <a href="https://github.com/y5862000/threaddeck-for-codex/actions/workflows/ci.yml"><img alt="CI 상태" src="https://img.shields.io/github/actions/workflow/status/y5862000/threaddeck-for-codex/ci.yml?style=flat-square&label=build"></a>
   <a href="LICENSE"><img alt="MIT 라이선스" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
   <img alt="플랫폼: macOS" src="https://img.shields.io/badge/platform-macOS-111111?style=flat-square">
   <img alt="하드웨어: Stream Deck Neo" src="https://img.shields.io/badge/hardware-Stream%20Deck%20Neo-111111?style=flat-square">
 </p>
 
-<p align="center"><a href="README.md">English</a> · <a href="#빠른-설치">빠른 설치</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">다운로드</a></p>
+<p align="center"><a href="README.md">English</a> · <a href="#빠른-설치">빠른 설치</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">다운로드</a></p>
 
 아래 기능 개요 이미지는 플러그인의 실제 버튼 렌더러에서 개인정보 없는 예시 작업으로 직접 생성했습니다. 타사 제품 화면을 복제한 이미지가 아닙니다.
 
@@ -81,7 +81,7 @@ macOS 라이트 모드도 같은 정보 구조를 유지합니다.
 
 ### 설치 순서
 
-1. [최신 릴리스](https://github.com/y5862000/threaddeck-for-codex/releases/latest)에서 `com.yechan.threaddeck.streamDeckPlugin`을 받습니다.
+1. [릴리스 페이지](https://github.com/y5862000/threaddeck-for-codex/releases)에서 `com.yechan.threaddeck.streamDeckPlugin`을 받습니다. 베타는 Pre-release로 표시됩니다.
 2. 파일을 더블클릭하고 Stream Deck에서 설치를 승인합니다.
 3. 안내가 나오면 **ThreadDeck for Codex** Neo 프로필을 가져옵니다.
 4. **시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용**에서 **Stream Deck**을 허용합니다. 키보드·미디어 동작에 필요합니다.
