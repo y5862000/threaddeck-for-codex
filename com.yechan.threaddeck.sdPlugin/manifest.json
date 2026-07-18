@@ -352,6 +352,38 @@
       "Tooltip": "다음 미디어 트랙으로 이동합니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.media.next"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "이전 페이지",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "ThreadDeck 프로필의 이전 페이지로 이동합니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.page.previous"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "다음 페이지",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "ThreadDeck 프로필의 다음 페이지로 이동합니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.page.next"
     }
   ],
   "Author": "Yechan",
@@ -385,5 +417,5 @@
   },
   "UUID": "com.yechan.threaddeck",
   "URL": "https://github.com/y5862000/threaddeck-for-codex",
-  "Version": "0.1.0.0"
+  "Version": "0.2.0.0"
 }

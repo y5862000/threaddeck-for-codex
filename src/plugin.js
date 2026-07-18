@@ -61,7 +61,9 @@ const ACTIONS = {
   mediaMute: "com.yechan.threaddeck.media.mute",
   mediaVolumeDown: "com.yechan.threaddeck.media.volumedown",
   mediaVolumeUp: "com.yechan.threaddeck.media.volumeup",
-  mediaNext: "com.yechan.threaddeck.media.next"
+  mediaNext: "com.yechan.threaddeck.media.next",
+  pagePrevious: "com.yechan.threaddeck.page.previous",
+  pageNext: "com.yechan.threaddeck.page.next"
 };
 
 const THREAD_ACTIONS = [
@@ -90,6 +92,12 @@ const MEDIA_COMMAND_BY_ACTION = new Map([
   [ACTIONS.mediaVolumeUp, "media-volume-up"],
   [ACTIONS.mediaNext, "media-next"]
 ]);
+const PAGE_DIRECTION_BY_ACTION = new Map([
+  [ACTIONS.pagePrevious, -1],
+  [ACTIONS.pageNext, 1]
+]);
+const DISTRIBUTED_PROFILE_NAME = "profiles/threaddeck-neo";
+const DEFAULT_PROFILE_PAGE_COUNT = 3;
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Use fonts already supplied by macOS. The public plugin intentionally does
 // not redistribute proprietary font files.
@@ -619,6 +627,16 @@ function sideChatSvg() {
     <path d="M72 52V92M52 72H92" fill="none" stroke="${THEME.text}" stroke-width="5.5" stroke-linecap="round"/>`);
 }
 
+function pageNavigationSvg(action) {
+  const direction = PAGE_DIRECTION_BY_ACTION.get(action);
+  if (!direction) return null;
+  const chevron = direction < 0 ? "M84 42L54 72L84 102" : "M60 42L90 72L60 102";
+  const railX = direction < 0 ? 40 : 104;
+  return shell(THEME.text, `
+    <path d="${chevron}" fill="none" stroke="${THEME.text}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M${railX} 43V101" fill="none" stroke="${THEME.text}" stroke-width="7" stroke-linecap="round"/>`);
+}
+
 function mediaActionSvg(action) {
   let icon = "";
   if (action === ACTIONS.mediaPrevious) {
@@ -648,6 +666,7 @@ function staticActionSvg(action, context = null) {
   if (action === ACTIONS.appSwitch) return appSwitchSvg();
   if (action === ACTIONS.sideChat) return sideChatSvg();
   if (MEDIA_COMMAND_BY_ACTION.has(action)) return mediaActionSvg(action);
+  if (PAGE_DIRECTION_BY_ACTION.has(action)) return pageNavigationSvg(action);
   return null;
 }
 
@@ -1438,6 +1457,33 @@ async function openSideChat(context) {
   }
 }
 
+function switchProfilePage(context, device, action, settings = {}) {
+  const direction = PAGE_DIRECTION_BY_ACTION.get(action);
+  if (!direction || !device) return;
+
+  const configuredCount = Number(settings.pageCount);
+  const pageCount = Number.isInteger(configuredCount) && configuredCount > 0
+    ? configuredCount
+    : DEFAULT_PROFILE_PAGE_COUNT;
+  const configuredPage = Number(settings.currentPage);
+  const currentPage = Number.isInteger(configuredPage) && configuredPage >= 0 && configuredPage < pageCount
+    ? configuredPage
+    : direction < 0 ? 0 : pageCount - 1;
+  const page = (currentPage + direction + pageCount) % pageCount;
+
+  send({
+    event: "switchToProfile",
+    // switchToProfile is a plugin-level command; Stream Deck rejects an
+    // action-instance context here even though key events provide one.
+    context: pluginUUID,
+    device,
+    payload: {
+      profile: DISTRIBUTED_PROFILE_NAME,
+      page
+    }
+  });
+}
+
 function registerPlugin() {
   if (!port || !pluginUUID || !registerEvent) process.exit(1);
   socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -1504,6 +1550,8 @@ function registerPlugin() {
         setImage(message.context, voiceSvg(false));
       } else if (action === ACTIONS.send || action === ACTIONS.appSwitch || MEDIA_COMMAND_BY_ACTION.has(action)) {
         // These are dispatched on keyDown so their response feels immediate.
+      } else if (PAGE_DIRECTION_BY_ACTION.has(action)) {
+        switchProfilePage(message.context, message.device, action, message.payload?.settings);
       } else if (action === ACTIONS.weekly) {
         void refreshUsage(message.context);
       } else if (action === ACTIONS.newThread) {

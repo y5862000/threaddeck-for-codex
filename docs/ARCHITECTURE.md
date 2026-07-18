@@ -46,7 +46,7 @@ The helper uses macOS system frameworks only. Stream Deck needs Accessibility pe
 
 The editable profile source lives under `profiles/source/unpacked`. `scripts/build-profile.sh` creates the `.streamDeckProfile` archive referenced by the plugin manifest. Hardware UUIDs are removed before publication so importing the profile does not bind it to the author's device.
 
-Elgato-owned pagination and app-launch actions remain native actions inside the profile. ThreadDeck does not replace them, which preserves expected Stream Deck behavior but also means those keys do not receive plugin-rendered completion overlays.
+ThreadDeck owns the bundled previous-page actions and exposes a next-page action. They use Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while those keys participate in plugin-rendered completion overlays. Elgato-owned app-launch actions remain native and do not receive ThreadDeck overlays.
 
 ## Data refresh and rendering
 

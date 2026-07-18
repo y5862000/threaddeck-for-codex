@@ -57,9 +57,9 @@ Task cards follow the same visual grammar in light appearance:
 
 The bundled profile contains three pages. You can rearrange the supplied actions in Stream Deck at any time.
 
-1. **Dashboard** — weekly quota, one live task, new task, Side Chat, push-to-talk, send, app switcher, and native back navigation.
-2. **Tasks** — task slots 1 through 7 plus native back navigation. The plugin exposes an eighth task action if you want a different layout.
-3. **Media** — previous track, rewind, play/pause, four app launchers, and native back navigation. Additional next, seek, mute, and volume actions are available in the action list.
+1. **Dashboard** — weekly quota, one live task, new task, Side Chat, push-to-talk, send, app switcher, and ThreadDeck back navigation.
+2. **Tasks** — task slots 1 through 7 plus ThreadDeck back navigation. The plugin exposes an eighth task action if you want a different layout.
+3. **Media** — previous track, rewind, play/pause, four app launchers, and ThreadDeck back navigation. Additional forward-page, next-track, seek, mute, and volume actions are available in the action list.
 
 ### Task state language
 
@@ -166,7 +166,7 @@ Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow and [CONTRIB
 - Task detection depends on private Codex file formats and can lag behind a Codex release.
 - The current shortcut actions assume Codex's default shortcuts listed above.
 - The weekly quota ring depends on a separately installed CodexBar.
-- Elgato-owned navigation and app-launch keys keep their native rendering and do not receive ThreadDeck's completion overlay.
+- Elgato-owned app-launch keys keep their native rendering and do not receive ThreadDeck's completion overlay. The bundled previous-page keys are ThreadDeck actions and do receive it.
 
 Start with [Troubleshooting](docs/TROUBLESHOOTING.md), then use the repository's issue templates if the problem remains.
 
