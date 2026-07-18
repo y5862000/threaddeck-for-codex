@@ -7,6 +7,7 @@ BRIDGE="$PLUGIN_DIR/bin/keybridge"
 
 node --check "$ROOT_DIR/src/plugin.js"
 node --check "$PLUGIN_DIR/bin/plugin.js"
+node "$ROOT_DIR/scripts/verify-docs.mjs"
 jq -e . "$PLUGIN_DIR/manifest.json" >/dev/null
 
 ARCHS="$(lipo -archs "$BRIDGE")"

@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- Introduced the “Codex tasks, at a glance” brand system and original ThreadDeck usage guidelines.
+- Added detailed English and Korean documentation with real dark/light renderer output and feature images.
+- Documented the complete MIT-licensed source-to-artifact boundary, local privacy model, and runtime architecture.
+- Added reproducible documentation rendering, dependency-license auditing, support guidance, and GitHub contribution templates.
+
 ## 0.1.0-beta — 2026-07-18
 
 - Added a three-page Stream Deck Neo profile with a task dashboard, seven task slots plus native navigation, and a compact media/app page.

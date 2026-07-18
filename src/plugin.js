@@ -141,6 +141,11 @@ function systemAppearanceSync() {
 
 let appearanceMode = systemAppearanceSync();
 let THEME = appearanceMode === "dark" ? DARK_THEME : LIGHT_THEME;
+let fixedRenderTimeMs = null;
+
+function renderTimeMs() {
+  return Number.isFinite(fixedRenderTimeMs) ? fixedRenderTimeMs : Date.now();
+}
 
 function argument(name) {
   const index = process.argv.indexOf(name);
@@ -152,6 +157,7 @@ const pluginUUID = argument("-pluginUUID");
 const registerEvent = argument("-registerEvent");
 const snapshotMode = process.argv.includes("--snapshot");
 const demoOutput = argument("--render-demo");
+const demoLightOutput = argument("--render-demo-light");
 
 const contexts = new Map();
 const contextImages = new Map();
@@ -334,7 +340,7 @@ function flowingReasoningSlider(accent, label, fast) {
   const effortProgress = reasoningEffortProgress(label.effort);
   const appearance = reasoningEffortAppearance(label.effort);
   const fillWidth = trackWidth * effortProgress;
-  const nowMs = Date.now();
+  const nowMs = renderTimeMs();
   // Keep the spatial gradient fixed. Ultra only breathes through a stationary
   // center bloom so the color changes softly without looking like a moving band.
   const ambienceCycleMs = fast ? 2600 : 3800;
@@ -831,7 +837,7 @@ function formatDuration(durationMs) {
   return `${String(totalMinutes).padStart(2, "0")}:${paddedSeconds}`;
 }
 
-function timingLabel(thread, nowMs = Date.now()) {
+function timingLabel(thread, nowMs = renderTimeMs()) {
   if (!Number.isFinite(thread?.startedAtMs)) {
     if (["working", "completed", "stopped"].includes(thread?.status)) return "--:--";
     return "열기";
@@ -1539,10 +1545,11 @@ function registerPlugin() {
   }, 2000);
 }
 
-function renderDemo(outputPath) {
-  appearanceMode = "dark";
-  THEME = DARK_THEME;
-  const nowMs = Date.now();
+function renderDemo(outputPath, mode = "dark") {
+  appearanceMode = mode;
+  THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
+  const nowMs = 1_800_000_000_000;
+  fixedRenderTimeMs = nowMs;
   const keySvgs = [
     usageSvg(74, false),
     sideChatSvg(),
@@ -1593,6 +1600,7 @@ function renderDemo(outputPath) {
   const resolvedOutput = path.resolve(outputPath);
   fsSync.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
   fsSync.writeFileSync(resolvedOutput, preview);
+  fixedRenderTimeMs = null;
   console.log(`Rendered ${resolvedOutput}`);
 }
 
@@ -1606,8 +1614,8 @@ process.once("SIGINT", () => {
 });
 process.on("exit", releaseVoiceKeysSync);
 
-if (demoOutput) {
-  renderDemo(demoOutput);
+if (demoOutput || demoLightOutput) {
+  renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
 } else if (snapshotMode) {
   readTopThreads()
     .then((threads) => {

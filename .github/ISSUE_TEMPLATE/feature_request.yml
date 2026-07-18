@@ -1,0 +1,31 @@
+name: Feature request
+description: Propose a focused improvement to the physical workflow
+title: "[Feature]: "
+labels: [enhancement]
+body:
+  - type: textarea
+    id: workflow
+    attributes:
+      label: Workflow problem
+      description: What repeated Codex or Stream Deck task should become easier?
+    validations:
+      required: true
+  - type: textarea
+    id: proposal
+    attributes:
+      label: Proposed behavior
+      description: Describe what the key, page, or InfoBar should show and what a press or hold should do.
+    validations:
+      required: true
+  - type: input
+    id: hardware
+    attributes:
+      label: Stream Deck model
+      placeholder: Stream Deck Neo
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: Alternatives considered
+      description: Mention shortcuts, existing Stream Deck actions, or other plugins you tried.
