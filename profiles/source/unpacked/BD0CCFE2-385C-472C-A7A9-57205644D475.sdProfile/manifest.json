@@ -1,0 +1,16 @@
+{
+  "Device": {
+    "Model": "20GBJ9901"
+  },
+  "Name": "ThreadDeck for Codex",
+  "Pages": {
+    "Current": "9c243fb1-2246-4219-981c-2ffa1a2ee737",
+    "Default": "a62fc361-5963-456c-bf53-5dc300e30ef5",
+    "Pages": [
+      "9c243fb1-2246-4219-981c-2ffa1a2ee737",
+      "8e65bfcf-a069-4cd6-aad4-7bee2d2571ce",
+      "4f68dceb-c510-4e21-b70b-d147a8a79554"
+    ]
+  },
+  "Version": "3.0"
+}

@@ -1,0 +1,238 @@
+{
+  "Controllers": [
+    {
+      "Actions": {
+        "0,0": {
+          "ActionID": "7e2b6090-41a0-4ea8-b9c7-f48adeb2b688",
+          "LinkedTitle": false,
+          "Name": "미디어 이전 트랙",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.media.previous"
+        },
+        "0,1": {
+          "ActionID": "ee0b3b10-e967-4c54-8fb3-63cf457178eb",
+          "LinkedTitle": true,
+          "Name": "Open Application",
+          "Plugin": {
+            "Name": "Open Application",
+            "UUID": "com.elgato.streamdeck.system.openapp",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {
+            "app_name": "Elgato Stream Deck",
+            "args": "",
+            "bring_to_front": true,
+            "bundle_id": "com.elgato.StreamDeck",
+            "bundle_path": "/Applications/Elgato Stream Deck.app",
+            "exec": "/Applications/Elgato Stream Deck.app/Contents/MacOS/Stream Deck",
+            "is_bundle": true,
+            "long_press": "quit",
+            "source": "/Applications/Elgato Stream Deck.app"
+          },
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.system.openapp"
+        },
+        "1,0": {
+          "ActionID": "4298b299-0b7e-4d17-a9b3-6d90423cbd92",
+          "LinkedTitle": false,
+          "Name": "미디어 되감기",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.media.rewind"
+        },
+        "1,1": {
+          "ActionID": "835ac216-e5dd-4f28-88c3-b4318a244a1f",
+          "LinkedTitle": true,
+          "Name": "Open Application",
+          "Plugin": {
+            "Name": "Open Application",
+            "UUID": "com.elgato.streamdeck.system.openapp",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {
+            "app_name": "Music",
+            "args": "",
+            "bring_to_front": true,
+            "bundle_id": "com.apple.Music",
+            "bundle_path": "/System/Applications/Music.app",
+            "exec": "/System/Applications/Music.app/Contents/MacOS/Music",
+            "is_bundle": true,
+            "long_press": "quit",
+            "source": "/System/Applications/Music.app"
+          },
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.system.openapp"
+        },
+        "2,0": {
+          "ActionID": "2c6fc002-67de-4e7f-9b90-aa3ab74c203e",
+          "LinkedTitle": false,
+          "Name": "미디어 재생/일시정지",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.media.playpause"
+        },
+        "2,1": {
+          "ActionID": "a2bee834-d5ae-45f1-8b02-bcc75db63e6d",
+          "LinkedTitle": true,
+          "Name": "Open Application",
+          "Plugin": {
+            "Name": "Open Application",
+            "UUID": "com.elgato.streamdeck.system.openapp",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {
+            "app_name": "Google Chrome",
+            "args": "",
+            "bring_to_front": true,
+            "bundle_id": "com.google.Chrome",
+            "bundle_path": "/Applications/Google Chrome.app",
+            "exec": "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "is_bundle": true,
+            "long_press": "quit",
+            "source": "/Applications/Google Chrome.app"
+          },
+          "State": 0,
+          "States": [
+            {
+              "Title": "\n"
+            }
+          ],
+          "UUID": "com.elgato.streamdeck.system.openapp"
+        },
+        "3,0": {
+          "ActionID": "11653bb0-cb8c-4a96-9113-1097ecdcee0f",
+          "LinkedTitle": true,
+          "Name": "Open Application",
+          "Plugin": {
+            "Name": "Open Application",
+            "UUID": "com.elgato.streamdeck.system.openapp",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {
+            "app_name": "ChatGPT",
+            "args": "",
+            "bring_to_front": true,
+            "bundle_id": "com.openai.codex",
+            "bundle_path": "/Applications/ChatGPT.app",
+            "exec": "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT",
+            "is_bundle": true,
+            "long_press": "quit",
+            "source": "/Applications/ChatGPT.app"
+          },
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.system.openapp"
+        },
+        "3,1": {
+          "ActionID": "bea24097-6187-49cd-83ca-357e4006c42d",
+          "LinkedTitle": true,
+          "Name": "Previous Page",
+          "Plugin": {
+            "Name": "Pages",
+            "UUID": "com.elgato.streamdeck.page",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.page.previous"
+        }
+      },
+      "Type": "Keypad"
+    },
+    {
+      "Actions": {
+        "1,0": {
+          "ActionID": "ee985d0c-a7f7-4f5c-904d-2baf49b98fb8",
+          "LinkedTitle": true,
+          "Name": "Page Indicator",
+          "Plugin": {
+            "Name": "Page Indicator",
+            "UUID": "com.elgato.streamdeck.system.pagination",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.system.pagination"
+        }
+      },
+      "Type": "Neo"
+    }
+  ],
+  "Icon": "",
+  "Name": "MEDIA"
+}

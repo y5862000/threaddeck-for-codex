@@ -1,0 +1,37 @@
+{
+  "Controllers": [
+    {
+      "Actions": null,
+      "Type": "Keypad"
+    },
+    {
+      "Actions": {
+        "1,0": {
+          "ActionID": "3A46A520-00F0-4336-92B5-415638F96C52",
+          "LinkedTitle": true,
+          "Name": "Digital time",
+          "Plugin": {
+            "Name": "Digital Time",
+            "UUID": "com.elgato.streamdeck.system.digitaltime",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {
+            "24HourFormat": false,
+            "layout": "digital_time_07",
+            "location": "",
+            "theme": "white"
+          },
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.system.digitaltime"
+        }
+      },
+      "Type": "Neo"
+    }
+  ],
+  "Icon": "",
+  "Name": ""
+}

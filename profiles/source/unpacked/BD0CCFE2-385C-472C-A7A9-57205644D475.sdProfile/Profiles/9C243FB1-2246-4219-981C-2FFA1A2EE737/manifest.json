@@ -1,0 +1,234 @@
+{
+  "Controllers": [
+    {
+      "Actions": {
+        "0,0": {
+          "ActionID": "7b3211ac-f970-4141-a412-9ab546c5a2c5",
+          "LinkedTitle": false,
+          "Name": "Codex Weekly Remaining",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 10,
+              "FontStyle": "Bold",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.weekly"
+        },
+        "0,1": {
+          "ActionID": "89b8c264-b366-4201-b8df-de894e5efe26",
+          "LinkedTitle": true,
+          "Name": "Codex 상위 작업 1",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 2,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.thread1"
+        },
+        "1,0": {
+          "ActionID": "e96cad0b-380e-4e39-ae78-af6ff27094df",
+          "LinkedTitle": false,
+          "Name": "Codex Side Chat",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 10,
+              "FontStyle": "Bold",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.sidechat"
+        },
+        "1,1": {
+          "ActionID": "6c747f63-0327-4746-949c-d5f575d3c5e7",
+          "LinkedTitle": false,
+          "Name": "App Switcher",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 2,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.appswitch"
+        },
+        "2,0": {
+          "ActionID": "237624c7-e238-4191-a94b-c6fb33006e5b",
+          "LinkedTitle": false,
+          "Name": "Codex New Thread",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 10,
+              "FontStyle": "Bold",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.newthread"
+        },
+        "2,1": {
+          "ActionID": "00fd9b90-04fd-493e-961a-d17180deecb0",
+          "LinkedTitle": false,
+          "Name": "Codex Voice Input",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 2,
+              "ShowTitle": false,
+              "Title": "⌃ ⇧ D",
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.voice"
+        },
+        "3,0": {
+          "ActionID": "62ca2819-453c-4d5a-8f42-448cc6747d40",
+          "LinkedTitle": false,
+          "Name": "Codex Send",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.1.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 2,
+              "ShowTitle": false,
+              "Title": "↵",
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.send"
+        },
+        "3,1": {
+          "ActionID": "7dfe31ec-81a0-4c0d-979f-d6ab278f098f",
+          "LinkedTitle": true,
+          "Name": "Previous Page",
+          "Plugin": {
+            "Name": "Pages",
+            "UUID": "com.elgato.streamdeck.page",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.page.previous"
+        }
+      },
+      "Type": "Keypad"
+    },
+    {
+      "Actions": {
+        "1,0": {
+          "ActionID": "b78afc19-af9d-4a5f-9b71-585678fdcb1b",
+          "LinkedTitle": true,
+          "Name": "Page Indicator",
+          "Plugin": {
+            "Name": "Page Indicator",
+            "UUID": "com.elgato.streamdeck.system.pagination",
+            "Version": "1.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {}
+          ],
+          "UUID": "com.elgato.streamdeck.system.pagination"
+        }
+      },
+      "Type": "Neo"
+    }
+  ],
+  "Icon": "",
+  "Name": "THREADDECK"
+}
