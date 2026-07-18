@@ -9,7 +9,7 @@
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
-            "Version": "0.1.0.0"
+            "Version": "0.2.0.0"
           },
           "Resources": null,
           "Settings": {},
@@ -62,7 +62,7 @@
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
-            "Version": "0.1.0.0"
+            "Version": "0.2.0.0"
           },
           "Resources": null,
           "Settings": {},
@@ -115,7 +115,7 @@
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
-            "Version": "0.1.0.0"
+            "Version": "0.2.0.0"
           },
           "Resources": null,
           "Settings": {},
@@ -192,20 +192,25 @@
         },
         "3,1": {
           "ActionID": "bea24097-6187-49cd-83ca-357e4006c42d",
-          "LinkedTitle": true,
-          "Name": "Previous Page",
+          "LinkedTitle": false,
+          "Name": "이전 페이지",
           "Plugin": {
-            "Name": "Pages",
-            "UUID": "com.elgato.streamdeck.page",
-            "Version": "1.0"
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.2.0.0"
           },
           "Resources": null,
-          "Settings": {},
+          "Settings": {
+            "currentPage": 2,
+            "pageCount": 3
+          },
           "State": 0,
           "States": [
-            {}
+            {
+              "ShowTitle": false
+            }
           ],
-          "UUID": "com.elgato.streamdeck.page.previous"
+          "UUID": "com.yechan.threaddeck.page.previous"
         }
       },
       "Type": "Keypad"

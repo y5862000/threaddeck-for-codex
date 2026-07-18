@@ -1,6 +1,6 @@
 {
   "name": "threaddeck-for-codex",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "description": "A local-first Stream Deck Neo dashboard for Codex Desktop on macOS.",
   "license": "MIT",
@@ -25,6 +25,7 @@
     "check": "zsh scripts/verify.sh",
     "render-demo": "node src/plugin.js --render-demo docs/media/neo-preview.svg",
     "render-docs": "node scripts/render-docs.mjs",
+    "render-animation": "node scripts/render-animation.mjs",
     "pack": "pnpm run build && pnpm exec streamdeck pack com.yechan.threaddeck.sdPlugin --output release --force --no-update-check",
     "release": "pnpm run build && pnpm run audit && pnpm run check && pnpm run pack"
   },

@@ -1,5 +1,7 @@
 # Related projects
 
+> [한국어 비교표](ALTERNATIVES.ko.md)
+
 Checked on 2026-07-18.
 
 | Project | Focus | Main difference |

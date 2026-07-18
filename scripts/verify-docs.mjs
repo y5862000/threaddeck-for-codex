@@ -31,6 +31,7 @@ for (const file of markdownFiles) {
 const requiredImages = [
   "docs/media/neo-preview.png",
   "docs/media/neo-preview-light.png",
+  "docs/media/threaddeck-demo.gif",
   "docs/media/quota-key.png",
   "docs/media/working-task-key.png",
   "docs/media/completed-task-key.png",

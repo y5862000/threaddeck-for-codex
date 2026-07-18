@@ -1,5 +1,7 @@
 # ThreadDeck brand guide
 
+> [한국어 브랜드 가이드](BRAND.ko.md)
+
 ## Positioning
 
 **Name:** ThreadDeck for Codex<br>
@@ -41,6 +43,7 @@ Use the system font stack already defined in `src/plugin.js`. Korean falls back 
 - Keep the complete 4 × 2 grid visible for overview images.
 - Use exact individual key renders for feature callouts; do not redraw controls or simulate hardware.
 - Show both light and dark appearance when discussing appearance support.
+- Use the deterministic GIF from `pnpm run render-animation` when motion or completion behavior matters.
 
 ## Naming and attribution
 
