@@ -1,5 +1,7 @@
 # Notices
 
+> [한국어 고지](NOTICE.ko.md)
+
 ThreadDeck for Codex is an independent, unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI or Elgato.
 
 OpenAI, ChatGPT, and Codex are trademarks of OpenAI, L.L.C. Elgato and Stream Deck are trademarks of Corsair Memory, Inc. All other product names belong to their respective owners.

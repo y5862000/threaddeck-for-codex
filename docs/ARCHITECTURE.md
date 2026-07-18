@@ -1,10 +1,12 @@
 # Architecture
 
+> [한국어 구조 설명](ARCHITECTURE.ko.md)
+
 ```text
 Codex local state (~/.codex) ─┐
-                              ├─ plugin.js ── localhost WebSocket ── Stream Deck
+Codex Accessibility metadata ─┼─ plugin.js ── localhost WebSocket ── Stream Deck
 CodexBar CLI (usage only) ────┘       │
-                                      └─ keybridge ── macOS keyboard/media APIs
+                                      └─ keybridge ── macOS input/audio/AX APIs
 ```
 
 ThreadDeck is intentionally small. A dependency-free Node.js process owns local state parsing, visual rendering, and Stream Deck events; one universal native helper handles the macOS input and audio operations Node cannot provide reliably.
@@ -21,10 +23,12 @@ It:
 - discovers pinned and recent tasks from conservative read-only views of Codex SQLite and JSON state;
 - normalizes working, completed, queued, error, and idle states;
 - tracks start/end timestamps and freezes completed durations;
+- tracks the active Desktop session so closed temporary Side Chats do not reappear as ordinary tasks;
 - renders every ThreadDeck-owned 144 × 144 key as SVG;
-- animates active reasoning cues and completion pulses;
+- animates active reasoning cues, queue-advance acknowledgements, and completion pulses;
 - invokes CodexBar for the optional weekly quota value;
 - delegates keyboard, media, and push-to-talk operations to `keybridge`.
+- lets a held task key open that task, dictate a follow-up, detect transcription completion using text fingerprints, and submit it on release.
 
 No Codex file is opened for writing.
 
@@ -39,6 +43,7 @@ It:
 - sends app-switch and media-key events;
 - finds processes currently producing Core Audio output;
 - suspends those process IDs during dictation and resumes the same IDs on release.
+- traverses the visible Codex accessibility tree to fingerprint the current task title and count localized queue-action buttons without returning message text.
 
 The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input.
 
@@ -51,16 +56,17 @@ ThreadDeck owns the bundled previous-page actions and exposes a next-page action
 ## Data refresh and rendering
 
 - Task metadata refreshes every 3 seconds while a task action is visible.
+- The same refresh observes the open Codex task's queue count. Cached counts follow that task key and decrement when a queued turn starts.
 - Active task timers and animation frames render at device-appropriate intervals.
 - Weekly usage refreshes every 60 seconds while the quota action is visible.
 - macOS appearance is checked every 2 seconds and swaps the renderer between the existing dark and light palettes.
-- Completion is detected by comparing the newly observed end timestamp with the previous task snapshot. ThreadDeck-owned keys receive a global pulse; the matching task key receives the longer task pulse.
+- Completion is detected by comparing end timestamps with an overlapping observation window and a startup grace period. Queue decreases are also treated as a completed turn. ThreadDeck-owned keys receive a global pulse; the matching task key receives the longer task pulse.
 
 The plugin caches the last image for each context and avoids sending unchanged frames.
 
 ## Documentation renderer
 
-`scripts/render-docs.mjs` runs the same key-rendering functions in sanitized demo mode. It exports dark and light 4 × 2 feature overviews and exact individual-key PNGs. This keeps README images synchronized with the shipped interface without hand-redrawing controls.
+`scripts/render-docs.mjs` runs the same key-rendering functions in sanitized demo mode. It exports dark and light 4 × 2 feature overviews and exact individual-key PNGs. `scripts/render-animation.mjs` renders a deterministic 72-frame state sequence and encodes it with the open-source Swift/ImageIO helper. This keeps README images and the GIF synchronized with the shipped interface without hand-redrawing controls.
 
 ## Stability boundary
 

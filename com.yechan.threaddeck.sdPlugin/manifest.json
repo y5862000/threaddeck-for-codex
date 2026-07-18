@@ -205,7 +205,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "현재 Codex 입력을 Return 키로 보냅니다.",
+      "Tooltip": "짧게 누르면 Return, 0.6초 이상 길게 누르면 Command+Return을 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.send"
     },

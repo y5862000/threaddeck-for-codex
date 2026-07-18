@@ -17,6 +17,9 @@ const SESSION_INDEX = path.resolve(process.env.THREADDECK_SESSION_INDEX || path.
 const PROCESS_REGISTRY = path.resolve(
   process.env.THREADDECK_PROCESS_REGISTRY || path.join(CODEX_HOME, "process_manager", "chat_processes.json")
 );
+const CODEX_DESKTOP_LOG_ROOT = path.resolve(
+  process.env.THREADDECK_CODEX_LOG_ROOT || path.join(USER_HOME, "Library", "Logs", "com.openai.codex")
+);
 const KEY_BRIDGE = path.join(__dirname, "keybridge");
 
 function resolveCodexBar() {
@@ -79,8 +82,36 @@ const THREAD_ACTIONS = [
 const THREAD_COUNT = THREAD_ACTIONS.length;
 const THREAD_COMPLETION_PULSE_DURATION_MS = 5200;
 const GLOBAL_COMPLETION_PULSE_DURATION_MS = 2600;
-const GLOBAL_COMPLETION_FRAME_INTERVAL_MS = 25;
+const GLOBAL_COMPLETION_FRAME_INTERVAL_MS = 50;
 const GLOBAL_COMPLETION_GROUP_COUNT = 2;
+const COMPLETION_STARTUP_GRACE_MS = 15_000;
+const COMPLETION_OBSERVATION_OVERLAP_MS = 1_500;
+const SEND_LONG_PRESS_MS = 600;
+const THREAD_VOICE_LONG_PRESS_MS = 550;
+const THREAD_VOICE_FOCUS_SETTLE_MS = 90;
+const VOICE_TRANSCRIPTION_POLL_INTERVAL_MS = 100;
+const VOICE_TEXT_PROBE_INTERVAL_MS = 200;
+const VOICE_TRANSCRIPTION_STABLE_MS = 450;
+const VOICE_TRANSCRIPTION_TIMEOUT_MS = 12_000;
+const VOICE_COMPLETE_DISPLAY_MS = 900;
+const VOICE_ERROR_DISPLAY_MS = 1_300;
+const VOICE_TARGET_OPEN_HINT_MS = 120_000;
+const QUEUE_ZERO_CONFIRM_MS = 1_200;
+const SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS = 8_000;
+const SIDE_CHAT_TARGET_REFRESH_DELAYS_MS = [180, 500, 1_000, 1_800, 3_000, 4_800];
+const SIDE_CHAT_TARGET_LOG_TAIL_BYTES = 2 * 1024 * 1024;
+const APP_SERVER_SESSION_CACHE_MS = 5_000;
+const APP_SERVER_START_TOLERANCE_MS = 5_000;
+const DESKTOP_LOG_PATH_CACHE_MS = 5_000;
+const SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES = 64 * 1024 * 1024;
+const QUEUED_MESSAGE_DELETE_LABELS = [
+  "대기열에 있는 메시지 삭제",
+  "Delete queued message"
+];
+const QUEUED_MESSAGE_ACTION_LABELS = [
+  "대기열에 있는 메시지 액션",
+  "Queued message actions"
+];
 const THREAD_SLOT_BY_ACTION = new Map(THREAD_ACTIONS.map((action, index) => [action, index]));
 const MEDIA_COMMAND_BY_ACTION = new Map([
   [ACTIONS.mediaPrevious, "media-previous"],
@@ -106,8 +137,8 @@ const DARK_THEME = Object.freeze({
   canvas: "#000000",
   card: "#000000",
   raised: "#2F2F2F",
-  border: "#FFFFFF0D",
-  borderStrong: "#FFFFFF1A",
+  border: "rgba(255, 255, 255, 0.05)",
+  borderStrong: "rgba(255, 255, 255, 0.10)",
   text: "#F2F6FA",
   textSecondary: "#CDCDCD",
   muted: "#818181",
@@ -115,22 +146,22 @@ const DARK_THEME = Object.freeze({
   green: "#10A37F",
   red: "#FF6764",
   amber: "#F5A524",
-  sliderTrack: "#FFFFFF1A"
+  sliderTrack: "rgba(255, 255, 255, 0.10)"
 });
 const LIGHT_THEME = Object.freeze({
-  canvas: "#F9F9F9",
-  card: "#FCFCFC",
-  raised: "#ECECEC",
-  border: "#0000000D",
-  borderStrong: "#0000001A",
+  canvas: "#F4F4F4",
+  card: "#FFFFFF",
+  raised: "#E7E7E7",
+  border: "rgba(0, 0, 0, 0.10)",
+  borderStrong: "rgba(0, 0, 0, 0.18)",
   text: "#0D0D0D",
-  textSecondary: "#676767",
-  muted: "#9B9B9B",
-  blue: "#0285FF",
-  green: "#10A37F",
-  red: "#F93A37",
+  textSecondary: "#5F5F5F",
+  muted: "#737373",
+  blue: "#006FCC",
+  green: "#087F68",
+  red: "#C02623",
   amber: "#AC4F23",
-  sliderTrack: "#0000001A"
+  sliderTrack: "rgba(0, 0, 0, 0.12)"
 });
 
 function systemAppearanceSync() {
@@ -166,15 +197,26 @@ const registerEvent = argument("-registerEvent");
 const snapshotMode = process.argv.includes("--snapshot");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
+const demoAnimationDirectory = argument("--render-demo-animation");
+const pluginStartedAtMs = Date.now();
 
 const contexts = new Map();
 const contextImages = new Map();
 const contextFeedback = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
+const completionPulseReasonByThreadId = new Map();
 const observedCompletionEndMs = new Map();
 const voiceHeldContexts = new Set();
 const voiceSuspendedMediaPids = new Set();
+const voiceStateByContext = new Map();
+const voiceStateResetAtMs = new Map();
+const voiceTranscriptionByContext = new Map();
+const voiceTargetThreadByContext = new Map();
+const sendPressStartedAt = new Map();
+const sendLongPressTimers = new Map();
+const sendLongPressArmedContexts = new Set();
+const threadPressByContext = new Map();
 let socket = null;
 let activeUsageRefresh = null;
 let activeThreadRefresh = null;
@@ -184,10 +226,24 @@ let usageState = { remaining: null, failed: false };
 let pulse = false;
 let feedbackSerial = 0;
 let hasLoadedThreadState = false;
+let lastThreadTransitionScanAtMs = pluginStartedAtMs - COMPLETION_STARTUP_GRACE_MS;
 let globalCompletionStartedAtMs = null;
 let globalCompletionThreadId = null;
 let globalCompletionWasRendered = false;
 let globalCompletionRenderGroup = 0;
+let mostRecentThreadId = null;
+let lastOpenedThreadId = null;
+let lastOpenedThreadAtMs = null;
+let knownSideChatIds = new Set();
+let pendingSideChatTarget = null;
+let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
+let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
+let sideChatSessionStartMs = null;
+const sideChatParentById = new Map();
+const sideChatLifecycleCache = new Map();
+const closedSideChatAtMs = new Map();
+const sideChatCloseLogOffsets = new Map();
+const queueStateByThreadId = new Map();
 
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) {
@@ -206,7 +262,9 @@ function sendImage(context, svg) {
 
 function feedbackOverlaySvg(svg, feedback) {
   const accent = feedback.kind === "error" ? THEME.red : feedback.kind === "success" ? THEME.green : THEME.blue;
-  const label = compactLine(feedback.label, 5.2);
+  const label = compactLine(feedback.label, 6.2);
+  const labelWidth = Math.max(1, titleVisualWidth(label));
+  const labelFontSize = Math.max(12.5, Math.min(15.5, 76 / labelWidth)).toFixed(1);
   const icon = feedback.kind === "loading"
     ? `<circle cx="27" cy="119" r="2" fill="${accent}" opacity=".4"/><circle cx="34" cy="119" r="2" fill="${accent}" opacity=".7"/><circle cx="41" cy="119" r="2" fill="${accent}"/>`
     : feedback.kind === "error"
@@ -215,7 +273,7 @@ function feedbackOverlaySvg(svg, feedback) {
   const overlay = `
   <rect x="15" y="105" width="114" height="28" rx="10" fill="${THEME.raised}" stroke="${THEME.borderStrong}"/>
   ${icon}
-  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="15.5" font-weight="600" text-anchor="middle">${escapeXml(label)}</text>`;
+  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="600" text-anchor="middle">${escapeXml(label)}</text>`;
   return svg.replace("</svg>", `${overlay}\n</svg>`);
 }
 
@@ -237,6 +295,12 @@ function showFeedback(context, kind, label, durationMs) {
     const currentSvg = contextImages.get(context);
     if (contexts.has(context) && currentSvg) sendImage(context, composedContextSvg(context, currentSvg));
   }, duration);
+}
+
+function clearFeedback(context) {
+  if (!contextFeedback.delete(context)) return;
+  const currentSvg = contextImages.get(context);
+  if (contexts.has(context) && currentSvg) sendImage(context, composedContextSvg(context, currentSvg));
 }
 
 function clampPercent(value) {
@@ -325,11 +389,14 @@ function reasoningEffortProgress(value) {
 
 function reasoningEffortAppearance(value) {
   const ultra = String(value ?? "").toLowerCase() === "ultra";
+  const lightUltra = appearanceMode === "light";
   return {
     ultra,
     gradientStops: ultra
-      ? `<stop stop-color="#8A4FE0"/><stop offset=".32" stop-color="#B15CE8"/><stop offset=".58" stop-color="#C874E8"/><stop offset="1" stop-color="#8A4FE0"/>`
-      : `<stop stop-color="#0285FF"/><stop offset="1" stop-color="#0285FF"/>`
+      ? lightUltra
+        ? `<stop stop-color="#7040C7"/><stop offset=".32" stop-color="#8647CE"/><stop offset=".58" stop-color="#984FCF"/><stop offset="1" stop-color="#7040C7"/>`
+        : `<stop stop-color="#8A4FE0"/><stop offset=".32" stop-color="#B15CE8"/><stop offset=".58" stop-color="#C874E8"/><stop offset="1" stop-color="#8A4FE0"/>`
+      : `<stop stop-color="${THEME.blue}"/><stop offset="1" stop-color="${THEME.blue}"/>`
   };
 }
 
@@ -439,7 +506,7 @@ function flowingReasoningSlider(accent, label, fast) {
   </g>`;
 }
 
-function completionPulseState(threadId, nowMs = Date.now()) {
+function completionPulseState(threadId, nowMs = renderTimeMs()) {
   const startedAtMs = completionPulseStartedAt.get(threadId);
   if (!Number.isFinite(startedAtMs)) return null;
   const elapsedMs = Math.max(0, nowMs - startedAtMs);
@@ -453,7 +520,14 @@ function completionPulseState(threadId, nowMs = Date.now()) {
   return { elapsedMs, progress, strength };
 }
 
-function globalCompletionPulseState(nowMs = Date.now()) {
+function visibleCompletionPulseState(thread, nowMs = renderTimeMs()) {
+  if (!thread?.id) return null;
+  const reason = completionPulseReasonByThreadId.get(thread.id);
+  if (thread.status !== "completed" && reason !== "queue-advance") return null;
+  return completionPulseState(thread.id, nowMs);
+}
+
+function globalCompletionPulseState(nowMs = renderTimeMs()) {
   if (!Number.isFinite(globalCompletionStartedAtMs)) return null;
   const elapsedMs = Math.max(0, nowMs - globalCompletionStartedAtMs);
   if (elapsedMs >= GLOBAL_COMPLETION_PULSE_DURATION_MS) return null;
@@ -470,10 +544,10 @@ function globalCompletionPulseState(nowMs = Date.now()) {
 function globalCompletionChrome(effect) {
   if (!effect || effect.strength < 0.002) return "";
   const strength = effect.strength;
-  const tintOpacity = (0.17 * strength).toFixed(3);
-  const outerOpacity = (0.9 * strength).toFixed(3);
-  const innerOpacity = (0.36 * strength).toFixed(3);
-  const outerWidth = (1.8 + strength * 2.4).toFixed(2);
+  const tintOpacity = (0.24 * strength).toFixed(3);
+  const outerOpacity = (0.96 * strength).toFixed(3);
+  const innerOpacity = (0.48 * strength).toFixed(3);
+  const outerWidth = (2.2 + strength * 2.8).toFixed(2);
   return `
   <rect x="4.8" y="4.8" width="134.4" height="134.4" rx="15.6" fill="${THEME.green}" fill-opacity="${tintOpacity}"/>
   <rect x="5.4" y="5.4" width="133.2" height="133.2" rx="15" fill="none" stroke="${THEME.green}" stroke-opacity="${outerOpacity}" stroke-width="${outerWidth}"/>
@@ -490,7 +564,7 @@ function applyGlobalCompletion(svg, effect) {
   return chrome ? svg.replace("</svg>", `${chrome}\n</svg>`) : svg;
 }
 
-function composedContextSvg(context, svg, nowMs = Date.now()) {
+function composedContextSvg(context, svg, nowMs = renderTimeMs()) {
   let rendered = svg;
   const globalEffect = globalCompletionPulseState(nowMs);
   if (globalEffect && contextThreadId(context) !== globalCompletionThreadId) {
@@ -517,8 +591,10 @@ function completionPulseChrome(effect) {
 function threadHeader(accent, status, statusLabel, activity, pulsing = false, reasoningEffort = null, serviceTier = null, completionEffect = null) {
   if (status === "completed") {
     const strength = completionEffect?.strength ?? 0;
-    const fillOpacity = (0.7 * strength).toFixed(3);
-    const strokeOpacity = (0.98 * strength).toFixed(3);
+    const baseFillOpacity = appearanceMode === "light" ? 0.14 : 0;
+    const baseStrokeOpacity = appearanceMode === "light" ? 0.58 : 0;
+    const fillOpacity = (baseFillOpacity + (0.7 - baseFillOpacity) * strength).toFixed(3);
+    const strokeOpacity = (baseStrokeOpacity + (0.98 - baseStrokeOpacity) * strength).toFixed(3);
     const brightCheckOpacity = (0.96 * strength).toFixed(3);
     const checkWidth = (3.4 + 0.9 * strength).toFixed(2);
     return `
@@ -560,21 +636,9 @@ function shell(accent, content, header = "", chrome = "") {
 </svg>`;
 }
 
-function mixRgb(from, to, ratio) {
-  const t = Math.max(0, Math.min(1, ratio));
-  return from.map((channel, index) => Math.round(channel + (to[index] - channel) * t));
-}
-
 function usageAccent(value, failed = false) {
-  if (failed) return THEME.red;
-  if (value === null) return THEME.muted;
-  const red = [255, 103, 100];
-  const amber = [245, 165, 36];
-  const green = [16, 163, 127];
-  const color = value <= 50
-    ? mixRgb(red, amber, value / 50)
-    : mixRgb(amber, green, (value - 50) / 50);
-  return `rgb(${color.join(", ")})`;
+  if (failed || value === null) return THEME.muted;
+  return THEME.text;
 }
 
 function usageSvg(remaining, failed = false) {
@@ -600,20 +664,227 @@ function newThreadSvg() {
     </g>`);
 }
 
-function voiceSvg(active = false) {
-  const accent = active ? THEME.green : THEME.text;
-  const chrome = active ? `
-    <rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.green}" fill-opacity=".12" stroke="${THEME.green}" stroke-opacity=".88" stroke-width="2.5"/>` : "";
+function voiceSvg(state = "idle", nowMs = renderTimeMs()) {
+  const normalizedState = ["recording", "transcribing", "submitting", "complete", "sent", "error"].includes(state) ? state : "idle";
+  const transcribingPhase = ((nowMs % 1_800) / 1_800) * Math.PI * 2;
+  const transcribingBreath = 0.5 - 0.5 * Math.cos(transcribingPhase);
+  const transcribingStrokeOpacity = (0.24 + transcribingBreath * 0.18).toFixed(3);
+  const transcribingFillOpacity = (0.018 + transcribingBreath * 0.022).toFixed(3);
+  const dotOpacity = (offset) => (0.34 + 0.66 * (0.5 + 0.5 * Math.sin(transcribingPhase + offset))).toFixed(3);
+  const accent = normalizedState === "recording"
+    ? THEME.amber
+    : normalizedState === "complete" || normalizedState === "sent"
+      ? THEME.green
+    : normalizedState === "transcribing"
+      ? THEME.text
+      : normalizedState === "submitting"
+        ? THEME.text
+      : normalizedState === "error"
+        ? THEME.amber
+        : THEME.text;
+  const chrome = normalizedState === "recording"
+    ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.amber}" fill-opacity=".12" stroke="${THEME.amber}" stroke-opacity=".88" stroke-width="2.5"/>`
+    : normalizedState === "transcribing"
+      ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.text}" fill-opacity="${transcribingFillOpacity}" stroke="${THEME.textSecondary}" stroke-opacity="${transcribingStrokeOpacity}" stroke-width="2.2"/>`
+      : normalizedState === "submitting"
+        ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.text}" fill-opacity=".035" stroke="${THEME.textSecondary}" stroke-opacity=".48" stroke-width="2.2"/>`
+      : normalizedState === "complete" || normalizedState === "sent"
+        ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.green}" fill-opacity=".12" stroke="${THEME.green}" stroke-opacity=".82" stroke-width="2.5"/>`
+        : normalizedState === "error"
+          ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.amber}" fill-opacity=".09" stroke="${THEME.amber}" stroke-opacity=".72" stroke-width="2.2"/>`
+          : "";
+  const status = normalizedState === "recording"
+    ? `<circle cx="110" cy="32" r="7" fill="${THEME.amber}"/><circle cx="110" cy="32" r="11" fill="none" stroke="${THEME.amber}" stroke-opacity=".28" stroke-width="3"/>`
+    : normalizedState === "transcribing"
+      ? `<rect x="94" y="20" width="32" height="23" rx="11.5" fill="${THEME.raised}" stroke="${THEME.border}"/>
+         <circle cx="103" cy="31.5" r="2.2" fill="${THEME.text}" fill-opacity="${dotOpacity(0)}"/>
+         <circle cx="110" cy="31.5" r="2.2" fill="${THEME.text}" fill-opacity="${dotOpacity(-2.1)}"/>
+         <circle cx="117" cy="31.5" r="2.2" fill="${THEME.text}" fill-opacity="${dotOpacity(-4.2)}"/>`
+    : normalizedState === "submitting"
+      ? `<circle cx="109" cy="33" r="15" fill="${THEME.raised}" stroke="${THEME.borderStrong}"/>
+         <path d="M109 41V24M102.5 30.5L109 24L115.5 30.5" fill="none" stroke="${THEME.text}" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`
+    : normalizedState === "complete" || normalizedState === "sent"
+      ? `<circle cx="109" cy="33" r="15" fill="${THEME.green}"/><path d="M102 33L107 38L116 27" fill="none" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round" stroke-linejoin="round"/>`
+    : normalizedState === "error"
+      ? `<circle cx="109" cy="33" r="15" fill="${THEME.amber}"/><path d="M109 24V35" stroke="#FFFFFF" stroke-width="3.5" stroke-linecap="round"/><circle cx="109" cy="41" r="2" fill="#FFFFFF"/>`
+      : "";
   return shell(accent, `
     <rect x="56" y="28" width="32" height="59" rx="16" fill="${accent}"/>
     <path d="M40 68V77C40 94.7 54.3 109 72 109C89.7 109 104 94.7 104 77V68" fill="none" stroke="${accent}" stroke-width="6.2" stroke-linecap="round"/>
-    <path d="M72 109V120M56 120H88" fill="none" stroke="${accent}" stroke-width="6.2" stroke-linecap="round"/>`, "", chrome);
+    <path d="M72 109V120M56 120H88" fill="none" stroke="${accent}" stroke-width="6.2" stroke-linecap="round"/>
+    ${status}`, "", chrome);
 }
 
-function sendSvg() {
-  return shell(THEME.text, `
-    <circle cx="72" cy="72" r="41" fill="${THEME.text}"/>
-    <path d="M72 96V48M52.5 67.5L72 48L91.5 67.5" fill="none" stroke="${THEME.card}" stroke-width="5.7" stroke-linecap="round" stroke-linejoin="round"/>`);
+function voiceTargetStateForThread(threadId) {
+  if (!threadId) return null;
+  for (const [context, targetThreadId] of voiceTargetThreadByContext) {
+    if (targetThreadId !== threadId) continue;
+    const state = voiceHeldContexts.has(context) ? "recording" : voiceStateByContext.get(context);
+    if (state && state !== "idle") return state;
+  }
+  return null;
+}
+
+function voiceTargetOverlaySvg(state, nowMs = renderTimeMs()) {
+  if (!state || state === "idle") return "";
+  const transcribingPhase = ((nowMs % 1_800) / 1_800) * Math.PI * 2;
+  const transcribingBreath = 0.5 - 0.5 * Math.cos(transcribingPhase);
+  const transcribingStrokeOpacity = (0.26 + transcribingBreath * 0.2).toFixed(3);
+  const transcribingFillOpacity = (0.018 + transcribingBreath * 0.024).toFixed(3);
+  const dotOpacity = (offset) => (0.34 + 0.66 * (0.5 + 0.5 * Math.sin(transcribingPhase + offset))).toFixed(3);
+  const accent = state === "recording"
+    ? THEME.amber
+    : state === "transcribing"
+    ? THEME.textSecondary
+    : state === "submitting"
+      ? THEME.textSecondary
+    : state === "error"
+      ? THEME.amber
+      : THEME.green;
+  const neutralState = state === "transcribing" || state === "submitting";
+  const border = state === "transcribing"
+    ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.text}" fill-opacity="${transcribingFillOpacity}" stroke="${THEME.textSecondary}" stroke-opacity="${transcribingStrokeOpacity}" stroke-width="2.2"/>`
+    : state === "submitting"
+      ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.text}" fill-opacity=".035" stroke="${THEME.textSecondary}" stroke-opacity=".52" stroke-width="2.4"/>`
+    : `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${accent}" fill-opacity=".11" stroke="${accent}" stroke-opacity=".95" stroke-width="4.2"/>`;
+  const badgeGlyph = state === "complete" || state === "sent"
+    ? `<path d="M113 22L118 27L127 16" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`
+    : state === "error"
+      ? `<path d="M120 15V24" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/><circle cx="120" cy="29" r="1.8" fill="#FFFFFF"/>`
+      : state === "transcribing"
+        ? `<circle cx="114" cy="23" r="1.65" fill="${THEME.text}" fill-opacity="${dotOpacity(0)}"/>
+           <circle cx="120" cy="23" r="1.65" fill="${THEME.text}" fill-opacity="${dotOpacity(-2.1)}"/>
+           <circle cx="126" cy="23" r="1.65" fill="${THEME.text}" fill-opacity="${dotOpacity(-4.2)}"/>`
+      : state === "submitting"
+        ? `<path d="M120 29V16M115 21L120 16L125 21" fill="none" stroke="${THEME.text}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`
+      : `<rect x="117" y="14" width="6" height="11" rx="3" fill="#FFFFFF"/><path d="M113.5 22V23C113.5 26.6 116.4 29.5 120 29.5C123.6 29.5 126.5 26.6 126.5 23V22M120 29.5V33" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>`;
+  const bannerLabel = state === "recording"
+    ? "말하는 중"
+    : state === "transcribing"
+      ? "받아쓰기 중"
+      : state === "submitting"
+        ? "제출 중"
+        : state === "sent"
+          ? "전송 완료"
+          : state === "complete"
+            ? "입력 완료"
+          : "입력 실패";
+  const bannerTextColor = state === "recording" || state === "error"
+    ? THEME.amber
+    : state === "complete" || state === "sent"
+      ? THEME.green
+      : THEME.text;
+  const bannerStroke = state === "recording" || state === "error"
+    ? THEME.amber
+    : state === "complete" || state === "sent"
+      ? THEME.green
+      : THEME.borderStrong;
+  return `${border}
+    <rect x="9" y="8" width="126" height="28" rx="14" fill="${THEME.raised}" stroke="${bannerStroke}" stroke-opacity=".72"/>
+    <text x="62" y="27" fill="${bannerTextColor}" font-family="${FONT_STACK}" font-size="15.5" font-weight="650" text-anchor="middle">${bannerLabel}</text>
+    <circle cx="120" cy="23" r="13" fill="${neutralState ? THEME.raised : accent}" stroke="${neutralState ? THEME.border : THEME.card}" stroke-width="2"/>
+    ${badgeGlyph}`;
+}
+
+function applyVoiceTargetOverlay(svg, threadId, nowMs = renderTimeMs()) {
+  const overlay = voiceTargetOverlaySvg(voiceTargetStateForThread(threadId), nowMs);
+  return overlay ? svg.replace("</svg>", `${overlay}\n</svg>`) : svg;
+}
+
+function sendSvg(longPressArmed = false) {
+  const accent = longPressArmed ? THEME.blue : THEME.text;
+  const chrome = longPressArmed
+    ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.blue}" fill-opacity=".10" stroke="${THEME.blue}" stroke-opacity=".92" stroke-width="3"/>`
+    : "";
+  return shell(accent, `
+    <circle cx="72" cy="72" r="41" fill="${accent}"/>
+    <path d="M72 96V48M52.5 67.5L72 48L91.5 67.5" fill="none" stroke="${THEME.card}" stroke-width="5.7" stroke-linecap="round" stroke-linejoin="round"/>`, "", chrome);
+}
+
+function cancelSendPress(context, restoreImage = false) {
+  const timer = sendLongPressTimers.get(context);
+  if (timer) clearTimeout(timer);
+  sendLongPressTimers.delete(context);
+  sendPressStartedAt.delete(context);
+  sendLongPressArmedContexts.delete(context);
+  if (restoreImage && contexts.get(context) === ACTIONS.send) setImage(context, sendSvg(false));
+}
+
+function beginSendPress(context) {
+  if (sendPressStartedAt.has(context)) return;
+  sendPressStartedAt.set(context, Date.now());
+  const timer = setTimeout(() => {
+    if (!sendPressStartedAt.has(context) || contexts.get(context) !== ACTIONS.send) return;
+    sendLongPressArmedContexts.add(context);
+    setImage(context, sendSvg(true));
+  }, SEND_LONG_PRESS_MS);
+  sendLongPressTimers.set(context, timer);
+}
+
+function endSendPress(context) {
+  const startedAtMs = sendPressStartedAt.get(context);
+  if (!Number.isFinite(startedAtMs)) return;
+  const longPress = Date.now() - startedAtMs >= SEND_LONG_PRESS_MS;
+  cancelSendPress(context, true);
+  runKeyBridge(longPress ? "send-command" : "send", context);
+}
+
+function cancelThreadPress(context, releaseVoice = true) {
+  const state = threadPressByContext.get(context);
+  if (!state) return;
+  state.held = false;
+  if (state.timer) clearTimeout(state.timer);
+  threadPressByContext.delete(context);
+  if (releaseVoice && state.voiceStarted) endVoiceHoldSync(context, false);
+}
+
+function beginThreadPress(context, slot) {
+  if (threadPressByContext.has(context)) return;
+  const thread = threadSlots[slot];
+  if (!thread?.id) {
+    showFeedback(context, "error", "작업 없음");
+    return;
+  }
+
+  const state = {
+    slot,
+    threadId: thread.id,
+    held: true,
+    armed: false,
+    voiceStarted: false,
+    timer: null,
+    openPromise: openThread(context, slot)
+  };
+  threadPressByContext.set(context, state);
+  state.timer = setTimeout(async () => {
+    if (threadPressByContext.get(context) !== state || !state.held) return;
+    state.armed = true;
+    const opened = await state.openPromise;
+    if (threadPressByContext.get(context) !== state || !state.held || !opened) {
+      threadPressByContext.delete(context);
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, THREAD_VOICE_FOCUS_SETTLE_MS));
+    if (threadPressByContext.get(context) !== state || !state.held) {
+      threadPressByContext.delete(context);
+      return;
+    }
+    clearFeedback(context);
+    state.voiceStarted = beginVoiceHoldSync(context, {
+      targetThreadId: state.threadId,
+      autoSubmit: true
+    });
+    if (!state.voiceStarted) threadPressByContext.delete(context);
+  }, THREAD_VOICE_LONG_PRESS_MS);
+}
+
+function endThreadPress(context) {
+  const state = threadPressByContext.get(context);
+  if (!state) return;
+  state.held = false;
+  if (state.timer) clearTimeout(state.timer);
+  if (state.voiceStarted) endVoiceHoldSync(context, true);
+  if (!state.armed || state.voiceStarted) threadPressByContext.delete(context);
 }
 
 function appSwitchSvg() {
@@ -661,8 +932,13 @@ function mediaActionSvg(action) {
 
 function staticActionSvg(action, context = null) {
   if (action === ACTIONS.newThread) return newThreadSvg();
-  if (action === ACTIONS.voice) return voiceSvg(context ? voiceHeldContexts.has(context) : false);
-  if (action === ACTIONS.send) return sendSvg();
+  if (action === ACTIONS.voice) {
+    const state = context
+      ? voiceHeldContexts.has(context) ? "recording" : voiceStateByContext.get(context) ?? "idle"
+      : "idle";
+    return voiceSvg(state);
+  }
+  if (action === ACTIONS.send) return sendSvg(context ? sendLongPressArmedContexts.has(context) : false);
   if (action === ACTIONS.appSwitch) return appSwitchSvg();
   if (action === ACTIONS.sideChat) return sideChatSvg();
   if (MEDIA_COMMAND_BY_ACTION.has(action)) return mediaActionSvg(action);
@@ -693,6 +969,228 @@ function runKeyBridgeSync(command, context = null) {
     if (context) showFeedback(context, "error", "키 입력 실패");
     console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
     return false;
+  }
+}
+
+function textInputStateSync() {
+  for (const command of ["focused-text-state", "editable-text-state"]) {
+    try {
+      const output = execFileSync(KEY_BRIDGE, [command], {
+        encoding: "utf8",
+        stdio: ["ignore", "pipe", "ignore"],
+        timeout: 700,
+        maxBuffer: 128
+      }).trim();
+      const focusedMatch = output.match(/^(\d+)\t([0-9a-f]{16})$/i);
+      if (focusedMatch) return `focused:${focusedMatch[1]}:${focusedMatch[2].toLowerCase()}`;
+      const aggregateMatch = output.match(/^(\d+)\t(\d+)\t([0-9a-f]{16})$/i);
+      if (aggregateMatch) {
+        return `aggregate:${aggregateMatch[1]}:${aggregateMatch[2]}:${aggregateMatch[3].toLowerCase()}`;
+      }
+    } catch {
+      // Codex currently does not expose a conventional focused text area on
+      // every build. Fall through to the aggregate editable-region probe.
+    }
+  }
+  return null;
+}
+
+function contextSupportsVoice(context) {
+  const action = contexts.get(context);
+  return action === ACTIONS.voice || THREAD_SLOT_BY_ACTION.has(action);
+}
+
+function renderVoiceContextState(context, state, nowMs = Date.now()) {
+  if (contexts.get(context) === ACTIONS.voice) setImage(context, voiceSvg(state, nowMs));
+  const targetThreadId = voiceTargetThreadByContext.get(context);
+  if (targetThreadId) renderVoiceTargetThreadContexts(targetThreadId, nowMs);
+}
+
+function setVoiceVisualState(context, state, durationMs = null, nowMs = Date.now()) {
+  if (state === "idle") voiceStateByContext.delete(context);
+  else voiceStateByContext.set(context, state);
+  if (Number.isFinite(durationMs)) voiceStateResetAtMs.set(context, nowMs + durationMs);
+  else voiceStateResetAtMs.delete(context);
+  renderVoiceContextState(context, state, nowMs);
+  if (state === "idle") voiceTargetThreadByContext.delete(context);
+}
+
+function cancelVoiceTranscription(context, resetVisual = false) {
+  voiceTranscriptionByContext.delete(context);
+  voiceStateResetAtMs.delete(context);
+  if (resetVisual || voiceTargetThreadByContext.has(context)) setVoiceVisualState(context, "idle");
+}
+
+function bindPendingVoiceContextsToThread(threadId, nowMs = Date.now()) {
+  if (!threadId) return;
+  lastOpenedThreadId = threadId;
+  lastOpenedThreadAtMs = nowMs;
+  for (const context of voiceTranscriptionByContext.keys()) {
+    if (contexts.get(context) !== ACTIONS.voice || voiceTargetThreadByContext.has(context)) continue;
+    voiceTargetThreadByContext.set(context, threadId);
+  }
+}
+
+async function readPendingSideChatIdFromDesktopLog(requestedAtMs, knownIds) {
+  try {
+    const filePath = await readLatestDesktopLogPath();
+    if (!filePath) return null;
+    const stat = await fs.stat(filePath);
+    const length = Math.min(stat.size, SIDE_CHAT_TARGET_LOG_TAIL_BYTES);
+    if (length <= 0) return null;
+    const handle = await fs.open(filePath, "r");
+    const buffer = Buffer.alloc(length);
+    try {
+      await handle.read(buffer, 0, length, stat.size - length);
+    } finally {
+      await handle.close();
+    }
+    const lines = buffer.toString("utf8").split(/\r?\n/);
+    for (let index = lines.length - 1; index >= 0; index -= 1) {
+      const line = lines[index];
+      if (!line.includes("method=thread/inject_items")) continue;
+      const timestampMs = Date.parse(line.slice(0, 24));
+      if (!Number.isFinite(timestampMs) || timestampMs + APP_SERVER_START_TOLERANCE_MS < requestedAtMs) continue;
+      const match = line.match(/conversationId=([0-9a-f-]{36})/i);
+      const threadId = match?.[1] ?? null;
+      const createdAtMs = threadId ? uuidV7TimestampMs(threadId) : null;
+      if (!threadId || knownIds.has(threadId)
+          || !Number.isFinite(createdAtMs)
+          || createdAtMs + APP_SERVER_START_TOLERANCE_MS < requestedAtMs) continue;
+      return threadId;
+    }
+  } catch {
+    // The prompt-history path below remains available if the desktop log is
+    // rotating or briefly unavailable while the side chat is being created.
+  }
+  return null;
+}
+
+async function resolvePendingSideChatTarget(sideChats, nowMs = Date.now()) {
+  if (!pendingSideChatTarget) return;
+  const { requestedAtMs, knownIds } = pendingSideChatTarget;
+  const listedCandidate = sideChats
+    .filter((thread) => !knownIds.has(thread.id)
+      && Number.isFinite(thread.createdAtMs)
+      && thread.createdAtMs + APP_SERVER_START_TOLERANCE_MS >= requestedAtMs)
+    .sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a))[0];
+  const targetThreadId = listedCandidate?.id
+    ?? await readPendingSideChatIdFromDesktopLog(requestedAtMs, knownIds);
+  if (targetThreadId) {
+    pendingSideChatTarget = null;
+    bindPendingVoiceContextsToThread(targetThreadId, nowMs);
+    return;
+  }
+  if (nowMs - requestedAtMs >= SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS) {
+    pendingSideChatTarget = null;
+  }
+}
+
+function scheduleSideChatTargetRefreshes(requestedAtMs) {
+  for (const delayMs of SIDE_CHAT_TARGET_REFRESH_DELAYS_MS) {
+    setTimeout(() => {
+      if (pendingSideChatTarget?.requestedAtMs !== requestedAtMs) return;
+      void refreshThreads();
+    }, delayMs);
+  }
+}
+
+function resolveVoiceTargetThreadId(nowMs = Date.now()) {
+  if (pendingSideChatTarget) {
+    if (nowMs - pendingSideChatTarget.requestedAtMs < SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS) return null;
+    pendingSideChatTarget = null;
+  }
+  const visibleIds = new Set(threadSlots.filter(Boolean).map((thread) => thread.id));
+  if (lastOpenedThreadId && Number.isFinite(lastOpenedThreadAtMs)
+      && nowMs - lastOpenedThreadAtMs <= VOICE_TARGET_OPEN_HINT_MS
+      && visibleIds.has(lastOpenedThreadId)) {
+    return lastOpenedThreadId;
+  }
+  return mostRecentThreadId && visibleIds.has(mostRecentThreadId) ? mostRecentThreadId : null;
+}
+
+async function submitCompletedVoiceTranscription(context, targetThreadId) {
+  try {
+    await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
+    await new Promise((resolve) => setTimeout(resolve, 140));
+    if (!contexts.has(context)
+        || voiceStateByContext.get(context) !== "submitting"
+        || voiceTargetThreadByContext.get(context) !== targetThreadId) return;
+    if (!runKeyBridgeSync("send", context)) {
+      failVoiceTranscription(context);
+      return;
+    }
+    setVoiceVisualState(context, "sent", VOICE_COMPLETE_DISPLAY_MS);
+    setTimeout(() => void refreshThreads(), 500);
+  } catch (error) {
+    failVoiceTranscription(context);
+    console.error(`Could not submit dictated Codex message: ${error?.message ?? "unknown error"}`);
+  }
+}
+
+function completeVoiceTranscription(context, nowMs = Date.now()) {
+  const tracker = voiceTranscriptionByContext.get(context);
+  voiceTranscriptionByContext.delete(context);
+  if (tracker?.autoSubmit && tracker.targetThreadId) {
+    setVoiceVisualState(context, "submitting", null, nowMs);
+    void submitCompletedVoiceTranscription(context, tracker.targetThreadId);
+    return;
+  }
+  setVoiceVisualState(context, "complete", VOICE_COMPLETE_DISPLAY_MS, nowMs);
+}
+
+function failVoiceTranscription(context, nowMs = Date.now()) {
+  voiceTranscriptionByContext.delete(context);
+  setVoiceVisualState(context, "error", VOICE_ERROR_DISPLAY_MS, nowMs);
+}
+
+function updateVoiceTranscriptionStates(nowMs = Date.now()) {
+  for (const [context, tracker] of voiceTranscriptionByContext) {
+    if (!contexts.has(context) || !contextSupportsVoice(context)) {
+      cancelVoiceTranscription(context);
+      continue;
+    }
+    if (!Number.isFinite(tracker.releasedAtMs)) continue;
+
+    if (Number.isFinite(tracker.lastProbeAtMs)
+        && nowMs - tracker.lastProbeAtMs < VOICE_TEXT_PROBE_INTERVAL_MS) {
+      renderVoiceContextState(context, "transcribing", nowMs);
+      continue;
+    }
+    tracker.lastProbeAtMs = nowMs;
+
+    const current = textInputStateSync();
+    if (current && !tracker.baseline && nowMs - tracker.releasedAtMs <= 350) {
+      tracker.baseline = current;
+      tracker.lastObserved = current;
+      tracker.stableSinceMs = null;
+    }
+    if (current && tracker.baseline && current !== tracker.baseline) {
+      if (current !== tracker.lastObserved) {
+        tracker.lastObserved = current;
+        tracker.stableSinceMs = nowMs;
+      } else if (Number.isFinite(tracker.stableSinceMs)
+          && nowMs - tracker.stableSinceMs >= (tracker.autoSubmit ? 750 : VOICE_TRANSCRIPTION_STABLE_MS)) {
+        completeVoiceTranscription(context, nowMs);
+        continue;
+      }
+    } else if (current) {
+      tracker.lastObserved = current;
+      tracker.stableSinceMs = null;
+    } else {
+      tracker.stableSinceMs = null;
+    }
+
+    if (nowMs - tracker.releasedAtMs >= VOICE_TRANSCRIPTION_TIMEOUT_MS) {
+      failVoiceTranscription(context, nowMs);
+      continue;
+    }
+    renderVoiceContextState(context, "transcribing", nowMs);
+  }
+
+  for (const [context, resetAtMs] of voiceStateResetAtMs) {
+    if (nowMs < resetAtMs) continue;
+    setVoiceVisualState(context, "idle", null, nowMs);
   }
 }
 
@@ -759,24 +1257,63 @@ function resumeMediaAfterVoiceSync() {
   voiceSuspendedMediaPids.clear();
 }
 
-function beginVoiceHoldSync(context) {
+function beginVoiceHoldSync(context, options = {}) {
   if (voiceHeldContexts.has(context)) return true;
+  cancelVoiceTranscription(context);
+  voiceStateByContext.delete(context);
+  const targetThreadId = options.targetThreadId ?? resolveVoiceTargetThreadId();
+  if (targetThreadId) voiceTargetThreadByContext.set(context, targetThreadId);
+  const baseline = textInputStateSync();
+  voiceTranscriptionByContext.set(context, {
+    baseline,
+    lastObserved: baseline,
+    stableSinceMs: null,
+    lastProbeAtMs: null,
+    releasedAtMs: null,
+    autoSubmit: Boolean(options.autoSubmit),
+    targetThreadId: targetThreadId ?? null
+  });
   if (voiceHeldContexts.size === 0) {
     pauseMediaForVoiceSync(context);
     if (!runKeyBridgeSync("voice-down", context)) {
       resumeMediaAfterVoiceSync();
+      failVoiceTranscription(context);
       return false;
     }
   }
   voiceHeldContexts.add(context);
+  setVoiceVisualState(context, "recording");
   return true;
 }
 
-function endVoiceHoldSync(context) {
+function endVoiceHoldSync(context, trackTranscription = true) {
   if (!voiceHeldContexts.delete(context)) return;
   if (voiceHeldContexts.size > 0) return;
-  runKeyBridgeSync("voice-up", context);
+  const released = runKeyBridgeSync("voice-up", context);
   resumeMediaAfterVoiceSync();
+  if (!trackTranscription) {
+    cancelVoiceTranscription(context, true);
+    return;
+  }
+  if (!released) {
+    failVoiceTranscription(context);
+    return;
+  }
+  const tracker = voiceTranscriptionByContext.get(context) ?? {
+    baseline: textInputStateSync(),
+    lastObserved: null,
+    stableSinceMs: null,
+    lastProbeAtMs: null,
+    releasedAtMs: null,
+    autoSubmit: false,
+    targetThreadId: voiceTargetThreadByContext.get(context) ?? null
+  };
+  tracker.lastObserved = tracker.baseline;
+  tracker.stableSinceMs = null;
+  tracker.lastProbeAtMs = null;
+  tracker.releasedAtMs = Date.now();
+  voiceTranscriptionByContext.set(context, tracker);
+  setVoiceVisualState(context, "transcribing");
 }
 
 function releaseVoiceKeysSync() {
@@ -786,6 +1323,14 @@ function releaseVoiceKeysSync() {
     // Best-effort cleanup only; never keep Stream Deck from shutting down.
   }
   voiceHeldContexts.clear();
+  voiceTranscriptionByContext.clear();
+  voiceStateByContext.clear();
+  voiceStateResetAtMs.clear();
+  voiceTargetThreadByContext.clear();
+  for (const state of threadPressByContext.values()) {
+    if (state.timer) clearTimeout(state.timer);
+  }
+  threadPressByContext.clear();
   resumeMediaAfterVoiceSync();
 }
 
@@ -797,6 +1342,149 @@ function normalizeTitle(value) {
     .replace(/\s+/g, " ")
     .trim();
   return title || "제목 없는 작업";
+}
+
+function stringFingerprint(value) {
+  const bytes = Buffer.from(String(value ?? ""), "utf8");
+  let hash = 0xcbf29ce484222325n;
+  for (const byte of bytes) {
+    hash ^= BigInt(byte);
+    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
+  }
+  return `${bytes.length}:${hash.toString(16).padStart(16, "0")}`;
+}
+
+function titleFingerprints(value) {
+  const title = String(value ?? "");
+  return new Set([title, title.normalize("NFC"), title.normalize("NFD")].map(stringFingerprint));
+}
+
+const QUEUED_MESSAGE_DELETE_FINGERPRINTS = new Set(QUEUED_MESSAGE_DELETE_LABELS.map(stringFingerprint));
+const QUEUED_MESSAGE_ACTION_FINGERPRINTS = new Set(QUEUED_MESSAGE_ACTION_LABELS.map(stringFingerprint));
+
+function parseCodexQueueWindows(output) {
+  const windows = [];
+  let current = null;
+  for (const line of String(output ?? "").split(/\r?\n/)) {
+    const [kind, value, rawCount] = line.split("\t");
+    if (kind === "window") {
+      current = { index: Number(value), headers: new Set(), buttons: new Map() };
+      windows.push(current);
+    } else if (kind === "header" && current && value) {
+      current.headers.add(value);
+    } else if (kind === "button" && current && value) {
+      const count = Number.parseInt(rawCount, 10);
+      if (Number.isFinite(count) && count > 0) current.buttons.set(value, count);
+    } else if (kind === "end") {
+      current = null;
+    }
+  }
+  return windows;
+}
+
+async function readCodexQueueWindows() {
+  try {
+    const { stdout } = await execFileAsync(KEY_BRIDGE, ["codex-queue-state"], {
+      timeout: 1800,
+      maxBuffer: 64 * 1024
+    });
+    return parseCodexQueueWindows(stdout);
+  } catch {
+    return [];
+  }
+}
+
+function queueCountForWindow(window) {
+  let deleteCount = 0;
+  let actionCount = 0;
+  for (const fingerprint of QUEUED_MESSAGE_DELETE_FINGERPRINTS) {
+    deleteCount = Math.max(deleteCount, window.buttons.get(fingerprint) ?? 0);
+  }
+  for (const fingerprint of QUEUED_MESSAGE_ACTION_FINGERPRINTS) {
+    actionCount = Math.max(actionCount, window.buttons.get(fingerprint) ?? 0);
+  }
+  return Math.max(deleteCount, actionCount);
+}
+
+function matchQueueWindowThread(window, threads) {
+  const candidates = threads.filter((thread) => {
+    for (const fingerprint of titleFingerprints(thread.title)) {
+      if (window.headers.has(fingerprint)) return true;
+    }
+    return false;
+  });
+  if (candidates.length === 1) return candidates[0];
+  if (candidates.length > 1) {
+    return candidates.find((thread) => thread.id === lastOpenedThreadId)
+      ?? [...candidates].sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a))[0];
+  }
+  return null;
+}
+
+function applyQueueState(threads, windows, nowMs = Date.now()) {
+  const observedIds = new Set();
+  for (const window of windows) {
+    const thread = matchQueueWindowThread(window, threads);
+    if (!thread?.id) continue;
+    observedIds.add(thread.id);
+    const count = queueCountForWindow(window);
+    const cached = queueStateByThreadId.get(thread.id);
+    if (count > 0) {
+      queueStateByThreadId.set(thread.id, {
+        count,
+        observedAtMs: nowMs,
+        turnStartedAtMs: Number.isFinite(thread.startedAtMs) ? thread.startedAtMs : null,
+        zeroObservedAtMs: null
+      });
+    } else if (!cached) {
+      queueStateByThreadId.delete(thread.id);
+    } else {
+      const turnAdvanced = Number.isFinite(thread.startedAtMs)
+        && Number.isFinite(cached.turnStartedAtMs)
+        && thread.startedAtMs > cached.turnStartedAtMs + 1000;
+      const zeroConfirmed = Number.isFinite(cached.zeroObservedAtMs)
+        && nowMs - cached.zeroObservedAtMs >= QUEUE_ZERO_CONFIRM_MS;
+      if (turnAdvanced) {
+        const nextCount = Math.max(0, cached.count - 1);
+        if (nextCount === 0) queueStateByThreadId.delete(thread.id);
+        else queueStateByThreadId.set(thread.id, {
+          ...cached,
+          count: nextCount,
+          observedAtMs: nowMs,
+          turnStartedAtMs: thread.startedAtMs,
+          zeroObservedAtMs: nowMs
+        });
+      } else if (zeroConfirmed) {
+        queueStateByThreadId.delete(thread.id);
+      } else {
+        queueStateByThreadId.set(thread.id, {
+          ...cached,
+          observedAtMs: nowMs,
+          zeroObservedAtMs: nowMs
+        });
+      }
+    }
+  }
+
+  for (const thread of threads) {
+    if (observedIds.has(thread.id)) continue;
+    const cached = queueStateByThreadId.get(thread.id);
+    if (!cached || !Number.isFinite(thread.startedAtMs) || !Number.isFinite(cached.turnStartedAtMs)) continue;
+    if (thread.startedAtMs <= cached.turnStartedAtMs + 1000) continue;
+    const nextCount = Math.max(0, cached.count - 1);
+    if (nextCount === 0) queueStateByThreadId.delete(thread.id);
+    else queueStateByThreadId.set(thread.id, {
+      ...cached,
+      count: nextCount,
+      turnStartedAtMs: thread.startedAtMs,
+      zeroObservedAtMs: null
+    });
+  }
+
+  return threads.map((thread) => ({
+    ...thread,
+    queueCount: queueStateByThreadId.get(thread.id)?.count ?? 0
+  }));
 }
 
 function isInternalAmbientTitle(value) {
@@ -868,6 +1556,56 @@ function timingLabel(thread, nowMs = renderTimeMs()) {
   return "열기";
 }
 
+function queueBadgeSvg(thread) {
+  const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
+  if (queueCount === 0) return "";
+  const label = queueCount > 9 ? "9+" : `+${queueCount}`;
+  return `
+    <rect x="88" y="108" width="31" height="19" rx="9.5" fill="${THEME.amber}" fill-opacity=".18" stroke="${THEME.amber}" stroke-opacity=".62"/>
+    <text x="103.5" y="122.5" fill="${THEME.amber}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" font-variant-numeric="tabular-nums" text-anchor="middle">${label}</text>`;
+}
+
+function ephemeralThreadSvg(thread) {
+  const styles = {
+    working: { accent: THEME.blue, label: "작업중" },
+    completed: { accent: THEME.green, label: "완료" },
+    stopped: { accent: THEME.red, label: "중단" },
+    idle: { accent: THEME.muted, label: "대기" },
+    error: { accent: THEME.amber, label: "오류" }
+  };
+  const style = styles[thread.status] ?? styles.idle;
+  const completionEffect = visibleCompletionPulseState(thread);
+  const completionStrength = completionEffect?.strength ?? 0;
+  const completionTimeChrome = completionEffect ? `
+    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.green}" fill-opacity="${(0.32 * completionStrength).toFixed(3)}" stroke="${THEME.green}" stroke-opacity="${(0.78 * completionStrength).toFixed(3)}" stroke-width="${(1 + completionStrength * 1.2).toFixed(2)}"/>` : "";
+  const timingX = thread.queueCount > 0 ? 53 : 72;
+  const completionTimeText = completionEffect ? `
+    <text x="${timingX}" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="21" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>` : "";
+  const titleFontSize = 20.5;
+  const titleX = 79;
+  const [line1, line2] = wrapTitle(thread.title, 5.05);
+  const hasSecondTitleLine = Boolean(line2);
+  const titleLine1Y = hasSecondTitleLine ? 65 : 79;
+  const iconYOffset = hasSecondTitleLine ? 0 : 14;
+  const activity = thread.activity ?? {
+    kind: thread.status === "completed" ? "complete" : thread.status === "working" ? "think" : "idle",
+    label: thread.status === "completed" ? "작업 종료" : thread.status === "working" ? "생각 중" : "다시 열기"
+  };
+  const rendered = shell(style.accent, `
+    <path d="M15 ${52 + iconYOffset}H25C28.3 ${52 + iconYOffset} 31 ${54.7 + iconYOffset} 31 ${58 + iconYOffset}V${59.5 + iconYOffset}C31 ${62.8 + iconYOffset} 28.3 ${65.5 + iconYOffset} 25 ${65.5 + iconYOffset}H20.5L16.5 ${68.5 + iconYOffset}V${65.1 + iconYOffset}C14.4 ${64.3 + iconYOffset} 13 ${62.2 + iconYOffset} 13 ${59.5 + iconYOffset}V${58 + iconYOffset}C13 ${54.7 + iconYOffset} 13.7 ${52 + iconYOffset} 15 ${52 + iconYOffset}Z" fill="none" stroke="${THEME.textSecondary}" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"/>
+    <path d="M22 ${55.5 + iconYOffset}V62M18.8 ${58.8 + iconYOffset}H25.2" stroke="${THEME.textSecondary}" stroke-width="1.7" stroke-linecap="round"/>
+    <text x="${titleX}" y="${titleLine1Y}" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line1)}</text>
+    ${hasSecondTitleLine ? `<text x="${titleX}" y="89" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line2)}</text>` : ""}
+    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
+    ${completionTimeChrome}
+    <text x="${timingX}" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="21" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>
+    ${queueBadgeSvg(thread)}
+    ${completionTimeText}`,
+    threadHeader(style.accent, thread.status, style.label, activity, thread.status === "working", thread.reasoningEffort, thread.serviceTier, completionEffect),
+    completionPulseChrome(completionEffect));
+  return applyVoiceTargetOverlay(rendered, thread.id);
+}
+
 function threadSvg(thread, slot) {
   if (!thread) {
     return shell(THEME.muted, `
@@ -876,6 +1614,7 @@ function threadSvg(thread, slot) {
       <text x="72" y="114" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="19.5" font-weight="600" text-anchor="middle">작업 없음</text>`,
       threadHeader(THEME.muted, "idle", "대기", { kind: "idle", label: "작업 대기" }));
   }
+  if (thread.ephemeral) return ephemeralThreadSvg(thread);
 
   const styles = {
     working: { accent: THEME.blue, label: "작업중" },
@@ -885,12 +1624,13 @@ function threadSvg(thread, slot) {
     error: { accent: THEME.amber, label: "오류" }
   };
   const style = styles[thread.status] ?? styles.idle;
-  const completionEffect = thread.status === "completed" ? completionPulseState(thread.id) : null;
+  const completionEffect = visibleCompletionPulseState(thread);
   const completionStrength = completionEffect?.strength ?? 0;
   const completionTimeChrome = completionEffect ? `
     <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.green}" fill-opacity="${(0.32 * completionStrength).toFixed(3)}" stroke="${THEME.green}" stroke-opacity="${(0.78 * completionStrength).toFixed(3)}" stroke-width="${(1 + completionStrength * 1.2).toFixed(2)}"/>` : "";
+  const timingX = thread.queueCount > 0 ? 53 : 72;
   const completionTimeText = completionEffect ? `
-    <text x="72" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="21" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>` : "";
+    <text x="${timingX}" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="21" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>` : "";
   const titleFontSize = 20.5;
   const titleX = thread.pinned ? 78 : 72;
   const [line1, line2] = wrapTitle(thread.title, thread.pinned ? 4.9 : 5.75);
@@ -907,22 +1647,24 @@ function threadSvg(thread, slot) {
   const pinIcon = thread.pinned ? `
     <path d="M${pinX + 2} ${49 + pinYOffset}H${pinX + 10}L${pinX + 8} ${54 + pinYOffset}L${pinX + 11} ${58 + pinYOffset}H${pinX + 1}L${pinX + 4} ${54 + pinYOffset}Z" fill="${THEME.textSecondary}"/>
     <path d="M${pinX + 6} ${58 + pinYOffset}V${66 + pinYOffset}" stroke="${THEME.textSecondary}" stroke-width="1.7" stroke-linecap="round"/>` : "";
-  return shell(style.accent, `
+  const rendered = shell(style.accent, `
     ${pinIcon}
     <text x="${titleX}" y="${titleLine1Y}" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line1)}</text>
     ${hasSecondTitleLine ? `<text x="72" y="89" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line2)}</text>` : ""}
     <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
     ${completionTimeChrome}
-    <text x="72" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="21" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
+    <text x="${timingX}" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="21" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
+    ${queueBadgeSvg(thread)}
     ${completionTimeText}`,
     threadHeader(style.accent, thread.status, style.label, activity, thread.status === "working", thread.reasoningEffort, thread.serviceTier, completionEffect),
     completionPulseChrome(completionEffect));
+  return applyVoiceTargetOverlay(rendered, thread.id);
 }
 
 async function readUsage() {
   const { stdout } = await execFileAsync(
     CODEXBAR,
-    ["usage", "--provider", "codex", "--source", "auto", "--format", "json", "--json-only"],
+    ["usage", "--provider", "codex", "--source", "oauth", "--format", "json", "--json-only"],
     { timeout: 15000, maxBuffer: 1024 * 1024 }
   );
   const rows = JSON.parse(stdout);
@@ -939,6 +1681,372 @@ async function readPinnedIds() {
   } catch {
     return [];
   }
+}
+
+function uuidV7TimestampMs(id) {
+  if (!UUID_PATTERN.test(id)) return null;
+  const compact = id.replaceAll("-", "").toLowerCase();
+  if (compact[12] !== "7") return null;
+  const timestampMs = Number.parseInt(compact.slice(0, 12), 16);
+  return Number.isFinite(timestampMs) ? timestampMs : null;
+}
+
+function threadRecencyMs(thread) {
+  const raw = Number(thread?.recency_at ?? thread?.updated_at ?? 0);
+  if (!Number.isFinite(raw) || raw <= 0) return 0;
+  return raw > 100_000_000_000 ? raw : raw * 1000;
+}
+
+async function readAppServerSessionStartMs(nowMs = Date.now()) {
+  if (nowMs - appServerSessionCache.checkedAtMs < APP_SERVER_SESSION_CACHE_MS) {
+    return appServerSessionCache.startedAtMs;
+  }
+
+  let startedAtMs = null;
+  try {
+    const { stdout } = await execFileAsync("/bin/ps", ["-axo", "pid=,lstart=,command="], {
+      timeout: 1500,
+      maxBuffer: 2 * 1024 * 1024
+    });
+    for (const line of stdout.split(/\r?\n/)) {
+      const match = line.match(/^\s*\d+\s+([A-Z][a-z]{2}\s+[A-Z][a-z]{2}\s+\d{1,2}\s+\d{2}:\d{2}:\d{2}\s+\d{4})\s+(.+)$/);
+      if (!match) continue;
+      const command = match[2];
+      if (!command.includes(".app/Contents/Resources/codex") || !command.includes("app-server")) continue;
+      const isDesktopSession = command.includes("--analytics-default-enabled")
+        || !command.includes("--listen stdio://");
+      if (!isDesktopSession) continue;
+      const candidate = Date.parse(match[1]);
+      if (Number.isFinite(candidate)) startedAtMs = Math.max(startedAtMs ?? 0, candidate);
+    }
+  } catch {
+    // Fail closed: without the live desktop session boundary, old prompt
+    // history must not be mistaken for an active temporary side chat.
+  }
+
+  if (Number.isFinite(startedAtMs) && startedAtMs !== sideChatSessionStartMs) {
+    sideChatSessionStartMs = startedAtMs;
+    sideChatParentById.clear();
+    sideChatLifecycleCache.clear();
+    closedSideChatAtMs.clear();
+    sideChatCloseLogOffsets.clear();
+  }
+  appServerSessionCache = { checkedAtMs: nowMs, startedAtMs };
+  return startedAtMs;
+}
+
+async function readEphemeralSideChats(persistentRows, parentId) {
+  const sessionStartedAtMs = await readAppServerSessionStartMs();
+  if (!Number.isFinite(sessionStartedAtMs)) return [];
+
+  try {
+    const state = JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
+    const promptHistory = state?.["electron-persisted-atom-state"]?.["prompt-history"];
+    if (!promptHistory || typeof promptHistory !== "object") return [];
+    const persistentIds = new Set(persistentRows.map((row) => row.id));
+    const sideChats = [];
+
+    for (const [id, prompts] of Object.entries(promptHistory)) {
+      if (!UUID_PATTERN.test(id) || persistentIds.has(id) || !Array.isArray(prompts)) continue;
+      const createdAtMs = uuidV7TimestampMs(id);
+      if (!Number.isFinite(createdAtMs)
+          || createdAtMs + APP_SERVER_START_TOLERANCE_MS < sessionStartedAtMs) continue;
+      const firstPrompt = prompts.find((prompt) => typeof prompt === "string" && prompt.trim());
+      if (!firstPrompt || isInternalAmbientTitle(firstPrompt)) continue;
+      const rememberedParentId = sideChatParentById.get(id) ?? parentId ?? null;
+      if (rememberedParentId) sideChatParentById.set(id, rememberedParentId);
+      sideChats.push({
+        id,
+        title: normalizeTitle(firstPrompt),
+        cwd: "",
+        rollout_path: null,
+        recency_at: Math.floor(createdAtMs / 1000),
+        updated_at: Math.floor(createdAtMs / 1000),
+        createdAtMs,
+        promptCount: prompts.filter((prompt) => typeof prompt === "string" && prompt.trim()).length,
+        parentId: rememberedParentId,
+        ephemeral: true,
+        pinned: false
+      });
+    }
+
+    const activeSideChatIds = new Set(sideChats.map((thread) => thread.id));
+    for (const id of sideChatParentById.keys()) {
+      if (!activeSideChatIds.has(id)) sideChatParentById.delete(id);
+    }
+    // Prompt history is persisted asynchronously and can briefly omit an
+    // entry while Codex rewrites the state file. Keep lifecycle/close memory
+    // for the lifetime of the app-server session so a closed side chat cannot
+    // flash back into the list after one transient read.
+    return sideChats.sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+  } catch {
+    return [];
+  }
+}
+
+function datedLogDirectory(date) {
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  return path.join(CODEX_DESKTOP_LOG_ROOT, year, month, day);
+}
+
+async function readCurrentDesktopLogPaths(nowMs = Date.now()) {
+  if (nowMs - desktopLogPathCache.checkedAtMs < DESKTOP_LOG_PATH_CACHE_MS) {
+    return desktopLogPathCache.paths;
+  }
+
+  const logs = [];
+  const dates = [new Date(nowMs), new Date(nowMs - 24 * 60 * 60 * 1000)];
+  for (const date of dates) {
+    const directory = datedLogDirectory(date);
+    let entries;
+    try {
+      entries = await fs.readdir(directory, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isFile() || !/^codex-desktop-.*\.log$/.test(entry.name)) continue;
+      const filePath = path.join(directory, entry.name);
+      try {
+        const stat = await fs.stat(filePath);
+        logs.push({ path: filePath, name: entry.name, mtimeMs: stat.mtimeMs });
+      } catch {
+        // A rotating log may disappear between directory enumeration and stat.
+      }
+    }
+  }
+  logs.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  const latest = logs[0] ?? null;
+  const sessionPrefix = latest?.name.match(/^(codex-desktop-[0-9a-f-]{36}-\d+)-/i)?.[1] ?? null;
+  const paths = sessionPrefix
+    ? logs.filter((log) => log.name.startsWith(`${sessionPrefix}-`)).map((log) => log.path)
+    : latest ? [latest.path] : [];
+  desktopLogPathCache = { checkedAtMs: nowMs, path: paths[0] ?? null, paths };
+  return paths;
+}
+
+async function readLatestDesktopLogPath(nowMs = Date.now()) {
+  return (await readCurrentDesktopLogPaths(nowMs))[0] ?? null;
+}
+
+async function refreshClosedSideChatsFromLogs(threads) {
+  if (threads.length === 0) return;
+  const candidateIds = new Set(threads.map((thread) => thread.id));
+  const filePaths = await readCurrentDesktopLogPaths();
+
+  for (const filePath of filePaths) {
+    let stat;
+    try {
+      stat = await fs.stat(filePath);
+    } catch {
+      continue;
+    }
+    const previousSize = sideChatCloseLogOffsets.get(filePath);
+    const start = Number.isFinite(previousSize) && previousSize <= stat.size
+      ? Math.max(0, previousSize - 512)
+      : 0;
+    if (start >= stat.size) continue;
+
+    const handle = await fs.open(filePath, "r");
+    const chunkSize = 512 * 1024;
+    let cursor = start;
+    let carry = "";
+    try {
+      while (cursor < stat.size) {
+        const length = Math.min(chunkSize, stat.size - cursor);
+        const buffer = Buffer.alloc(length);
+        await handle.read(buffer, 0, length, cursor);
+        cursor += length;
+        const lines = `${carry}${buffer.toString("utf8")}`.split("\n");
+        carry = lines.pop() ?? "";
+        for (const line of lines) {
+          if (!line.includes("method=thread/unsubscribe")) continue;
+          const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
+          if (!threadId || !candidateIds.has(threadId)) continue;
+          const timestampMs = Date.parse(line.slice(0, 24));
+          closedSideChatAtMs.set(threadId, Number.isFinite(timestampMs) ? timestampMs : Date.now());
+        }
+      }
+      if (carry.includes("method=thread/unsubscribe")) {
+        const threadId = carry.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
+        if (threadId && candidateIds.has(threadId)) {
+          const timestampMs = Date.parse(carry.slice(0, 24));
+          closedSideChatAtMs.set(threadId, Number.isFinite(timestampMs) ? timestampMs : Date.now());
+        }
+      }
+      sideChatCloseLogOffsets.set(filePath, stat.size);
+    } finally {
+      await handle.close();
+    }
+  }
+}
+
+function sideChatLifecycleFallback(promptCount = 0) {
+  return {
+    status: "idle",
+    startedAtMs: null,
+    endedAtMs: null,
+    reasoningEffort: null,
+    serviceTier: "default",
+    activity: { kind: "idle", label: "사이드챗" },
+    promptCount
+  };
+}
+
+async function scanSideChatLifecycles(filePath, threads) {
+  const stat = await fs.stat(filePath);
+  const handle = await fs.open(filePath, "r");
+  const states = new Map(threads.map((thread) => [thread.id, {
+    id: thread.id,
+    promptCount: thread.promptCount ?? 0,
+    firstEvent: null,
+    startedAtMs: null,
+    endedAtMs: null,
+    done: false
+  }]));
+  const chunkSize = 512 * 1024;
+  let cursor = stat.size;
+  let searched = 0;
+  let carry = "";
+
+  const consumeLine = (line) => {
+    if (!line) return;
+    const timestampMs = Date.parse(line.slice(0, 24));
+    if (!Number.isFinite(timestampMs)) return;
+    for (const state of states.values()) {
+      if (state.done || !line.includes(state.id)) continue;
+      // Only an explicit unsubscribe is terminal. "no rollout found" can be
+      // emitted temporarily by dictation/queued-follow-up helpers while the
+      // same side chat is still open and may receive another turn.
+      const isClosed = line.includes("method=thread/unsubscribe");
+      const isStart = line.includes("Reasoning summary turn-start config resolved");
+      const isComplete = line.includes("IAB_LIFECYCLE ended browser use session activity")
+        || line.includes("[desktop-notifications] show turn-complete");
+      if (!isClosed && !isStart && !isComplete) continue;
+
+      if (!state.firstEvent) {
+        state.firstEvent = isClosed ? "closed" : isStart ? "start" : "complete";
+        if (isClosed) {
+          state.endedAtMs = timestampMs;
+          state.done = true;
+        } else if (isStart) {
+          state.startedAtMs = timestampMs;
+          state.done = true;
+        } else {
+          state.endedAtMs = timestampMs;
+        }
+      } else if (state.firstEvent === "complete" && isStart) {
+        state.startedAtMs = timestampMs;
+        state.done = true;
+      }
+    }
+  };
+
+  try {
+    while (cursor > 0 && searched < SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES
+        && [...states.values()].some((state) => !state.done)) {
+      const length = Math.min(chunkSize, cursor, SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES - searched);
+      const start = cursor - length;
+      const buffer = Buffer.alloc(length);
+      await handle.read(buffer, 0, length, start);
+      const lines = `${buffer.toString("utf8")}${carry}`.split("\n");
+      carry = lines.shift() ?? "";
+      for (let index = lines.length - 1; index >= 0; index -= 1) consumeLine(lines[index]);
+      cursor = start;
+      searched += length;
+    }
+    if (cursor === 0) consumeLine(carry);
+  } finally {
+    await handle.close();
+  }
+
+  const lifecycles = new Map();
+  for (const state of states.values()) {
+    let lifecycle;
+    if (state.firstEvent === "closed") {
+      lifecycle = {
+        status: "closed",
+        startedAtMs: null,
+        endedAtMs: state.endedAtMs,
+        reasoningEffort: null,
+        serviceTier: "default",
+        activity: { kind: "idle", label: "닫힘" },
+        promptCount: state.promptCount
+      };
+    } else if (state.firstEvent === "start" && Number.isFinite(state.startedAtMs)) {
+      lifecycle = {
+        status: "working",
+        startedAtMs: state.startedAtMs,
+        endedAtMs: null,
+        reasoningEffort: null,
+        serviceTier: "default",
+        activity: { kind: "think", label: "생각 중" },
+        promptCount: state.promptCount
+      };
+    } else if (state.firstEvent === "complete") {
+      lifecycle = {
+        status: "completed",
+        startedAtMs: state.startedAtMs,
+        endedAtMs: state.endedAtMs,
+        reasoningEffort: null,
+        serviceTier: "default",
+        activity: { kind: "complete", label: "작업 종료" },
+        promptCount: state.promptCount
+      };
+    } else {
+      lifecycle = sideChatLifecycleFallback(state.promptCount);
+    }
+    lifecycles.set(state.id, lifecycle);
+  }
+  return lifecycles;
+}
+
+async function readSideChatLifecycles(threads) {
+  const result = new Map();
+  await refreshClosedSideChatsFromLogs(threads);
+  for (const thread of threads) {
+    const closedAtMs = closedSideChatAtMs.get(thread.id);
+    if (!Number.isFinite(closedAtMs)) continue;
+    const lifecycle = {
+      status: "closed",
+      startedAtMs: null,
+      endedAtMs: closedAtMs,
+      reasoningEffort: null,
+      serviceTier: "default",
+      activity: { kind: "idle", label: "닫힘" },
+      promptCount: thread.promptCount ?? 0
+    };
+    sideChatLifecycleCache.set(thread.id, lifecycle);
+    result.set(thread.id, lifecycle);
+  }
+  // Always recheck visible side chats. A queued follow-up can already be in
+  // prompt history while the previous turn is completing, so caching that
+  // completed state by prompt count alone could hide the next turn's start.
+  const needsScan = threads.filter((thread) => !closedSideChatAtMs.has(thread.id));
+  if (needsScan.length === 0) return result;
+
+  try {
+    const filePath = await readLatestDesktopLogPath();
+    if (!filePath) throw new Error("desktop log unavailable");
+    const scanned = await scanSideChatLifecycles(filePath, needsScan);
+    for (const thread of needsScan) {
+      const lifecycle = scanned.get(thread.id) ?? sideChatLifecycleFallback(thread.promptCount ?? 0);
+      if (lifecycle.status === "closed" && Number.isFinite(lifecycle.endedAtMs)) {
+        closedSideChatAtMs.set(thread.id, lifecycle.endedAtMs);
+      }
+      sideChatLifecycleCache.set(thread.id, lifecycle);
+      result.set(thread.id, lifecycle);
+    }
+  } catch {
+    for (const thread of needsScan) {
+      const cached = sideChatLifecycleCache.get(thread.id);
+      const lifecycle = cached ?? sideChatLifecycleFallback(thread.promptCount ?? 0);
+      result.set(thread.id, lifecycle);
+    }
+  }
+  return result;
 }
 
 async function readThreadRows() {
@@ -1178,6 +2286,7 @@ async function statusForThread(thread, activeThreadIds) {
 }
 
 async function readTopThreads() {
+  const queueWindowsPromise = readCodexQueueWindows();
   const [rows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
     readThreadRows(),
     readPinnedIds(),
@@ -1187,6 +2296,18 @@ async function readTopThreads() {
   const visibleRows = rows
     .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
     .filter((row) => !isInternalAmbientTitle(row.title));
+  const sideChats = await readEphemeralSideChats(visibleRows, visibleRows[0]?.id ?? null);
+  const sideChatLifecycles = await readSideChatLifecycles(sideChats);
+  const openSideChats = sideChats.filter((thread) => !closedSideChatAtMs.has(thread.id)
+    && sideChatLifecycles.get(thread.id)?.status !== "closed");
+  await resolvePendingSideChatTarget(openSideChats);
+  knownSideChatIds = new Set(sideChats.map((thread) => thread.id));
+  for (const thread of sideChats) {
+    if (sideChatLifecycles.get(thread.id)?.status === "closed") sideChatParentById.delete(thread.id);
+  }
+  const recentRows = [...visibleRows, ...openSideChats]
+    .sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+  mostRecentThreadId = recentRows[0]?.id ?? null;
   const byId = new Map(visibleRows.map((row) => [row.id, row]));
   const selected = [];
   const selectedIds = new Set();
@@ -1199,15 +2320,49 @@ async function readTopThreads() {
     if (selected.length === THREAD_COUNT) break;
   }
 
-  for (const row of visibleRows) {
+  for (const row of recentRows) {
     if (selected.length === THREAD_COUNT) break;
     if (selectedIds.has(row.id)) continue;
     selected.push({ ...row, pinned: false });
     selectedIds.add(row.id);
   }
 
-  const lifecycles = await Promise.all(selected.map((thread) => statusForThread(thread, activeThreadIds)));
-  return selected.map((thread, index) => ({ ...thread, ...lifecycles[index] }));
+  const persistentThreads = selected.filter((thread) => !thread.ephemeral);
+  const persistentLifecycles = await Promise.all(
+    persistentThreads.map((thread) => statusForThread(thread, activeThreadIds))
+  );
+  const lifecycleById = new Map(
+    persistentThreads.map((thread, index) => [thread.id, persistentLifecycles[index]])
+  );
+
+  // Side chats do not have rollout JSONL files. Their desktop log provides
+  // reliable turn start/end timestamps, while the parent thread provides the
+  // model's reasoning effort and service tier used by the shared composer.
+  const ephemeralThreads = selected.filter((thread) => thread.ephemeral);
+  const ephemeralLifecycles = sideChatLifecycles;
+  const missingParentRows = [...new Set(ephemeralThreads.map((thread) => thread.parentId).filter(Boolean))]
+    .filter((id) => !lifecycleById.has(id))
+    .map((id) => byId.get(id))
+    .filter(Boolean);
+  const missingParentLifecycles = await Promise.all(
+    missingParentRows.map((thread) => statusForThread(thread, activeThreadIds))
+  );
+  missingParentRows.forEach((thread, index) => lifecycleById.set(thread.id, missingParentLifecycles[index]));
+
+  const hydratedThreads = selected.map((thread) => {
+    if (!thread.ephemeral) return { ...thread, ...lifecycleById.get(thread.id) };
+    const lifecycle = ephemeralLifecycles.get(thread.id) ?? sideChatLifecycleFallback(thread.promptCount ?? 0);
+    const parentLifecycle = lifecycleById.get(thread.parentId);
+    return {
+      ...thread,
+      ...lifecycle,
+      reasoningEffort: lifecycle.reasoningEffort ?? parentLifecycle?.reasoningEffort ?? "medium",
+      serviceTier: lifecycle.serviceTier !== "default"
+        ? lifecycle.serviceTier
+        : parentLifecycle?.serviceTier ?? "default"
+    };
+  });
+  return applyQueueState(hydratedThreads, await queueWindowsPromise);
 }
 
 async function readSystemAppearance() {
@@ -1257,19 +2412,25 @@ function renderStaticContexts() {
   }
 }
 
-function startCompletionEffects(threadId, nowMs = Date.now()) {
+function startCompletionEffects(threadId, nowMs = Date.now(), reason = "completion") {
   completionPulseStartedAt.set(threadId, nowMs);
+  completionPulseReasonByThreadId.set(threadId, reason);
   globalCompletionStartedAtMs = nowMs;
   globalCompletionThreadId = threadId;
   globalCompletionWasRendered = false;
   globalCompletionRenderGroup = 0;
 }
 
+function clearCompletionEffect(threadId) {
+  completionPulseStartedAt.delete(threadId);
+  completionPulseReasonByThreadId.delete(threadId);
+}
+
 function renderGlobalCompletionContexts(nowMs = Date.now()) {
   const effect = globalCompletionPulseState(nowMs);
   if (effect) {
-    // Update alternating halves every 25 ms. Each plugin-owned key receives a
-    // steady 20 fps animation, while Stream Deck sees small image bursts
+    // Update alternating halves every 50 ms. Each plugin-owned key receives a
+    // steady 10 fps animation, while Stream Deck sees small image bursts
     // instead of every SVG arriving at once. The completed key is rendered
     // here too, preventing its old 30 fps loop from starving nearby buttons.
     globalCompletionWasRendered = true;
@@ -1302,7 +2463,7 @@ function renderGlobalCompletionContexts(nowMs = Date.now()) {
 }
 
 async function refreshUsage(feedbackContext) {
-  if (feedbackContext) showFeedback(feedbackContext, "loading", "사용량 확인");
+  if (feedbackContext) showFeedback(feedbackContext, "loading", "확인 중");
   if (!activeUsageRefresh) {
     activeUsageRefresh = (async () => {
       try {
@@ -1335,6 +2496,17 @@ function renderThreadContexts() {
   }
 }
 
+function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now()) {
+  if (!targetThreadId) return;
+  for (const [context, action] of contexts) {
+    const slot = THREAD_SLOT_BY_ACTION.get(action);
+    if (slot === undefined || threadSlots[slot]?.id !== targetThreadId) continue;
+    const svg = threadSvg(threadSlots[slot], slot);
+    contextImages.set(context, svg);
+    sendImage(context, composedContextSvg(context, svg, nowMs));
+  }
+}
+
 function renderAnimatedThreadContexts(nowMs = Date.now()) {
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
@@ -1348,7 +2520,7 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
     ) {
       setImage(context, threadSvg(threadSlots[slot], slot));
     } else if (Number.isFinite(completionStartedAtMs)) {
-      completionPulseStartedAt.delete(thread.id);
+      clearCompletionEffect(thread.id);
       setImage(context, threadSvg(threadSlots[slot], slot));
     }
   }
@@ -1359,35 +2531,61 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
   if (!hasLoadedThreadState) {
     for (const thread of nextThreads) {
       if (thread?.status === "completed" && Number.isFinite(thread.endedAtMs)) {
+        const completedDuringStartup = thread.endedAtMs >= pluginStartedAtMs - COMPLETION_STARTUP_GRACE_MS
+          && thread.endedAtMs <= nowMs + APP_SERVER_START_TOLERANCE_MS;
+        if (completedDuringStartup) startCompletionEffects(thread.id, nowMs, "completion");
         observedCompletionEndMs.set(thread.id, thread.endedAtMs);
       }
     }
     hasLoadedThreadState = true;
+    lastThreadTransitionScanAtMs = nowMs;
     return;
   }
 
+  const unseenCompletionFloorMs = lastThreadTransitionScanAtMs - COMPLETION_OBSERVATION_OVERLAP_MS;
   const visibleIds = new Set(nextThreads.filter(Boolean).map((thread) => thread.id));
   for (const thread of nextThreads) {
     if (!thread?.id) continue;
+    const previous = previousById.get(thread.id);
+    const previousQueueCount = Math.max(0, Number.parseInt(previous?.queueCount, 10) || 0);
+    const nextQueueCount = Math.max(0, Number.parseInt(thread.queueCount, 10) || 0);
+    const queueAdvanced = Boolean(previous) && previousQueueCount > nextQueueCount;
+
     if (thread.status === "working") {
-      completionPulseStartedAt.delete(thread.id);
+      if (queueAdvanced) {
+        startCompletionEffects(thread.id, nowMs, "queue-advance");
+      } else {
+        const startedAtMs = completionPulseStartedAt.get(thread.id);
+        const keepQueuePulse = completionPulseReasonByThreadId.get(thread.id) === "queue-advance"
+          && Number.isFinite(startedAtMs)
+          && nowMs - startedAtMs < THREAD_COMPLETION_PULSE_DURATION_MS;
+        if (!keepQueuePulse) clearCompletionEffect(thread.id);
+      }
       continue;
     }
-    if (thread.status !== "completed") continue;
+    if (thread.status !== "completed") {
+      if (queueAdvanced) startCompletionEffects(thread.id, nowMs, "queue-advance");
+      continue;
+    }
 
-    const previous = previousById.get(thread.id);
     const knownEndMs = observedCompletionEndMs.get(thread.id);
     const hasNewEndMarker = Number.isFinite(thread.endedAtMs)
-      && Number.isFinite(knownEndMs)
-      && thread.endedAtMs !== knownEndMs;
+      && (
+        (Number.isFinite(knownEndMs) && thread.endedAtMs !== knownEndMs)
+        || (!Number.isFinite(knownEndMs)
+          && thread.endedAtMs >= unseenCompletionFloorMs
+          && thread.endedAtMs <= nowMs + APP_SERVER_START_TOLERANCE_MS)
+      );
     const justTransitioned = previous && previous.status !== "completed";
-    if (justTransitioned || hasNewEndMarker) startCompletionEffects(thread.id, nowMs);
+    if (justTransitioned || hasNewEndMarker) startCompletionEffects(thread.id, nowMs, "completion");
+    else if (queueAdvanced) startCompletionEffects(thread.id, nowMs, "queue-advance");
     if (Number.isFinite(thread.endedAtMs)) observedCompletionEndMs.set(thread.id, thread.endedAtMs);
   }
 
   for (const threadId of completionPulseStartedAt.keys()) {
-    if (!visibleIds.has(threadId)) completionPulseStartedAt.delete(threadId);
+    if (!visibleIds.has(threadId)) clearCompletionEffect(threadId);
   }
+  lastThreadTransitionScanAtMs = nowMs;
 }
 
 async function refreshThreads(feedbackContext) {
@@ -1422,21 +2620,53 @@ async function openThread(context, slot) {
   const thread = threadSlots[slot];
   if (!thread?.id) {
     showFeedback(context, "error", "작업 없음");
-    return;
+    return false;
   }
+  if (thread.ephemeral) {
+    return openListedSideChat(context, thread);
+  }
+  pendingSideChatTarget = null;
+  lastOpenedThreadId = thread.id;
+  lastOpenedThreadAtMs = Date.now();
   showFeedback(context, "loading", "여는 중");
   try {
     await execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], { timeout: 5000 });
     showFeedback(context, "success", "전환 완료");
     setTimeout(() => void refreshThreads(), 1000);
+    return true;
   } catch (error) {
     showFeedback(context, "error", "열기 실패");
     console.error(`Could not open Codex thread: ${error?.message ?? "unknown error"}`);
+    return false;
+  }
+}
+
+async function openListedSideChat(context, thread) {
+  pendingSideChatTarget = null;
+  lastOpenedThreadId = thread.id;
+  lastOpenedThreadAtMs = Date.now();
+  showFeedback(context, "loading", "사이드챗 열기");
+  try {
+    // A listed side chat already has a live conversation id. Replaying the
+    // Option+Command+S creation shortcut here opens a new side chat instead of
+    // focusing the listed one. The normal Codex thread deep link also accepts
+    // these ephemeral ids while their app-server session is alive.
+    await execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], { timeout: 5000 });
+    showFeedback(context, "success", "사이드챗 전환");
+    setTimeout(() => void refreshThreads(), 1000);
+    return true;
+  } catch (error) {
+    showFeedback(context, "error", "열기 실패");
+    console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
+    return false;
   }
 }
 
 async function openNewThread(context) {
   try {
+    pendingSideChatTarget = null;
+    lastOpenedThreadId = null;
+    lastOpenedThreadAtMs = null;
     await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
     await new Promise((resolve) => setTimeout(resolve, 350));
     if (!runKeyBridgeSync("new-thread", context)) return;
@@ -1448,9 +2678,15 @@ async function openNewThread(context) {
 
 async function openSideChat(context) {
   try {
+    pendingSideChatTarget = null;
+    const requestedAtMs = Date.now();
+    lastOpenedThreadId = null;
+    lastOpenedThreadAtMs = null;
     await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
     await new Promise((resolve) => setTimeout(resolve, 350));
     if (!runKeyBridgeSync("side-chat", context)) return;
+    pendingSideChatTarget = { requestedAtMs, knownIds: new Set(knownSideChatIds) };
+    scheduleSideChatTargetRefreshes(requestedAtMs);
   } catch (error) {
     showFeedback(context, "error", "열기 실패");
     console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
@@ -1471,7 +2707,7 @@ function switchProfilePage(context, device, action, settings = {}) {
     : direction < 0 ? 0 : pageCount - 1;
   const page = (currentPage + direction + pageCount) % pageCount;
 
-  send({
+  const message = {
     event: "switchToProfile",
     // switchToProfile is a plugin-level command; Stream Deck rejects an
     // action-instance context here even though key events provide one.
@@ -1481,7 +2717,8 @@ function switchProfilePage(context, device, action, settings = {}) {
       profile: DISTRIBUTED_PROFILE_NAME,
       page
     }
-  });
+  };
+  send(message);
 }
 
 function registerPlugin() {
@@ -1510,6 +2747,9 @@ function registerPlugin() {
 
     if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
       contexts.set(message.context, message.action);
+      // Completion monitoring must have a baseline even when the active page
+      // contains only usage, media, or navigation actions.
+      if (!hasLoadedThreadState) void refreshThreads();
       if (message.action === ACTIONS.weekly) {
         // Stream Deck restores the last dynamic key image before a plugin has
         // reconnected. Replace it synchronously so stale usage never flashes.
@@ -1526,18 +2766,22 @@ function registerPlugin() {
         if (svg) setImage(message.context, svg);
       }
     } else if (message.event === "willDisappear") {
-      endVoiceHoldSync(message.context);
+      endVoiceHoldSync(message.context, false);
+      cancelThreadPress(message.context, false);
+      cancelVoiceTranscription(message.context);
+      cancelSendPress(message.context);
+      voiceStateByContext.delete(message.context);
       contexts.delete(message.context);
       contextImages.delete(message.context);
       contextFeedback.delete(message.context);
     } else if (message.event === "keyDown" && contexts.has(message.context)) {
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice && !voiceHeldContexts.has(message.context)) {
-        if (beginVoiceHoldSync(message.context)) {
-          setImage(message.context, voiceSvg(true));
-        }
+        beginVoiceHoldSync(message.context);
       } else if (action === ACTIONS.send) {
-        runKeyBridge("send", message.context);
+        beginSendPress(message.context);
+      } else if (THREAD_SLOT_BY_ACTION.has(action)) {
+        beginThreadPress(message.context, THREAD_SLOT_BY_ACTION.get(action));
       } else if (action === ACTIONS.appSwitch) {
         runKeyBridge("app-switch", message.context);
       } else if (MEDIA_COMMAND_BY_ACTION.has(action)) {
@@ -1547,8 +2791,11 @@ function registerPlugin() {
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice) {
         endVoiceHoldSync(message.context);
-        setImage(message.context, voiceSvg(false));
-      } else if (action === ACTIONS.send || action === ACTIONS.appSwitch || MEDIA_COMMAND_BY_ACTION.has(action)) {
+      } else if (action === ACTIONS.send) {
+        endSendPress(message.context);
+      } else if (THREAD_SLOT_BY_ACTION.has(action)) {
+        endThreadPress(message.context);
+      } else if (action === ACTIONS.appSwitch || MEDIA_COMMAND_BY_ACTION.has(action)) {
         // These are dispatched on keyDown so their response feels immediate.
       } else if (PAGE_DIRECTION_BY_ACTION.has(action)) {
         switchProfilePage(message.context, message.device, action, message.payload?.settings);
@@ -1558,9 +2805,6 @@ function registerPlugin() {
         void openNewThread(message.context);
       } else if (action === ACTIONS.sideChat) {
         void openSideChat(message.context);
-      } else {
-        const slot = THREAD_SLOT_BY_ACTION.get(action);
-        if (slot !== undefined) void openThread(message.context, slot);
       }
     }
   });
@@ -1581,7 +2825,9 @@ function registerPlugin() {
   }, GLOBAL_COMPLETION_FRAME_INTERVAL_MS);
 
   setInterval(() => {
-    if ([...contexts.values()].some((action) => THREAD_SLOT_BY_ACTION.has(action))) void refreshThreads();
+    // Keep completion detection alive on every plugin-owned page. Previously
+    // it stopped on the media page because that page has no thread cards.
+    if (contexts.size > 0) void refreshThreads();
   }, 3000);
 
   setInterval(() => {
@@ -1591,43 +2837,28 @@ function registerPlugin() {
   setInterval(() => {
     if (contexts.size > 0) void refreshAppearance();
   }, 2000);
+
+  setInterval(() => {
+    if (voiceTranscriptionByContext.size > 0 || voiceStateResetAtMs.size > 0) {
+      updateVoiceTranscriptionStates();
+    }
+  }, VOICE_TRANSCRIPTION_POLL_INTERVAL_MS);
 }
 
-function renderDemo(outputPath, mode = "dark") {
-  appearanceMode = mode;
-  THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
-  const nowMs = 1_800_000_000_000;
-  fixedRenderTimeMs = nowMs;
-  const keySvgs = [
-    usageSvg(74, false),
-    sideChatSvg(),
-    newThreadSvg(),
-    sendSvg(),
-    threadSvg({
-      id: "00000000-0000-4000-8000-000000000001",
-      title: "리팩터링",
-      pinned: true,
-      status: "working",
-      startedAtMs: nowMs - 4 * 60_000 - 12_000,
-      endedAtMs: null,
-      activity: { kind: "edit", label: "코드 수정" },
-      reasoningEffort: "ultra",
-      serviceTier: "priority"
-    }, 0),
-    appSwitchSvg(),
-    voiceSvg(false),
-    threadSvg({
-      id: "00000000-0000-4000-8000-000000000002",
-      title: "빌드 검증",
-      pinned: false,
-      status: "completed",
-      startedAtMs: nowMs - 12 * 60_000 - 17_000,
-      endedAtMs: nowMs - 10 * 60_000,
-      activity: { kind: "complete", label: "작업 완료" },
-      reasoningEffort: "high",
-      serviceTier: "default"
-    }, 1)
-  ];
+const DEMO_EPOCH_MS = 1_800_000_000_000;
+const DEMO_WORKING_ID = "00000000-0000-4000-8000-000000000001";
+const DEMO_COMPLETED_ID = "00000000-0000-4000-8000-000000000002";
+
+function resetDemoEffects() {
+  completionPulseStartedAt.clear();
+  completionPulseReasonByThreadId.clear();
+  voiceStateByContext.clear();
+  voiceTargetThreadByContext.clear();
+  globalCompletionStartedAtMs = null;
+  globalCompletionThreadId = null;
+}
+
+function demoPreviewSvg(keySvgs) {
   const margin = 28;
   const gap = 18;
   const keySize = 144;
@@ -1641,15 +2872,108 @@ function renderDemo(outputPath, mode = "dark") {
     const data = Buffer.from(svg).toString("base64");
     return `<image x="${x}" y="${y}" width="${keySize}" height="${keySize}" href="data:image/svg+xml;base64,${data}"/>`;
   }).join("\n  ");
-  const preview = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <rect width="${width}" height="${height}" rx="34" fill="#2F2F2F"/>
   ${images}
 </svg>\n`;
+}
+
+function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
+  resetDemoEffects();
+  fixedRenderTimeMs = nowMs;
+  const completionStartMs = DEMO_EPOCH_MS + 3_200;
+  const hasCompleted = animated && elapsedMs >= 3_200;
+  const queueCount = animated && elapsedMs >= 2_500 ? 2 : 3;
+  let voiceState = "idle";
+  if (animated && elapsedMs >= 1_000 && elapsedMs < 1_900) voiceState = "recording";
+  else if (animated && elapsedMs >= 1_900 && elapsedMs < 2_550) voiceState = "transcribing";
+  else if (animated && elapsedMs >= 2_550 && elapsedMs < 3_200) voiceState = "sent";
+
+  if (hasCompleted) {
+    completionPulseStartedAt.set(DEMO_WORKING_ID, completionStartMs);
+    completionPulseReasonByThreadId.set(DEMO_WORKING_ID, "completion");
+    globalCompletionStartedAtMs = completionStartMs;
+    globalCompletionThreadId = DEMO_WORKING_ID;
+  }
+
+  const workingThread = {
+    id: DEMO_WORKING_ID,
+    title: "릴리스 준비",
+    pinned: true,
+    status: hasCompleted ? "completed" : "working",
+    startedAtMs: DEMO_EPOCH_MS - 4 * 60_000 - 12_000,
+    endedAtMs: hasCompleted ? completionStartMs : null,
+    activity: hasCompleted
+      ? { kind: "complete", label: "작업 완료" }
+      : elapsedMs >= 2_550
+        ? { kind: "inspect", label: "코드 검증" }
+        : { kind: "edit", label: "코드 수정" },
+    reasoningEffort: "ultra",
+    serviceTier: "priority",
+    queueCount: hasCompleted ? 0 : queueCount
+  };
+  const completedThread = {
+    id: DEMO_COMPLETED_ID,
+    title: "문서 이미지",
+    pinned: false,
+    status: "completed",
+    startedAtMs: DEMO_EPOCH_MS - 12 * 60_000 - 17_000,
+    endedAtMs: DEMO_EPOCH_MS - 10 * 60_000,
+    activity: { kind: "complete", label: "작업 완료" },
+    reasoningEffort: "high",
+    serviceTier: "default",
+    queueCount: 0
+  };
+  const keySvgs = [
+    usageSvg(74, false),
+    sideChatSvg(),
+    newThreadSvg(),
+    sendSvg(),
+    threadSvg(workingThread, 0),
+    appSwitchSvg(),
+    voiceSvg(voiceState, nowMs),
+    threadSvg(completedThread, 1)
+  ];
+  const globalEffect = globalCompletionPulseState(nowMs);
+  if (globalEffect) {
+    for (let index = 0; index < keySvgs.length; index += 1) {
+      if (index !== 4) keySvgs[index] = applyGlobalCompletion(keySvgs[index], globalEffect);
+    }
+  }
+  return keySvgs;
+}
+
+function renderDemo(outputPath, mode = "dark") {
+  appearanceMode = mode;
+  THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
   const resolvedOutput = path.resolve(outputPath);
   fsSync.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
-  fsSync.writeFileSync(resolvedOutput, preview);
+  fsSync.writeFileSync(resolvedOutput, demoPreviewSvg(demoKeySvgs(DEMO_EPOCH_MS)));
   fixedRenderTimeMs = null;
+  resetDemoEffects();
   console.log(`Rendered ${resolvedOutput}`);
+}
+
+function renderDemoAnimation(outputDirectory, mode = "dark") {
+  appearanceMode = mode;
+  THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
+  const resolvedDirectory = path.resolve(outputDirectory);
+  const framesPerSecond = 12;
+  const durationMs = 6_000;
+  const frameCount = durationMs / 1000 * framesPerSecond;
+  fsSync.mkdirSync(resolvedDirectory, { recursive: true });
+  for (const entry of fsSync.readdirSync(resolvedDirectory)) {
+    if (/^frame-\d{3}\.svg$/.test(entry)) fsSync.unlinkSync(path.join(resolvedDirectory, entry));
+  }
+  for (let index = 0; index < frameCount; index += 1) {
+    const elapsedMs = Math.round(index / framesPerSecond * 1000);
+    const nowMs = DEMO_EPOCH_MS + elapsedMs;
+    const frame = demoPreviewSvg(demoKeySvgs(nowMs, elapsedMs, true));
+    fsSync.writeFileSync(path.join(resolvedDirectory, `frame-${String(index).padStart(3, "0")}.svg`), frame);
+  }
+  fixedRenderTimeMs = null;
+  resetDemoEffects();
+  console.log(`Rendered ${frameCount} animation frames in ${resolvedDirectory}`);
 }
 
 process.once("SIGTERM", () => {
@@ -1662,19 +2986,22 @@ process.once("SIGINT", () => {
 });
 process.on("exit", releaseVoiceKeysSync);
 
-if (demoOutput || demoLightOutput) {
-  renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
+if (demoOutput || demoLightOutput || demoAnimationDirectory) {
+  if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
+  else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
 } else if (snapshotMode) {
   readTopThreads()
     .then((threads) => {
-      console.log(JSON.stringify(threads.map(({ id, title, pinned, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier }) => ({
+      console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount }) => ({
         id,
         title: normalizeTitle(title),
         pinned,
+        ephemeral: Boolean(ephemeral),
         status,
         activity,
         reasoningEffort,
         serviceTier,
+        queueCount,
         speed: isFastServiceTier(serviceTier) ? "fast" : "standard",
         timing: timingLabel({ status, startedAtMs, endedAtMs })
       })), null, 2));

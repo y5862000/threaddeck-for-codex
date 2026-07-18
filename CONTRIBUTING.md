@@ -1,5 +1,7 @@
 # Contributing
 
+> [한국어 기여 안내](CONTRIBUTING.ko.md)
+
 Thanks for helping improve ThreadDeck. Small, focused pull requests are easiest to review and safest for a hardware workflow.
 
 ## Before you start
@@ -31,6 +33,7 @@ To regenerate documentation screenshots from the real key renderer:
 
 ```sh
 pnpm run render-docs
+pnpm run render-animation
 ```
 
 ## Project boundaries
