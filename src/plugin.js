@@ -630,8 +630,8 @@ function sideChatSvg() {
 function pageNavigationSvg(action) {
   const direction = PAGE_DIRECTION_BY_ACTION.get(action);
   if (!direction) return null;
-  const chevron = direction < 0 ? "M84 42L54 72L84 102" : "M60 42L90 72L60 102";
-  const railX = direction < 0 ? 40 : 104;
+  const chevron = direction < 0 ? "M92 42L62 72L92 102" : "M52 42L82 72L52 102";
+  const railX = direction < 0 ? 48 : 96;
   return shell(THEME.text, `
     <path d="${chevron}" fill="none" stroke="${THEME.text}" stroke-width="7" stroke-linecap="round" stroke-linejoin="round"/>
     <path d="M${railX} 43V101" fill="none" stroke="${THEME.text}" stroke-width="7" stroke-linecap="round"/>`);
