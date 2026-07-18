@@ -1,11 +1,29 @@
 # Security and privacy
 
-ThreadDeck runs locally. It does not contain telemetry, analytics, an update server, or code that uploads Codex task metadata.
+ThreadDeck runs locally. It has no telemetry, analytics, update server, remote API, or code that uploads Codex task metadata.
 
-To draw task cards, the plugin reads local Codex state under `~/.codex`. To draw the quota ring, it launches the separately installed `codexbar` command. Keyboard and media actions are emitted by a small native helper and require macOS Accessibility permission for Stream Deck.
+## Local access
 
-The push-to-talk action temporarily suspends local processes that Core Audio reports as actively producing sound, then resumes only those same process IDs when the key is released. A crash handler releases the held keyboard modifiers and resumes tracked media processes where possible.
+- The plugin reads local Codex state under `~/.codex` to draw task cards. It does not write to those files.
+- The optional quota ring starts the separately installed `codexbar` command and reads its JSON output.
+- Keyboard and media actions are emitted by a small native helper and require macOS Accessibility permission for Stream Deck.
+- Push-to-talk temporarily suspends local processes that Core Audio reports as actively producing sound, then resumes only those same process IDs when the key is released. Exit handlers release held modifiers and resume tracked processes where possible.
 
-## Reporting an issue
+Because the plugin displays task titles, anyone who can see your Stream Deck may see sensitive project names. Do not use real private titles in issue screenshots.
 
-Please open a GitHub security advisory after the repository is published. Until then, report privately to the repository owner. Do not attach `~/.codex` databases, session files, tokens, cookies, or screenshots containing private task titles to a public issue.
+## Supported versions
+
+Security fixes target the latest published beta. Please reproduce issues with the latest release before reporting them.
+
+## Report a vulnerability privately
+
+Use [GitHub Private Vulnerability Reporting](https://github.com/y5862000/threaddeck-for-codex/security/advisories/new). Do not open a public issue for a vulnerability.
+
+Never upload any of the following:
+
+- `~/.codex` databases or session files;
+- API keys, tokens, cookies, or authorization headers;
+- Stream Deck device serials or exported profiles that still contain hardware identifiers;
+- screenshots containing private task titles or customer information.
+
+For non-security questions, follow [SUPPORT.md](SUPPORT.md).

@@ -1,91 +1,189 @@
-# ThreadDeck for Codex
+<p align="center">
+  <img src="assets/plugin.svg" width="112" alt="ThreadDeck logo">
+</p>
 
-An unofficial, Neo-first task dashboard for Codex Desktop on macOS.
+<h1 align="center">ThreadDeck for Codex</h1>
 
-ThreadDeck turns a Stream Deck Neo into a glanceable Codex companion: it shows pinned and recent tasks, live work state, elapsed time, completion pulses, weekly quota, reasoning/speed cues, and opens a task with one press.
+<p align="center"><strong>Codex tasks, at a glance.</strong></p>
 
-![ThreadDeck for Codex Neo dashboard](docs/media/neo-preview.svg)
+<p align="center">
+  A local-first Stream Deck Neo dashboard for Codex Desktop on macOS.<br>
+  See live tasks, jump between them, and control the everyday actions around your workflow.
+</p>
 
-> **Beta:** the plugin reads undocumented local Codex metadata. A Codex update can temporarily break task detection. It never writes to Codex state.
+<p align="center">
+  <a href="https://github.com/y5862000/threaddeck-for-codex/releases"><img alt="Latest release" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
+  <a href="https://github.com/y5862000/threaddeck-for-codex/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/y5862000/threaddeck-for-codex/ci.yml?style=flat-square&label=build"></a>
+  <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
+  <img alt="Platform: macOS" src="https://img.shields.io/badge/platform-macOS-111111?style=flat-square">
+  <img alt="Hardware: Stream Deck Neo" src="https://img.shields.io/badge/hardware-Stream%20Deck%20Neo-111111?style=flat-square">
+</p>
 
-## What it does
+<p align="center"><a href="README.ko.md">한국어</a> · <a href="#quick-start">Quick start</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
 
-- Includes eight configurable task actions; the bundled Neo profile shows seven pinned/recent Codex tasks with live working, completed, queued, and error states.
-- Displays elapsed time while working and the final duration after completion.
-- Visualizes reasoning effort and fast/standard service tier without filling the key with labels.
-- Pulses every visible ThreadDeck-owned key when any task completes, with a longer and stronger pulse on that task. Elgato-owned page and app actions keep their native behavior and appearance.
-- Opens a selected Codex task by its `codex://` link.
-- Opens a new task outside the current project, opens Side Chat, holds push-to-talk, sends the current prompt, and switches apps.
-- Shows weekly remaining quota as a color-changing ring through CodexBar.
-- Provides previous/next, seek, play/pause, mute, and volume actions; the bundled third page uses a compact three-key media set alongside four app launchers.
-- Follows macOS light/dark appearance.
+The following feature overview is generated directly by the plugin's real key renderer; it uses sanitized demonstration tasks rather than copied product artwork.
 
-The bundled Neo profile has three pages:
+![ThreadDeck for Codex feature overview in dark appearance](docs/media/neo-preview.png)
 
-1. **Dashboard** — quota, one task card, new task, Side Chat, push-to-talk, send, app switcher, and native back navigation.
-2. **Tasks** — task slots 1 through 7 plus native back navigation.
-3. **Media** — previous/play-pause/next, four app launchers, and native back navigation.
+> [!IMPORTANT]
+> ThreadDeck is an independent beta that reads undocumented local Codex metadata. A Codex update can temporarily break task detection. ThreadDeck never writes to Codex state.
 
-## Requirements
+## Why ThreadDeck
 
-- macOS 13 or later. CodexBar itself currently requires macOS 14 or later.
+Codex can keep several long-running tasks moving at once, but the desktop app is still the place you have to look to know what is happening. ThreadDeck moves the small, high-frequency checks onto hardware:
+
+- Which task is working, waiting, completed, queued, or in error?
+- How long has it been running, and how long did it take?
+- Which pinned or recent task do I want to open next?
+- How much weekly capacity is left?
+- Can I start a task, open Side Chat, dictate, send, or switch apps without hunting for a shortcut?
+
+It is designed for the eight keys and InfoBar of Stream Deck Neo, not merely squeezed into that form factor.
+
+## What you can see
+
+| | Key | What it communicates |
+|---|---|---|
+| <img src="docs/media/quota-key.png" width="96" alt="Weekly quota key showing 74"> | Weekly quota | Remaining weekly capacity as a color-changing ring. Requires the optional CodexBar helper. |
+| <img src="docs/media/working-task-key.png" width="96" alt="Working task key"> | Live task | Current activity, pinned state, task title, elapsed time, reasoning intensity, and fast/standard tier cues. |
+| <img src="docs/media/completed-task-key.png" width="96" alt="Completed task key"> | Completed task | A clear completion mark and the final task duration. A completion triggers a visible pulse across ThreadDeck keys. |
+| <img src="docs/media/side-chat-key.png" width="96" alt="Side Chat key"> | Workflow action | Native-feeling shortcuts for Side Chat, new task, push-to-talk, send, app switching, and media control. |
+
+Task cards follow the same visual grammar in light appearance:
+
+![ThreadDeck for Codex dashboard in light appearance](docs/media/neo-preview-light.png)
+
+## Included Neo layout
+
+The bundled profile contains three pages. You can rearrange the supplied actions in Stream Deck at any time.
+
+1. **Dashboard** — weekly quota, one live task, new task, Side Chat, push-to-talk, send, app switcher, and native back navigation.
+2. **Tasks** — task slots 1 through 7 plus native back navigation. The plugin exposes an eighth task action if you want a different layout.
+3. **Media** — previous track, rewind, play/pause, four app launchers, and native back navigation. Additional next, seek, mute, and volume actions are available in the action list.
+
+### Task state language
+
+- **Blue or purple capsule:** work is active. Color and subtle motion indicate reasoning intensity and service tier.
+- **Activity text:** the current phase, such as thinking, editing, running a tool, searching, or verifying.
+- **Pin before title:** the task is pinned in Codex.
+- **Running timer:** elapsed time updates every second while the task is active.
+- **Check and fixed timer:** the task completed and the final duration is frozen.
+- **Green completion pulse:** all visible ThreadDeck actions acknowledge completion; the matching task pulses longer and more strongly.
+
+## Quick start
+
+### Requirements
+
+- macOS 13 or later. The optional CodexBar quota helper currently requires macOS 14 or later.
 - Stream Deck 7.4 or later.
 - Stream Deck Neo.
 - Codex Desktop installed as `com.openai.codex`.
-- [CodexBar](https://github.com/steipete/CodexBar) for the quota key only.
 
-Install CodexBar with Homebrew:
+### Install
+
+1. Download `com.yechan.threaddeck.streamDeckPlugin` from the [releases page](https://github.com/y5862000/threaddeck-for-codex/releases). Beta releases are marked as pre-releases.
+2. Double-click the file and approve installation in Stream Deck.
+3. Import the bundled **ThreadDeck for Codex** Neo profile when prompted.
+4. In **System Settings → Privacy & Security → Accessibility**, allow **Stream Deck**. This is required for keyboard and media actions.
+5. Open Codex Desktop and press a task key to confirm navigation.
+
+The public plugin uses its own identifier and will not overwrite the author's private development prototype.
+
+### Optional weekly quota ring
+
+ThreadDeck uses [CodexBar](https://github.com/steipete/CodexBar) only for the weekly quota key. Every other feature works without it.
 
 ```sh
 brew install --cask codexbar
-```
-
-Then open CodexBar once, enable Codex in its provider settings, and confirm the CLI works:
-
-```sh
 codexbar usage --format json
 ```
 
-## Install a release
+Open CodexBar once, enable Codex in its provider settings, and confirm the command returns JSON. ThreadDeck searches common Homebrew paths automatically; set `CODEXBAR_PATH` only for a custom installation.
 
-1. Download `com.yechan.threaddeck.streamDeckPlugin` from Releases.
-2. Double-click it and approve installation in Stream Deck.
-3. Accept the bundled **ThreadDeck for Codex** Neo profile.
-4. Allow **Stream Deck** under **System Settings → Privacy & Security → Accessibility**.
+## Actions and shortcuts
 
-The public plugin uses a separate identifier from the author's private prototype, so it will not overwrite that development copy.
+| Action | Default behavior |
+|---|---|
+| Open task | Opens the selected task through its local `codex://` URL. |
+| New task | Sends `⌥⌘O`, opening a task outside the current project with the current Codex shortcut. |
+| Side Chat | Sends `⌥⌘S`. |
+| Push-to-talk | Holds `⌃⇧D` for exactly as long as the Stream Deck key is held. Active audio-producing apps are temporarily suspended and resumed on release. |
+| Send | Sends Return to the active Codex composer. |
+| App switcher | Holds Command and taps Tab for a native app switch. |
+| Media | Previous/next, seek, play/pause, mute, and volume actions are available. |
+
+If you changed a Codex shortcut, update the corresponding constants in `native/keybridge.m` and rebuild. Configurable shortcuts are planned for a later beta.
+
+## Local-first by design
+
+ThreadDeck has no account, telemetry, analytics, update server, or cloud backend.
+
+| Source | Access | Purpose |
+|---|---|---|
+| Codex files under `~/.codex` | Read-only | Task titles, pins, status, activity, timing, and service metadata. |
+| CodexBar CLI | Child process, optional | Weekly remaining quota only. |
+| Stream Deck plugin WebSocket | Localhost | Receives key events and sends rendered key images. |
+| macOS Accessibility / Core Audio | Local system APIs | Keyboard shortcuts, media keys, and push-to-talk audio handling. |
+
+ThreadDeck never writes to Codex databases or session files. Read [SECURITY.md](SECURITY.md) before attaching logs or screenshots to an issue.
+
+## Fully open source
+
+The complete ThreadDeck implementation is published under the [MIT License](LICENSE):
+
+- dependency-free Node.js plugin source;
+- Objective-C source for the universal macOS keyboard/media helper;
+- unpacked Stream Deck Neo profile source;
+- original ThreadDeck mark and generated documentation images;
+- build, audit, verification, packaging, and documentation-rendering scripts.
+
+The release package can be rebuilt from this repository. Codex Desktop and Stream Deck are proprietary external applications required at runtime; they are not bundled or covered by this repository's license. See [docs/OPEN_SOURCE.md](docs/OPEN_SOURCE.md) for the exact source-to-artifact map and third-party boundary.
 
 ## Build from source
 
-Install Node.js 20+, pnpm, Xcode Command Line Tools, and the Stream Deck app. Then:
+Install Node.js 20+, pnpm, Xcode Command Line Tools, and Stream Deck. Then:
 
 ```sh
-pnpm install
+pnpm install --frozen-lockfile
 pnpm run build
+pnpm run audit
 pnpm run check
 pnpm run pack
 ```
 
-The installer is written to `release/`. The native helper is built for both Apple silicon and Intel Macs.
+The installer is written to `release/`. The native helper is compiled from `native/keybridge.m` as a universal Apple silicon + Intel binary. To regenerate the README images from the real key renderer:
 
-## Privacy
+```sh
+pnpm run render-docs
+```
 
-ThreadDeck has no telemetry and no cloud service. It reads local task metadata under `~/.codex`, invokes your separately installed CodexBar CLI for quota data, and talks to Stream Deck over its localhost plugin WebSocket.
-
-Push-to-talk temporarily suspends processes that macOS reports as actively producing audio, then resumes those same process IDs when the key is released. Read [SECURITY.md](SECURITY.md) for details.
+Read [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the data flow and [CONTRIBUTING.md](CONTRIBUTING.md) for development guidance.
 
 ## Known limitations
 
 - macOS and Stream Deck Neo only in the first public beta.
-- The UI is currently Korean-first.
-- Task detection depends on private Codex file formats.
-- New task (`⌥⌘O`), Side Chat (`⌥⌘S`), and push-to-talk (`⌃⇧D`) assume the current Codex shortcuts.
-- The quota ring requires CodexBar; every other action works without it.
+- The key UI is Korean-first.
+- Task detection depends on private Codex file formats and can lag behind a Codex release.
+- The current shortcut actions assume Codex's default shortcuts listed above.
+- The weekly quota ring depends on a separately installed CodexBar.
+- Elgato-owned navigation and app-launch keys keep their native rendering and do not receive ThreadDeck's completion overlay.
 
-## Similar projects
+Start with [Troubleshooting](docs/TROUBLESHOOTING.md), then use the repository's issue templates if the problem remains.
 
-This is not the first Codex-related Stream Deck project. [Codex Deck](https://github.com/dazer1234/codex-stream-deck) is a capable Codex Micro controller, while several open-source and Marketplace plugins focus on AI quota monitoring. ThreadDeck's narrower goal is a physically tested Neo dashboard for Codex Desktop tasks. See [docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) for the comparison.
+## Related work
+
+ThreadDeck is not the first Codex-related Stream Deck project. [Codex Deck](https://github.com/dazer1234/codex-stream-deck) is a capable Codex Micro controller, while other open-source and Marketplace plugins focus on AI quota monitoring. ThreadDeck's narrower goal is a physically tested Neo dashboard for Codex Desktop tasks. See [docs/ALTERNATIVES.md](docs/ALTERNATIVES.md) for a comparison.
+
+## Project documents
+
+- [Brand guide](docs/BRAND.md)
+- [Open-source inventory](docs/OPEN_SOURCE.md)
+- [Architecture](docs/ARCHITECTURE.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md)
+- [Contributing](CONTRIBUTING.md)
+- [Security and privacy](SECURITY.md)
+- [Support](SUPPORT.md)
 
 ## License and trademarks
 
-Source code is available under the [MIT License](LICENSE). See [NOTICE.md](NOTICE.md) for trademark and asset notices.
+ThreadDeck is available under the [MIT License](LICENSE). It is independent and unofficial, and is not affiliated with, endorsed by, or sponsored by OpenAI or Elgato. See [NOTICE.md](NOTICE.md) for trademark and asset notices.

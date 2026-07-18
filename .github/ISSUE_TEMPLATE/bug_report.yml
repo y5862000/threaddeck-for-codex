@@ -1,0 +1,63 @@
+name: Bug report
+description: Report a reproducible ThreadDeck problem
+title: "[Bug]: "
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for reporting a bug. Remove private task titles and never attach files from `~/.codex`.
+  - type: input
+    id: versions
+    attributes:
+      label: Versions
+      description: ThreadDeck, macOS, Codex Desktop, Stream Deck software, and Stream Deck hardware.
+      placeholder: ThreadDeck 0.1.0-beta; macOS 26.5; Codex …; Stream Deck 7.4; Neo
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: Affected area
+      options:
+        - Task state or navigation
+        - Completion pulse
+        - Weekly quota
+        - Keyboard or push-to-talk
+        - Media control
+        - Profile or installation
+        - Light/dark appearance
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps to reproduce
+      placeholder: "1. …\n2. …\n3. …"
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Expected behavior
+    validations:
+      required: true
+  - type: textarea
+    id: actual
+    attributes:
+      label: Actual behavior
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: Additional context
+      description: Add sanitized screenshots or logs only. Do not upload Codex databases, tokens, or device serials.
+  - type: checkboxes
+    id: privacy
+    attributes:
+      label: Privacy check
+      options:
+        - label: I removed private task titles, secrets, device serials, and customer data.
+          required: true
