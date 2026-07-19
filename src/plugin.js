@@ -243,6 +243,7 @@ const refreshResilienceContractMode = process.argv.includes("--verify-refresh-re
 const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
 const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
 const interactionContractMode = process.argv.includes("--verify-interactions");
+const keyBridgePermissionContractMode = process.argv.includes("--verify-keybridge-permission");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const completedKeyOutput = argument("--render-completed-key");
@@ -258,6 +259,7 @@ const runtimeTraceEnabled = !snapshotMode
   && !usageCacheContractMode
   && !voiceSubmitContractMode
   && !interactionContractMode
+  && !keyBridgePermissionContractMode
   && !demoOutput
   && !demoLightOutput
   && !completedKeyOutput
@@ -8386,7 +8388,10 @@ function installShutdownHandlers() {
 }
 
 function runSelectedMode() {
-  if (completionContractMode) {
+  if (keyBridgePermissionContractMode) {
+    fsSync.accessSync(KEY_BRIDGE, fsSync.constants.X_OK);
+    console.log(JSON.stringify({ passed: true, keybridgeExecutable: true }));
+  } else if (completionContractMode) {
     verifyCompletionFanout();
   } else if (refreshResilienceContractMode) {
     verifyThreadRefreshResilience().catch((error) => {
