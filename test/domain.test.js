@@ -55,8 +55,9 @@ const {
 
 test("configuration exposes a complete and internally consistent action contract", () => {
   const actionValues = Object.values(ACTIONS);
-  assert.equal(actionValues.length, 24);
-  assert.equal(new Set(actionValues).size, 24);
+  assert.equal(actionValues.length, 25);
+  assert.equal(new Set(actionValues).size, 25);
+  assert.equal(ACTIONS.fastMode, "com.yechan.threaddeck.fastmode");
 
   assert.equal(THREAD_ACTIONS.length, 8);
   assert.deepEqual(

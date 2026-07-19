@@ -228,8 +228,10 @@ const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
 const interactionContractMode = process.argv.includes("--verify-interactions");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
+const completedKeyOutput = argument("--render-completed-key");
 const demoAnimationDirectory = argument("--render-demo-animation");
 const gestureAnimationDirectory = argument("--render-gesture-animations");
+const FAST_MODE_REFRESH_INTERVAL_MS = 5_000;
 const pluginStartedAtMs = Date.now();
 const runtimeTraceEnabled = !snapshotMode
   && !completionContractMode
@@ -239,6 +241,7 @@ const runtimeTraceEnabled = !snapshotMode
   && !interactionContractMode
   && !demoOutput
   && !demoLightOutput
+  && !completedKeyOutput
   && !demoAnimationDirectory
   && !gestureAnimationDirectory;
 
@@ -268,6 +271,8 @@ let activeUsageRefresh = null;
 let activeThreadRefresh = null;
 let activeAppearanceRefresh = null;
 let threadSlots = Array(THREAD_COUNT).fill(null);
+let primaryThreadId = null;
+let primaryThreadRow = null;
 let usageState = { remaining: null, failed: false };
 let hasLoadedUsageState = false;
 let pulse = false;
@@ -298,6 +303,17 @@ let voiceReleaseAttemptInFlight = null;
 let shutdownCleanupStarted = false;
 let shutdownCleanupResult = true;
 let activeRemoteNavigation = null;
+let activeDeepLinkNavigation = null;
+let activeComposerCreation = null;
+let activeFastModeRefresh = null;
+let activeFastModeUpdate = null;
+let fastModeRevision = 0;
+let fastModeState = {
+  threadId: null,
+  enabled: null,
+  available: null,
+  failed: false
+};
 let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
 let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
 let accessibilityTrustCache = { checkedAtMs: 0, trusted: null };
@@ -1069,6 +1085,33 @@ function appSwitchSvg() {
     <path d="M34 72H101M78 49L101 72L78 95M111 48V96" fill="none" stroke="${THEME.text}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>`);
 }
 
+function fastModeSvg(state = fastModeState, activeThreadId = primaryThreadId) {
+  const confirmed = Boolean(activeThreadId)
+    && state?.threadId === activeThreadId
+    && typeof state?.enabled === "boolean";
+  const enabled = confirmed && state.enabled;
+  const unavailable = state?.available === false;
+  const failed = Boolean(state?.failed);
+  const accent = enabled ? THEME.green : failed ? THEME.amber : THEME.muted;
+  const label = enabled
+    ? "FAST ON"
+    : confirmed
+      ? "FAST OFF"
+      : unavailable
+        ? "사용 불가"
+        : failed
+          ? "상태 확인"
+          : "확인 필요";
+  const boltPath = "M78 28L48 76H68L60 116L98 62H77L87 28Z";
+  const bolt = enabled
+    ? `<path data-mode="fast" d="${boltPath}" fill="${accent}"/>`
+    : `<path data-mode="fast" d="${boltPath}" fill="none" stroke="${accent}" stroke-width="5" stroke-linejoin="round"/>`;
+  return shell(accent, `
+    ${bolt}
+    <rect x="25" y="113" width="94" height="22" rx="11" fill="${THEME.raised}"/>
+    <text x="72" y="129" fill="${enabled ? THEME.green : THEME.textSecondary}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" text-anchor="middle">${escapeXml(label)}</text>`);
+}
+
 function sideChatSvg() {
   return shell(THEME.text, `
     <path d="M72 36C94 36 111 51.8 111 72.5C111 80.8 108.3 88.4 103.5 94.2L107 110L91.5 105.3C85.8 108.4 79.2 110 72 110C50 110 33 93.9 33 72.5C33 51.8 50 36 72 36Z" fill="none" stroke="${THEME.text}" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -1117,6 +1160,7 @@ function staticActionSvg(action, context = null) {
   }
   if (action === ACTIONS.send) return sendSvg(context ? sendLongPressArmedContexts.has(context) : false);
   if (action === ACTIONS.appSwitch) return appSwitchSvg();
+  if (action === ACTIONS.fastMode) return fastModeSvg();
   if (action === ACTIONS.sideChat) return sideChatSvg();
   if (MEDIA_COMMAND_BY_ACTION.has(action)) return mediaActionSvg(action);
   if (PAGE_DIRECTION_BY_ACTION.has(action)) return pageNavigationSvg(action);
@@ -1240,6 +1284,10 @@ function abortedOperationError() {
 
 function isAbortError(error) {
   return error?.name === "AbortError" || error?.code === "ABORT_ERR";
+}
+
+function throwIfAborted(signal) {
+  if (signal?.aborted) throw abortedOperationError();
 }
 
 function sleepWithSignal(delayMs, signal = null) {
@@ -1462,7 +1510,7 @@ async function voiceTargetIsFocused(targetThreadId, options = {}) {
   // after remote navigation. In particular, a title-only queue match cannot
   // distinguish two tasks with the same visible title; ambiguous rows must be
   // verified by their UUID before any dictated text is submitted.
-  return remoteThreadIsFocused(thread, options);
+  return threadIsFocused(thread, options);
 }
 
 async function waitForVoiceDraftReset(context, targetThreadId, tracker, options = {}) {
@@ -2362,6 +2410,12 @@ function releaseVoiceKeysSync(rawOptions = {}) {
   voiceMediaTransitionTail = Promise.resolve();
   activeRemoteNavigation?.controller.abort();
   activeRemoteNavigation = null;
+  activeDeepLinkNavigation?.controller.abort();
+  activeDeepLinkNavigation = null;
+  activeComposerCreation?.controller.abort();
+  activeComposerCreation = null;
+  activeFastModeRefresh = null;
+  activeFastModeUpdate = null;
   shutdownCleanupResult = released && !voiceMediaPaused;
   return shutdownCleanupResult;
 }
@@ -2380,13 +2434,17 @@ async function readCodexQueueWindows(options = {}) {
   }
 }
 
-function matchQueueWindowThread(window, threads) {
-  const candidates = threads.filter((thread) => {
+function queueWindowThreadCandidates(window, threads) {
+  return threads.filter((thread) => {
     for (const fingerprint of titleFingerprints(thread.title)) {
       if (window.headers.has(fingerprint)) return true;
     }
     return false;
   });
+}
+
+function matchQueueWindowThread(window, threads) {
+  const candidates = queueWindowThreadCandidates(window, threads);
   if (candidates.length === 1) return candidates[0];
   if (candidates.length > 1) {
     return candidates.find((thread) => thread.id === lastOpenedThreadId)
@@ -2401,14 +2459,36 @@ function focusedQueueThread(windows, threads) {
   return focusedWindow ? matchQueueWindowThread(focusedWindow, threads) : null;
 }
 
-function remoteThreadKeyBridgeCommand(thread, baseCommand) {
-  return thread?.titleAmbiguous ? `${baseCommand}-strict` : baseCommand;
+async function verifiedFocusedQueueThread(windows, threads, options = {}) {
+  const focusedWindow = windows.find((window) => window.focused)
+    ?? (windows.length === 1 ? windows[0] : null);
+  if (!focusedWindow) return null;
+  const candidates = queueWindowThreadCandidates(focusedWindow, threads)
+    .sort((left, right) => {
+      if (left.id === primaryThreadId) return -1;
+      if (right.id === primaryThreadId) return 1;
+      return threadRecencyMs(right) - threadRecencyMs(left);
+    });
+  if (candidates.length === 1 && candidates[0].id === primaryThreadId) {
+    return candidates[0];
+  }
+  for (const candidate of candidates) {
+    if (await threadIsFocused(candidate, options)) return candidate;
+  }
+  return null;
 }
 
-async function remoteThreadIsFocused(thread, options = {}) {
+function remoteThreadKeyBridgeCommand(thread, baseCommand) {
+  return thread?.titleAmbiguous || thread?.requiresStrictIdentity
+    ? `${baseCommand}-strict`
+    : baseCommand;
+}
+
+async function threadIsFocused(thread, options = {}) {
   const fingerprints = [...titleFingerprints(thread.title)];
   const command = remoteThreadKeyBridgeCommand(thread, "codex-focused-thread");
-  const args = thread.titleAmbiguous ? [thread.id] : [thread.id, ...fingerprints];
+  const strictIdentity = Boolean(thread.titleAmbiguous || thread.requiresStrictIdentity);
+  const args = strictIdentity ? [thread.id] : [thread.id, ...fingerprints];
   const probe = options.probe
     ?? ((probeCommand, probeArgs) => execFileAsync(KEY_BRIDGE, [probeCommand, ...probeArgs], {
       timeout: 1000,
@@ -2424,17 +2504,239 @@ async function remoteThreadIsFocused(thread, options = {}) {
   }
 }
 
-async function waitForRemoteThreadFocused(thread, options = {}) {
+async function waitForThreadFocused(thread, options = {}) {
   const delays = options.delays ?? REMOTE_READY_POLL_DELAYS_MS;
   for (const delayMs of delays) {
     if (delayMs > 0) await sleepWithSignal(delayMs, options.signal);
-    if (await remoteThreadIsFocused(thread, {
+    if (await threadIsFocused(thread, {
       ...options,
       force: true,
       nowMs: Date.now()
     })) return true;
   }
   return false;
+}
+
+function parseFastModeState(output) {
+  const text = String(output ?? "");
+  const state = text.match(/(?:^|\s)state=(on|off|unknown)(?:\s|$)/i)?.[1]?.toLowerCase() ?? null;
+  const available = text.match(/(?:^|\s)available=([01])(?:\s|$)/i)?.[1] ?? null;
+  if (!state || available === null) return null;
+  return {
+    enabled: state === "on" ? true : state === "off" ? false : null,
+    available: available === "1"
+  };
+}
+
+async function queryFastModeState(options = {}) {
+  const probe = options.stateProbe
+    ?? (() => execFileAsync(KEY_BRIDGE, ["fast-mode-state"], {
+      timeout: 1500,
+      maxBuffer: 4096
+    }));
+  let stdout = "";
+  try {
+    const result = await probe();
+    stdout = result?.stdout ?? result ?? "";
+  } catch (error) {
+    const exitCode = keyBridgeExitCode(error);
+    if (![1, 2].includes(exitCode)) throw error;
+    stdout = error?.stdout ?? "";
+  }
+  const parsed = parseFastModeState(stdout);
+  if (!parsed) throw new Error("Codex fast mode state was not recognized");
+  return parsed;
+}
+
+function renderFastModeContexts() {
+  for (const [context, action] of contexts) {
+    if (action === ACTIONS.fastMode) setImage(context, fastModeSvg());
+  }
+}
+
+function refreshFastMode(options = {}) {
+  if (activeFastModeUpdate) {
+    return afterFastModeUpdate(() => refreshFastMode(options));
+  }
+  const threadId = options.threadId ?? primaryThreadId;
+  if (!threadId) {
+    fastModeRevision += 1;
+    fastModeState = {
+      threadId: null,
+      enabled: null,
+      available: null,
+      failed: false
+    };
+    renderFastModeContexts();
+    return Promise.resolve(false);
+  }
+  const revision = fastModeRevision;
+  if (activeFastModeRefresh?.threadId === threadId
+      && activeFastModeRefresh.revision === revision) {
+    return activeFastModeRefresh.promise;
+  }
+  const refresh = { threadId, revision, promise: null };
+  refresh.promise = (async () => {
+    try {
+      const pendingNavigation = currentNavigationPromise();
+      if (pendingNavigation) await pendingNavigation;
+      if (primaryThreadId !== threadId || fastModeRevision !== revision) return false;
+      const state = await queryFastModeState(options);
+      if (primaryThreadId !== threadId || fastModeRevision !== revision) return false;
+      if (options.preserveConfirmedOnUnavailable
+          && (!state.available || typeof state.enabled !== "boolean")
+          && fastModeState.threadId === threadId
+          && typeof fastModeState.enabled === "boolean") return false;
+      fastModeState = { threadId, ...state, failed: false };
+      renderFastModeContexts();
+      return typeof state.enabled === "boolean";
+    } catch (error) {
+      if (primaryThreadId !== threadId || fastModeRevision !== revision) return false;
+      if (options.preserveConfirmedOnUnavailable
+          && fastModeState.threadId === threadId
+          && typeof fastModeState.enabled === "boolean") return false;
+      fastModeState = {
+        threadId,
+        enabled: null,
+        available: null,
+        failed: true
+      };
+      renderFastModeContexts();
+      if (!options.quiet) console.error(`Could not read Codex fast mode: ${error?.message ?? "unknown error"}`);
+      return false;
+    }
+  })().finally(() => {
+    if (activeFastModeRefresh === refresh) activeFastModeRefresh = null;
+  });
+  activeFastModeRefresh = refresh;
+  return refresh.promise;
+}
+
+function currentNavigationPromise() {
+  const pending = [
+    activeRemoteNavigation?.promise,
+    activeDeepLinkNavigation?.promise,
+    activeComposerCreation?.promise
+  ].filter(Boolean);
+  if (pending.length === 0) return null;
+  return Promise.allSettled(pending).then((results) => {
+    if (results.some((result) => result.status === "fulfilled")) return true;
+    throw results.at(-1)?.reason ?? new Error("task navigation did not complete");
+  });
+}
+
+function afterFastModeUpdate(startNavigation) {
+  const update = activeFastModeUpdate;
+  if (!update) return startNavigation();
+  // Fast mode is scoped to the focused composer, while the native AX action
+  // deliberately accepts no task id. Keep task navigation behind the active
+  // toggle so a later button press cannot move focus between its verification
+  // and AXPress and accidentally change the next task instead.
+  return update.catch(() => false).then(startNavigation);
+}
+
+function toggleFastMode(context, options = {}) {
+  if (activeFastModeUpdate) return activeFastModeUpdate;
+  fastModeRevision += 1;
+  const feedback = options.feedback ?? showFeedback;
+  const update = (async () => {
+    feedback(context, "loading", "FAST 확인");
+    const pendingRefresh = activeFastModeRefresh?.promise;
+    if (pendingRefresh) {
+      try {
+        await pendingRefresh;
+      } catch {
+        // Its revision was invalidated above; the fresh probe below remains
+        // authoritative even if the old read failed while being drained.
+      }
+    }
+    const pendingNavigation = currentNavigationPromise();
+    if (pendingNavigation) {
+      try {
+        await pendingNavigation;
+      } catch {
+        feedback(context, "error", "전환 확인", 1600);
+        return false;
+      }
+    }
+    const threadId = primaryThreadId;
+    const thread = threadSlots.find((candidate) => candidate?.id === threadId)
+      ?? (primaryThreadRow?.id === threadId ? primaryThreadRow : null);
+    if (!thread || !await threadIsFocused(thread, { probe: options.focusProbe })) {
+      feedback(context, "error", "작업 확인", 1600);
+      return false;
+    }
+
+    let current;
+    try {
+      // The composer may have been changed directly in Codex since the last
+      // Stream Deck render. Re-read before every press so the physical key
+      // always inverts the live state instead of acting on a stale cache.
+      const state = await queryFastModeState(options);
+      current = { threadId, ...state, failed: false };
+      if (primaryThreadId === threadId) {
+        fastModeState = current;
+        renderFastModeContexts();
+      }
+    } catch (error) {
+      feedback(context, "error", "상태 확인", 1600);
+      console.error(`Could not prepare Codex fast mode: ${error?.message ?? "unknown error"}`);
+      return false;
+    }
+    if (!current.available || typeof current.enabled !== "boolean") {
+      feedback(context, "error", "사용 불가", 1600);
+      return false;
+    }
+
+    const targetEnabled = !current.enabled;
+    const setMode = options.setMode
+      ?? ((enabled) => execFileAsync(KEY_BRIDGE, ["fast-mode-set", enabled ? "on" : "off"], {
+        // The selector path may need to open a Chromium popover, find one
+        // exact option, and poll the resulting composer state twice. Leave
+        // enough room for the native fail-closed retries on a busy window.
+        timeout: 8000,
+        maxBuffer: 4096
+      }));
+    let setError = null;
+    try {
+      await setMode(targetEnabled);
+    } catch (error) {
+      // AXPress may already have applied immediately before a process timeout
+      // or a late native verification failure. The authoritative state probe
+      // below repairs that result instead of rendering a false failure.
+      setError = error;
+    }
+    try {
+      const confirmed = await queryFastModeState(options);
+      if (primaryThreadId !== threadId
+          || confirmed.enabled !== targetEnabled
+          || !confirmed.available) {
+        throw new Error("Codex fast mode target was not confirmed");
+      }
+      fastModeState = { threadId, ...confirmed, failed: false };
+      renderFastModeContexts();
+      feedback(context, "success", targetEnabled ? "FAST 켬" : "FAST 끔");
+      return true;
+    } catch (confirmationError) {
+      const error = setError ?? confirmationError;
+      if (primaryThreadId === threadId) {
+        fastModeState = {
+          threadId,
+          enabled: null,
+          available: null,
+          failed: true
+        };
+        renderFastModeContexts();
+      }
+      feedback(context, "error", "변경 실패", 1600);
+      console.error(`Could not change Codex fast mode: ${error?.message ?? "unknown error"}`);
+      return false;
+    }
+  })().finally(() => {
+    if (activeFastModeUpdate === update) activeFastModeUpdate = null;
+  });
+  activeFastModeUpdate = update;
+  return update;
 }
 
 function applyQueueState(threads, windows, nowMs = Date.now()) {
@@ -3342,6 +3644,72 @@ function selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds) {
   return selectThreadRows(localRows, remoteRows, openSideChats, pinnedIds, THREAD_COUNT);
 }
 
+function primaryFirstThreadRows(rows, candidates = rows, limit = THREAD_COUNT) {
+  const distinctRows = [];
+  const seenIds = new Set();
+  for (const row of rows) {
+    if (!row?.id || seenIds.has(row.id)) continue;
+    distinctRows.push(row);
+    seenIds.add(row.id);
+  }
+  if (!primaryThreadId) return distinctRows.slice(0, limit);
+
+  const freshPrimary = candidates.find((row) => row?.id === primaryThreadId)
+    ?? distinctRows.find((row) => row?.id === primaryThreadId)
+    ?? null;
+  if (freshPrimary) {
+    primaryThreadRow = {
+      ...(primaryThreadRow?.id === primaryThreadId ? primaryThreadRow : {}),
+      ...freshPrimary,
+      // A row retained while absent from every current source must use UUID
+      // only. Clear that safeguard only after the exact id is observed again.
+      requiresStrictIdentity: Boolean(freshPrimary.requiresStrictIdentity)
+    };
+  } else if (primaryThreadRow?.id === primaryThreadId) {
+    primaryThreadRow = {
+      ...primaryThreadRow,
+      requiresStrictIdentity: true
+    };
+  }
+  if (!primaryThreadRow || primaryThreadRow.id !== primaryThreadId) {
+    return distinctRows.slice(0, limit);
+  }
+  return [
+    primaryThreadRow,
+    ...distinctRows.filter((row) => row.id !== primaryThreadId)
+  ].slice(0, limit);
+}
+
+function rememberVerifiedThread(thread, options = {}) {
+  if (!thread?.id) return false;
+  const changed = primaryThreadId !== thread.id;
+  primaryThreadId = thread.id;
+  lastOpenedThreadId = thread.id;
+  lastOpenedThreadAtMs = options.nowMs ?? Date.now();
+  const currentRow = threadSlots.find((row) => row?.id === thread.id);
+  primaryThreadRow = {
+    ...(primaryThreadRow?.id === thread.id ? primaryThreadRow : {}),
+    ...(currentRow ?? {}),
+    ...thread
+  };
+  if (changed || fastModeState.threadId !== thread.id) {
+    fastModeRevision += 1;
+    fastModeState = {
+      threadId: thread.id,
+      enabled: null,
+      available: null,
+      failed: false
+    };
+  }
+  if (options.promote !== false) {
+    threadSlots = primaryFirstThreadRows(threadSlots, [primaryThreadRow, ...threadSlots]);
+    renderThreadContexts();
+    renderStaticContexts();
+  }
+  if (options.refreshFastMode !== false) void refreshFastMode();
+  return true;
+}
+
 function annotateKnownTitleAmbiguity(selected, candidates) {
   const ownersByFingerprint = new Map();
   for (const candidate of candidates) {
@@ -3372,7 +3740,12 @@ async function readTopThreads() {
   ]);
   const localRows = rows
     .filter((row) => !isInternalThreadRecord(row))
-    .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
+    .map((row) => ({
+      ...row,
+      title: sidebarNames.get(row.id) ?? row.title,
+      remote: false,
+      ephemeral: false
+    }))
     .filter((row) => !isInternalThreadRecord(row));
   const sideChats = await readEphemeralSideChats(
     persistentIds,
@@ -3380,24 +3753,56 @@ async function readTopThreads() {
     globalStatePromise
   );
   const sideChatLifecycles = await readSideChatLifecycles(sideChats);
-  const openSideChats = sideChats.filter((thread) => !closedSideChatAtMs.has(thread.id)
-    && sideChatLifecycles.get(thread.id)?.status !== "closed");
+  const openSideChats = sideChats
+    .filter((thread) => !closedSideChatAtMs.has(thread.id)
+      && sideChatLifecycles.get(thread.id)?.status !== "closed")
+    .map((thread) => ({ ...thread, remote: false, ephemeral: true }));
+  const normalizedRemoteRows = remoteRows.map((thread) => ({
+    ...thread,
+    remote: true,
+    ephemeral: false
+  }));
   await resolvePendingSideChatTarget(openSideChats);
   knownSideChatIds = new Set(sideChats.map((thread) => thread.id));
   for (const thread of sideChats) {
     if (sideChatLifecycles.get(thread.id)?.status === "closed") sideChatParentById.delete(thread.id);
   }
-  const selection = selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds);
-  const selected = annotateKnownTitleAmbiguity(
-    selection.selected,
-    [...localRows, ...remoteRows, ...openSideChats]
-  );
+  const selection = selectTopThreadRows(localRows, normalizedRemoteRows, openSideChats, pinnedIds);
   const { byId } = selection;
   mostRecentThreadId = selection.mostRecentId;
   const [queueWindows] = await Promise.all([
     queueWindowsPromise,
     refreshRemoteLifecyclesFromLogs()
   ]);
+  const localIds = new Set(localRows.map((thread) => thread.id));
+  const candidateRows = [
+    ...localRows,
+    ...normalizedRemoteRows.filter((thread) => !localIds.has(thread.id)),
+    ...openSideChats
+  ];
+  const identityCandidates = [...candidateRows];
+  if (primaryThreadRow?.id
+      && !identityCandidates.some((thread) => thread.id === primaryThreadRow.id)) {
+    identityCandidates.push(primaryThreadRow);
+  }
+  const pinnedIdSet = new Set(pinnedIds);
+  const currentCandidates = annotateKnownTitleAmbiguity(
+    candidateRows.map((thread) => ({
+      ...thread,
+      pinned: pinnedIdSet.has(thread.id)
+    })),
+    identityCandidates
+  );
+  const focusedThread = await verifiedFocusedQueueThread(queueWindows, currentCandidates);
+  if (focusedThread && focusedThread.id !== primaryThreadId) {
+    rememberVerifiedThread(focusedThread, {
+      promote: false
+    });
+  }
+  const selected = annotateKnownTitleAmbiguity(
+    primaryFirstThreadRows(selection.selected, currentCandidates),
+    identityCandidates
+  );
   await refreshVisibleRemoteReasoningEffort(selected, queueWindows);
 
   const persistentThreads = selected.filter((thread) => !thread.ephemeral);
@@ -3435,7 +3840,10 @@ async function readTopThreads() {
         : parentLifecycle?.serviceTier ?? "default"
     };
   });
-  return applyQueueState(hydratedThreads, queueWindows);
+  return primaryFirstThreadRows(
+    applyQueueState(hydratedThreads, queueWindows),
+    hydratedThreads
+  );
 }
 
 async function readSystemAppearance() {
@@ -3701,10 +4109,22 @@ async function refreshThreads(feedbackContext, options = {}) {
         consecutiveThreadRefreshFailures = 0;
         threadRefreshUnavailable = false;
         pulse = !pulse;
-        const nextThreadSlots = THREAD_ACTIONS.map((_, index) => threads[index] ?? null);
+        const arrangedThreads = primaryFirstThreadRows(threads, threads);
+        const nextThreadSlots = THREAD_ACTIONS.map((_, index) => arrangedThreads[index] ?? null);
         trackCompletionTransitions(threadSlots, nextThreadSlots);
         threadSlots = nextThreadSlots;
         renderThreadContexts();
+        if (fastModeState.threadId !== primaryThreadId) {
+          fastModeRevision += 1;
+          fastModeState = {
+            threadId: primaryThreadId,
+            enabled: null,
+            available: null,
+            failed: false
+          };
+          renderStaticContexts();
+          void refreshFastMode();
+        }
         if (feedbackContext) showFeedback(feedbackContext, "success", "목록 갱신");
         return true;
       } catch (error) {
@@ -3735,9 +4155,10 @@ async function performRemoteNavigation(thread, slot, options = {}) {
   const signal = options.signal ?? null;
   const startedAtMs = Date.now();
   const fingerprints = [...titleFingerprints(thread.title)];
+  const strictIdentity = Boolean(thread.titleAmbiguous || thread.requiresStrictIdentity);
   const directCommand = remoteThreadKeyBridgeCommand(thread, "codex-open-thread");
   const searchCommand = remoteThreadKeyBridgeCommand(thread, "codex-search-thread");
-  const directArgs = thread.titleAmbiguous ? [thread.id] : [thread.id, ...fingerprints];
+  const directArgs = strictIdentity ? [thread.id] : [thread.id, ...fingerprints];
   const openApp = options.openApp
     ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
       timeout: 5000,
@@ -3764,22 +4185,25 @@ async function performRemoteNavigation(thread, slot, options = {}) {
     }));
   const sleep = options.sleep ?? sleepWithSignal;
   const waitFocused = options.waitFocused
-    ?? ((focusedOptions = {}) => waitForRemoteThreadFocused(thread, focusedOptions));
+    ?? ((focusedOptions = {}) => waitForThreadFocused(thread, focusedOptions));
 
   runtimeTrace("remote-navigation", { slot: slot + 1, remote: true, phase: "start" });
   await openApp();
+  throwIfAborted(signal);
   // `open -b` returns when LaunchServices has accepted the request, not when
   // Codex is actually frontmost. Wait on observable app state once so a cold
   // launch cannot burn both sidebar attempts and the search fallback before
   // the window is ready. AbortSignal still terminates the native poll when a
   // newer task selection supersedes this one.
   await waitFrontmost();
+  throwIfAborted(signal);
 
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt > 0) await sleep(REMOTE_APP_ACTIVATION_RETRY_MS, signal);
     try {
       const directResult = await directOpen();
+      throwIfAborted(signal);
       const directOutput = String(directResult?.stdout ?? "");
       const directIdentity = directOutput.includes("strategy=uuid")
         ? "uuid"
@@ -3794,7 +4218,7 @@ async function performRemoteNavigation(thread, slot, options = {}) {
         runtimeTrace("remote-navigation", {
           slot: slot + 1,
           remote: true,
-          strategy: thread.titleAmbiguous ? "sidebar-strict" : "sidebar",
+          strategy: strictIdentity ? "sidebar-strict" : "sidebar",
           result: "ready",
           reason: directIdentity,
           elapsedMs: Date.now() - startedAtMs
@@ -3802,7 +4226,6 @@ async function performRemoteNavigation(thread, slot, options = {}) {
         return true;
       }
       lastError = new Error("remote thread did not become focused after sidebar activation");
-      break;
     } catch (error) {
       if (isAbortError(error)) throw error;
       if (keyBridgeExitCode(error) === 3) throw error;
@@ -3813,31 +4236,145 @@ async function performRemoteNavigation(thread, slot, options = {}) {
   runtimeTrace("remote-navigation", {
     slot: slot + 1,
     remote: true,
-    strategy: thread.titleAmbiguous ? "search-strict" : "search",
+    strategy: strictIdentity ? "search-strict" : "search",
     phase: "start"
   });
   try {
     await searchOpen();
+    throwIfAborted(signal);
   } catch (error) {
     if (isAbortError(error)) throw error;
     lastError = error;
     throw lastError;
   }
-  if (!await waitFocused({ signal, delays: REMOTE_READY_POLL_DELAYS_MS })) {
+  let searchReady = await waitFocused({ signal, delays: REMOTE_READY_POLL_DELAYS_MS });
+  if (!searchReady) {
+    // The unified search itself already waited for and activated one exact
+    // result. Revalidate once after the final navigation frame instead of
+    // opening a second palette and risking a duplicate search interaction.
+    await sleep(REMOTE_APP_ACTIVATION_RETRY_MS, signal);
+    searchReady = await waitFocused({
+      signal,
+      delays: REMOTE_DIRECT_READY_POLL_DELAYS_MS
+    });
+  }
+  if (!searchReady) {
     throw new Error("remote thread search closed before the target became focused", { cause: lastError });
   }
   runtimeTrace("remote-navigation", {
     slot: slot + 1,
     remote: true,
-    strategy: thread.titleAmbiguous ? "search-strict" : "search",
+    strategy: strictIdentity ? "search-strict" : "search",
     result: "ready",
     elapsedMs: Date.now() - startedAtMs
   });
   return true;
 }
 
+async function performDeepLinkNavigation(thread, slot, options = {}) {
+  const signal = options.signal ?? null;
+  const startedAtMs = Date.now();
+  const openUrl = options.openUrl
+    ?? (() => execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], {
+      timeout: 5000,
+      signal
+    }));
+  const waitFrontmost = options.waitFrontmost
+    ?? (() => execFileAsync(KEY_BRIDGE, ["codex-wait-frontmost"], {
+      timeout: 3000,
+      maxBuffer: 4096,
+      signal
+    }));
+  const waitFocused = options.waitFocused
+    ?? ((focusedOptions = {}) => waitForThreadFocused(thread, focusedOptions));
+  const sleep = options.sleep ?? sleepWithSignal;
+  let lastError = null;
+
+  runtimeTrace("thread-navigation", {
+    slot: slot + 1,
+    remote: false,
+    strategy: "deep-link",
+    phase: "start"
+  });
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await sleep(REMOTE_APP_ACTIVATION_RETRY_MS, signal);
+    try {
+      await openUrl();
+      throwIfAborted(signal);
+      await waitFrontmost();
+      throwIfAborted(signal);
+      if (await waitFocused({
+        signal,
+        delays: REMOTE_DIRECT_READY_POLL_DELAYS_MS
+      })) {
+        runtimeTrace("thread-navigation", {
+          slot: slot + 1,
+          remote: false,
+          strategy: "deep-link",
+          result: "ready",
+          elapsedMs: Date.now() - startedAtMs
+        });
+        return true;
+      }
+      lastError = new Error("thread deep link did not become focused");
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      lastError = error;
+    }
+  }
+
+  // A successful `open` only confirms LaunchServices accepted the URL. Give
+  // the second attempt one final identity probe without dispatching a third
+  // navigation request.
+  await sleep(REMOTE_APP_ACTIVATION_RETRY_MS, signal);
+  if (await waitFocused({ signal, delays: REMOTE_READY_POLL_DELAYS_MS })) {
+    runtimeTrace("thread-navigation", {
+      slot: slot + 1,
+      remote: false,
+      strategy: "deep-link-revalidate",
+      result: "ready",
+      elapsedMs: Date.now() - startedAtMs
+    });
+    return true;
+  }
+  throw new Error("thread deep link could not be verified", { cause: lastError });
+}
+
+function navigateDeepLinkThread(thread, slot, options = {}) {
+  if (activeFastModeUpdate) {
+    return afterFastModeUpdate(() => navigateDeepLinkThread(thread, slot, options));
+  }
+  activeComposerCreation?.controller.abort();
+  if (activeDeepLinkNavigation?.threadId === thread.id
+      && !activeDeepLinkNavigation.controller.signal.aborted) {
+    return activeDeepLinkNavigation.promise;
+  }
+  activeRemoteNavigation?.controller.abort();
+  if (activeDeepLinkNavigation) activeDeepLinkNavigation.controller.abort();
+  const controller = new AbortController();
+  const navigation = {
+    threadId: thread.id,
+    controller,
+    promise: null
+  };
+  navigation.promise = performDeepLinkNavigation(thread, slot, {
+    ...options,
+    signal: controller.signal
+  }).finally(() => {
+    if (activeDeepLinkNavigation === navigation) activeDeepLinkNavigation = null;
+  });
+  activeDeepLinkNavigation = navigation;
+  return navigation.promise;
+}
+
 function navigateRemoteThread(thread, slot, options = {}) {
-  if (activeRemoteNavigation?.threadId === thread.id) {
+  if (activeFastModeUpdate) {
+    return afterFastModeUpdate(() => navigateRemoteThread(thread, slot, options));
+  }
+  activeComposerCreation?.controller.abort();
+  activeDeepLinkNavigation?.controller.abort();
+  if (activeRemoteNavigation?.threadId === thread.id
+      && !activeRemoteNavigation.controller.signal.aborted) {
     runtimeTrace("remote-navigation", {
       slot: slot + 1,
       remote: true,
@@ -3870,35 +4407,39 @@ function navigateRemoteThread(thread, slot, options = {}) {
   return navigation.promise;
 }
 
-async function openThread(context, slot) {
+async function openThread(context, slot, options = {}) {
   const thread = threadSlots[slot];
+  const feedback = options.feedback ?? showFeedback;
   if (!thread?.id) {
-    showFeedback(context, "error", "작업 없음");
+    feedback(context, "error", "작업 없음");
     return false;
   }
   if (thread.ephemeral) {
     return openListedSideChat(context, thread);
   }
   if (thread.remote && !accessibilityTrustedSync()) {
-    showFeedback(context, "error", "손쉬운 사용", 2200);
+    feedback(context, "error", "손쉬운 사용", 2200);
     return false;
   }
   pendingSideChatTarget = null;
-  showFeedback(context, "loading", "여는 중");
+  feedback(context, "loading", "여는 중");
+  const remoteNavigation = options.navigateRemote ?? navigateRemoteThread;
+  const deepLinkNavigation = options.navigateDeepLink ?? navigateDeepLinkThread;
+  const remember = options.rememberThread ?? rememberVerifiedThread;
+  const scheduleRefresh = options.scheduleRefresh
+    ?? (() => setTimeout(() => void refreshThreads(), 1000));
   try {
     if (thread.remote) {
-      await navigateRemoteThread(thread, slot);
-      lastOpenedThreadId = thread.id;
-      lastOpenedThreadAtMs = Date.now();
-      showFeedback(context, "success", "원격 전환");
-      setTimeout(() => void refreshThreads(), 1000);
+      await remoteNavigation(thread, slot);
+      remember(thread);
+      feedback(context, "success", "원격 전환");
+      scheduleRefresh();
       return true;
     }
-    await execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], { timeout: 5000 });
-    lastOpenedThreadId = thread.id;
-    lastOpenedThreadAtMs = Date.now();
-    showFeedback(context, "success", "전환 완료");
-    setTimeout(() => void refreshThreads(), 1000);
+    await deepLinkNavigation(thread, slot);
+    remember(thread);
+    feedback(context, "success", "전환 완료");
+    scheduleRefresh();
     return true;
   } catch (error) {
     if (isAbortError(error)) {
@@ -3914,62 +4455,137 @@ async function openThread(context, slot) {
     const label = thread.remote
       ? exitCode === 3 || thread.titleAmbiguous ? "제목 중복" : "원격 확인"
       : "열기 실패";
-    showFeedback(context, "error", label, thread.remote ? 1800 : undefined);
+    feedback(context, "error", label, thread.remote ? 1800 : undefined);
     console.error(`Could not open Codex ${thread.remote ? "remote " : ""}thread: ${error?.message ?? "unknown error"}`);
     return false;
   }
 }
 
-async function openListedSideChat(context, thread) {
+async function openListedSideChat(context, thread, options = {}) {
+  const feedback = options.feedback ?? showFeedback;
+  const clear = options.clearFeedback ?? clearFeedback;
+  const navigate = options.navigateDeepLink ?? navigateDeepLinkThread;
+  const remember = options.rememberThread ?? rememberVerifiedThread;
+  const scheduleRefresh = options.scheduleRefresh
+    ?? (() => setTimeout(() => void refreshThreads(), 1000));
   pendingSideChatTarget = null;
-  lastOpenedThreadId = thread.id;
-  lastOpenedThreadAtMs = Date.now();
-  showFeedback(context, "loading", "사이드챗 열기");
+  feedback(context, "loading", "사이드챗 열기");
   try {
     // A listed side chat already has a live conversation id. Replaying the
     // Option+Command+S creation shortcut here opens a new side chat instead of
     // focusing the listed one. The normal Codex thread deep link also accepts
     // these ephemeral ids while their app-server session is alive.
-    await execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], { timeout: 5000 });
-    showFeedback(context, "success", "사이드챗 전환");
-    setTimeout(() => void refreshThreads(), 1000);
+    const slot = Math.max(0, threadSlots.findIndex((candidate) => candidate?.id === thread.id));
+    await navigate(thread, slot);
+    remember(thread);
+    feedback(context, "success", "사이드챗 전환");
+    scheduleRefresh();
     return true;
   } catch (error) {
-    showFeedback(context, "error", "열기 실패");
+    if (isAbortError(error)) {
+      clear(context);
+      runtimeTrace("thread-navigation", {
+        slot: Math.max(0, threadSlots.findIndex((candidate) => candidate?.id === thread.id)) + 1,
+        remote: false,
+        result: "cancelled"
+      });
+      return false;
+    }
+    feedback(context, "error", "열기 실패");
     console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
     return false;
   }
 }
 
-async function openNewThread(context) {
-  try {
-    pendingSideChatTarget = null;
-    lastOpenedThreadId = null;
-    lastOpenedThreadAtMs = null;
-    await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    if (!runKeyBridgeSync("new-thread", context)) return;
-  } catch (error) {
-    showFeedback(context, "error", "열기 실패");
-    console.error(`Could not open a new Codex thread: ${error?.message ?? "unknown error"}`);
-  }
+function beginComposerCreation(kind, operation) {
+  activeRemoteNavigation?.controller.abort();
+  activeDeepLinkNavigation?.controller.abort();
+  activeComposerCreation?.controller.abort();
+  const controller = new AbortController();
+  const creation = {
+    kind,
+    controller,
+    promise: null
+  };
+  creation.promise = Promise.resolve()
+    .then(() => operation(controller.signal))
+    .finally(() => {
+      if (activeComposerCreation === creation) activeComposerCreation = null;
+    });
+  activeComposerCreation = creation;
+  return creation.promise;
 }
 
-async function openSideChat(context) {
-  try {
-    pendingSideChatTarget = null;
-    const requestedAtMs = Date.now();
-    lastOpenedThreadId = null;
-    lastOpenedThreadAtMs = null;
-    await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
-    await new Promise((resolve) => setTimeout(resolve, 350));
-    if (!runKeyBridgeSync("side-chat", context)) return;
-    pendingSideChatTarget = { requestedAtMs, knownIds: new Set(knownSideChatIds) };
-    scheduleSideChatTargetRefreshes(requestedAtMs);
-  } catch (error) {
-    showFeedback(context, "error", "열기 실패");
-    console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
+async function openNewThread(context, options = {}) {
+  if (activeFastModeUpdate) {
+    return afterFastModeUpdate(() => openNewThread(context, options));
   }
+  const openApp = options.openApp
+    ?? ((signal) => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
+      timeout: 5000,
+      signal
+    }));
+  const sleep = options.sleep ?? sleepWithSignal;
+  const bridge = options.bridge ?? ((command, bridgeContext) => runKeyBridgeSync(command, bridgeContext));
+  return beginComposerCreation("new-thread", async (signal) => {
+    try {
+      pendingSideChatTarget = null;
+      lastOpenedThreadId = null;
+      lastOpenedThreadAtMs = null;
+      await openApp(signal);
+      throwIfAborted(signal);
+      await sleep(350, signal);
+      throwIfAborted(signal);
+      if (!bridge("new-thread", context)) return false;
+      return true;
+    } catch (error) {
+      if (isAbortError(error)) {
+        clearFeedback(context);
+        return false;
+      }
+      showFeedback(context, "error", "열기 실패");
+      console.error(`Could not open a new Codex thread: ${error?.message ?? "unknown error"}`);
+      return false;
+    }
+  });
+}
+
+async function openSideChat(context, options = {}) {
+  if (activeFastModeUpdate) {
+    return afterFastModeUpdate(() => openSideChat(context, options));
+  }
+  const openApp = options.openApp
+    ?? ((signal) => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
+      timeout: 5000,
+      signal
+    }));
+  const sleep = options.sleep ?? sleepWithSignal;
+  const bridge = options.bridge ?? ((command, bridgeContext) => runKeyBridgeSync(command, bridgeContext));
+  const scheduleRefreshes = options.scheduleRefreshes ?? scheduleSideChatTargetRefreshes;
+  return beginComposerCreation("side-chat", async (signal) => {
+    try {
+      pendingSideChatTarget = null;
+      const requestedAtMs = options.nowMs ?? Date.now();
+      lastOpenedThreadId = null;
+      lastOpenedThreadAtMs = null;
+      await openApp(signal);
+      throwIfAborted(signal);
+      await sleep(350, signal);
+      throwIfAborted(signal);
+      if (!bridge("side-chat", context)) return false;
+      pendingSideChatTarget = { requestedAtMs, knownIds: new Set(knownSideChatIds) };
+      scheduleRefreshes(requestedAtMs);
+      return true;
+    } catch (error) {
+      if (isAbortError(error)) {
+        clearFeedback(context);
+        return false;
+      }
+      showFeedback(context, "error", "열기 실패");
+      console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
+      return false;
+    }
+  });
 }
 
 function switchProfilePage(context, device, action, settings = {}) {
@@ -4051,6 +4667,7 @@ function registerPlugin() {
       } else {
         const svg = staticActionSvg(message.action, message.context);
         if (svg) setImage(message.context, svg);
+        if (message.action === ACTIONS.fastMode) void refreshFastMode({ quiet: true });
       }
     } else if (message.event === "willDisappear") {
       // A task-key hold owns both the voice release and its media lease. Let
@@ -4101,6 +4718,8 @@ function registerPlugin() {
         void openNewThread(message.context);
       } else if (action === ACTIONS.sideChat) {
         void openSideChat(message.context);
+      } else if (action === ACTIONS.fastMode) {
+        void toggleFastMode(message.context);
       }
     }
   });
@@ -4135,6 +4754,15 @@ function registerPlugin() {
   setInterval(() => {
     if (contexts.size > 0) void refreshAppearance();
   }, 2000);
+
+  setInterval(() => {
+    if ([...contexts.values()].some((action) => action === ACTIONS.fastMode)) {
+      void refreshFastMode({
+        quiet: true,
+        preserveConfirmedOnUnavailable: true
+      });
+    }
+  }, FAST_MODE_REFRESH_INTERVAL_MS);
 
   setInterval(() => {
     if (voiceTranscriptionByContext.size > 0 || voiceStateResetAtMs.size > 0) {
@@ -4218,18 +4846,6 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
     serviceTier: "priority",
     queueCount: hasCompleted ? 0 : queueCount
   };
-  const completedThread = {
-    id: DEMO_COMPLETED_ID,
-    title: "문서 이미지",
-    pinned: false,
-    status: "completed",
-    startedAtMs: DEMO_EPOCH_MS - 12 * 60_000 - 17_000,
-    endedAtMs: DEMO_EPOCH_MS - 10 * 60_000,
-    activity: { kind: "complete", label: "작업 완료" },
-    reasoningEffort: "high",
-    serviceTier: "default",
-    queueCount: 0
-  };
   let workingThreadSvg = threadSvg(workingThread, 0);
   if (voiceState !== "idle") {
     workingThreadSvg = workingThreadSvg.replace(
@@ -4243,9 +4859,14 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
     newThreadSvg(),
     sendSvg(),
     workingThreadSvg,
-    appSwitchSvg(),
+    fastModeSvg({
+      threadId: DEMO_WORKING_ID,
+      enabled: true,
+      available: true,
+      failed: false
+    }, DEMO_WORKING_ID),
     voiceSvg("idle", nowMs),
-    threadSvg(completedThread, 1)
+    pageNavigationSvg(ACTIONS.pagePrevious)
   ];
   const globalEffect = globalCompletionPulseState(nowMs);
   if (globalEffect) {
@@ -4262,6 +4883,31 @@ function renderDemo(outputPath, mode = "dark") {
   const resolvedOutput = path.resolve(outputPath);
   fsSync.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
   fsSync.writeFileSync(resolvedOutput, demoPreviewSvg(demoKeySvgs(DEMO_EPOCH_MS)));
+  fixedRenderTimeMs = null;
+  resetDemoEffects();
+  console.log(`Rendered ${resolvedOutput}`);
+}
+
+function renderCompletedTaskKey(outputPath, mode = "dark") {
+  appearanceMode = mode;
+  THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
+  fixedRenderTimeMs = DEMO_EPOCH_MS;
+  resetDemoEffects();
+  const completedThread = {
+    id: DEMO_COMPLETED_ID,
+    title: "문서 이미지",
+    pinned: false,
+    status: "completed",
+    startedAtMs: DEMO_EPOCH_MS - 12 * 60_000 - 17_000,
+    endedAtMs: DEMO_EPOCH_MS - 10 * 60_000,
+    activity: { kind: "complete", label: "작업 완료" },
+    reasoningEffort: "high",
+    serviceTier: "default",
+    queueCount: 0
+  };
+  const resolvedOutput = path.resolve(outputPath);
+  fsSync.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
+  fsSync.writeFileSync(resolvedOutput, `${threadSvg(completedThread, 0)}\n`);
   fixedRenderTimeMs = null;
   resetDemoEffects();
   console.log(`Rendered ${resolvedOutput}`);
@@ -5777,6 +6423,81 @@ async function verifyInteractionPolicy() {
   const activationWaitRunsOnceBeforeNavigation = activationOrder.join(",")
     === "open,frontmost,direct,direct,search";
 
+  let delayedDirectAttempts = 0;
+  let delayedDirectFocusChecks = 0;
+  let delayedDirectSearches = 0;
+  await performRemoteNavigation(remoteThread, 2, {
+    openApp: async () => {},
+    waitFrontmost: async () => {},
+    sleep: async () => {},
+    directOpen: async () => { delayedDirectAttempts += 1; },
+    searchOpen: async () => { delayedDirectSearches += 1; },
+    waitFocused: async () => {
+      delayedDirectFocusChecks += 1;
+      return delayedDirectFocusChecks >= 2;
+    }
+  });
+  const successfulButUnreadyDirectRetries = delayedDirectAttempts === 2
+    && delayedDirectFocusChecks === 2
+    && delayedDirectSearches === 0;
+
+  let postSearchDirectAttempts = 0;
+  let postSearchAttempts = 0;
+  let postSearchFocusChecks = 0;
+  await performRemoteNavigation(remoteThread, 2, {
+    openApp: async () => {},
+    waitFrontmost: async () => {},
+    sleep: async () => {},
+    directOpen: async () => {
+      postSearchDirectAttempts += 1;
+      const error = new Error("simulated sidebar miss");
+      error.exitCode = 1;
+      throw error;
+    },
+    searchOpen: async () => { postSearchAttempts += 1; },
+    waitFocused: async () => {
+      postSearchFocusChecks += 1;
+      return postSearchFocusChecks >= 2;
+    }
+  });
+  const unifiedSearchRevalidatesWithoutDuplicate = postSearchDirectAttempts === 2
+    && postSearchAttempts === 1
+    && postSearchFocusChecks === 2;
+
+  const localThreadA = {
+    id: "00000000-0000-4000-8000-000000000040",
+    title: "로컬 현재 작업",
+    status: "idle",
+    recency_at: 100
+  };
+  const localThreadB = {
+    id: "00000000-0000-4000-8000-000000000041",
+    title: "로컬 전환 작업",
+    status: "idle",
+    recency_at: 90
+  };
+  const localThreadC = {
+    id: "00000000-0000-4000-8000-000000000042",
+    title: "로컬 최근 작업",
+    status: "idle",
+    recency_at: 200
+  };
+  let localOpenAttempts = 0;
+  let localFrontmostChecks = 0;
+  let localFocusChecks = 0;
+  await performDeepLinkNavigation(localThreadB, 1, {
+    openUrl: async () => { localOpenAttempts += 1; },
+    waitFrontmost: async () => { localFrontmostChecks += 1; },
+    waitFocused: async () => {
+      localFocusChecks += 1;
+      return localFocusChecks >= 2;
+    },
+    sleep: async () => {}
+  });
+  const firstClickLocalRetries = localOpenAttempts === 2
+    && localFrontmostChecks === 2
+    && localFocusChecks === 2;
+
   activeRemoteNavigation = null;
   let resolveOpenApp;
   const openAppGate = new Promise((resolve) => { resolveOpenApp = resolve; });
@@ -5811,6 +6532,101 @@ async function verifyInteractionPolicy() {
   voiceStateResetAtMs.clear();
   voiceTargetThreadByContext.clear();
   voiceSessionIdByContext.clear();
+  const currentSlotContext = "interaction-current-slot";
+  contexts.set(currentSlotContext, ACTIONS.thread2);
+  primaryThreadId = localThreadA.id;
+  primaryThreadRow = localThreadA;
+  threadSlots = [localThreadA, localThreadB, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+  const originalConsoleError = console.error;
+  console.error = () => {};
+  const failedLocalNavigation = await openThread(currentSlotContext, 1, {
+    navigateDeepLink: async () => { throw new Error("simulated navigation failure"); },
+    scheduleRefresh: () => {},
+    feedback: () => {},
+    rememberThread: (thread) => rememberVerifiedThread(thread, { refreshFastMode: false })
+  });
+  console.error = originalConsoleError;
+  const failedNavigationKeepsCurrentSlot = !failedLocalNavigation
+    && primaryThreadId === localThreadA.id
+    && threadSlots[0]?.id === localThreadA.id;
+  const successfulLocalNavigation = await openThread(currentSlotContext, 1, {
+    navigateDeepLink: async () => true,
+    scheduleRefresh: () => {},
+    feedback: () => {},
+    rememberThread: (thread) => rememberVerifiedThread(thread, { refreshFastMode: false })
+  });
+  const verifiedNavigationPromotesCurrentSlot = successfulLocalNavigation
+    && primaryThreadId === localThreadB.id
+    && threadSlots[0]?.id === localThreadB.id
+    && threadSlots.filter((thread) => thread?.id === localThreadB.id).length === 1;
+  const refreshedCurrentRows = primaryFirstThreadRows(
+    [localThreadC, localThreadA],
+    [localThreadC, localThreadA]
+  );
+  const refreshPreservesCurrentSlot = refreshedCurrentRows[0]?.id === localThreadB.id
+    && refreshedCurrentRows.filter((thread) => thread?.id === localThreadB.id).length === 1;
+  primaryThreadId = remoteThread.id;
+  primaryThreadRow = remoteThread;
+  const currentRemoteRows = primaryFirstThreadRows(
+    [localThreadC, localThreadA],
+    [remoteThread, localThreadC, localThreadA]
+  );
+  const currentUnpinnedRemoteIsSlotOneException = currentRemoteRows[0]?.id === remoteThread.id
+    && currentRemoteRows.filter((thread) => thread?.id === remoteThread.id).length === 1;
+  const stalePrimary = {
+    ...remoteThread,
+    title: "동일 제목 원격 작업",
+    remote: true,
+    ephemeral: false
+  };
+  const sameTitleFreshRemote = {
+    ...remoteThread,
+    id: "00000000-0000-4000-8000-000000000043",
+    title: stalePrimary.title,
+    remote: true,
+    ephemeral: false
+  };
+  primaryThreadId = stalePrimary.id;
+  primaryThreadRow = stalePrimary;
+  const retainedStaleRows = primaryFirstThreadRows(
+    [sameTitleFreshRemote],
+    [sameTitleFreshRemote]
+  );
+  const annotatedRetainedRows = annotateKnownTitleAmbiguity(
+    retainedStaleRows,
+    [stalePrimary, sameTitleFreshRemote]
+  );
+  const staleCurrentRequiresStrictIdentity = retainedStaleRows[0]?.requiresStrictIdentity === true
+    && remoteThreadKeyBridgeCommand(retainedStaleRows[0], "codex-open-thread")
+      === "codex-open-thread-strict"
+    && annotatedRetainedRows[1]?.titleAmbiguous === true;
+  primaryThreadId = localThreadB.id;
+  primaryThreadRow = { ...localThreadB, remote: true, ephemeral: true };
+  const normalizedCurrentRows = primaryFirstThreadRows(
+    [{ ...localThreadB, remote: false, ephemeral: false }],
+    [{ ...localThreadB, remote: false, ephemeral: false }]
+  );
+  const freshSourceFlagsReplaceCachedFlags = normalizedCurrentRows[0]?.remote === false
+    && normalizedCurrentRows[0]?.ephemeral === false;
+  const sideChatFeedbackKinds = [];
+  let sideChatClearCount = 0;
+  const cancelledSideChat = await openListedSideChat(
+    "interaction-cancelled-side-chat",
+    { ...localThreadC, ephemeral: true },
+    {
+      navigateDeepLink: async () => { throw abortedOperationError(); },
+      feedback: (_context, kind) => { sideChatFeedbackKinds.push(kind); },
+      clearFeedback: () => { sideChatClearCount += 1; },
+      scheduleRefresh: () => {}
+    }
+  );
+  const cancelledSideChatIsQuiet = !cancelledSideChat
+    && sideChatClearCount === 1
+    && sideChatFeedbackKinds.join(",") === "loading";
+  primaryThreadId = localThreadB.id;
+  primaryThreadRow = localThreadB;
+  threadSlots = [localThreadB, localThreadA, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+
   const pressContext = "interaction-remote-hold";
   contexts.set(pressContext, ACTIONS.thread1);
   threadSlots = [remoteThread, ...Array(THREAD_COUNT - 1).fill(null)];
@@ -6049,6 +6865,357 @@ async function verifyInteractionPolicy() {
   const wrongTargetCannotSubmit = guardedCommands.length === 0
     && voiceStateByContext.get(guardContext) === "error";
 
+  const offStateError = new Error("fast mode is off");
+  offStateError.exitCode = 1;
+  offStateError.stdout = "state=off available=1 source=composer\n";
+  const parsedOffState = await queryFastModeState({
+    stateProbe: async () => { throw offStateError; }
+  });
+  const offExitIsConfirmedState = parsedOffState.enabled === false
+    && parsedOffState.available === true;
+
+  const fastContext = "interaction-fast-mode";
+  contexts.set(fastContext, ACTIONS.fastMode);
+  primaryThreadId = localThreadB.id;
+  primaryThreadRow = localThreadB;
+  threadSlots = [localThreadB, localThreadA, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: false,
+    available: true,
+    failed: false
+  };
+  let resolveFastNavigation;
+  const fastNavigationGate = new Promise((resolve) => { resolveFastNavigation = resolve; });
+  activeDeepLinkNavigation = {
+    threadId: localThreadB.id,
+    controller: new AbortController(),
+    promise: fastNavigationGate
+  };
+  let fastSetAttempts = 0;
+  let fastStateProbeAttempts = 0;
+  let fastSetTargetCorrect = true;
+  const fastOptions = {
+    feedback: () => {},
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    stateProbe: async () => {
+      fastStateProbeAttempts += 1;
+      return {
+        stdout: fastStateProbeAttempts === 1
+          ? "state=off available=1 source=composer\n"
+          : "state=on available=1 source=composer\n"
+      };
+    },
+    setMode: async (enabled) => {
+      fastSetAttempts += 1;
+      fastSetTargetCorrect = fastSetTargetCorrect && enabled === true;
+    }
+  };
+  const firstFastToggle = toggleFastMode(fastContext, fastOptions);
+  const secondFastToggle = toggleFastMode(fastContext, fastOptions);
+  await Promise.resolve();
+  const fastToggleWaitedForNavigation = fastSetAttempts === 0;
+  resolveFastNavigation(true);
+  const [firstFastResult, secondFastResult] = await Promise.all([
+    firstFastToggle,
+    secondFastToggle
+  ]);
+  activeDeepLinkNavigation = null;
+  const fastToggleIsCoalescedAndConfirmed = firstFastToggle === secondFastToggle
+    && firstFastResult
+    && secondFastResult
+    && fastSetAttempts === 1
+    && fastStateProbeAttempts === 2
+    && fastSetTargetCorrect
+    && fastModeState.threadId === localThreadB.id
+    && fastModeState.enabled === true
+    && fastModeSvg().includes("FAST ON");
+
+  let timeoutRecoveryStateProbes = 0;
+  const fastTimeoutAfterApplyRecovers = await toggleFastMode(fastContext, {
+    feedback: () => {},
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    stateProbe: async () => {
+      timeoutRecoveryStateProbes += 1;
+      return {
+        stdout: timeoutRecoveryStateProbes === 1
+          ? "state=on available=1 source=composer\n"
+          : "state=off available=1 source=composer\n"
+      };
+    },
+    setMode: async (enabled) => {
+      if (enabled !== false) throw new Error("unexpected recovery target");
+      const error = new Error("simulated timeout after AXPress");
+      error.code = "ETIMEDOUT";
+      throw error;
+    }
+  });
+  const fastSetTimeoutIsReconciled = fastTimeoutAfterApplyRecovers
+    && timeoutRecoveryStateProbes === 2
+    && fastModeState.threadId === localThreadB.id
+    && fastModeState.enabled === false;
+
+  let resolveStaleFastRefresh;
+  const staleFastRefreshState = new Promise((resolve) => { resolveStaleFastRefresh = resolve; });
+  const staleFastRefresh = refreshFastMode({
+    threadId: localThreadB.id,
+    quiet: true,
+    stateProbe: async () => staleFastRefreshState
+  });
+  await Promise.resolve();
+  fastModeRevision += 1;
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    failed: false
+  };
+  resolveStaleFastRefresh({ stdout: "state=off available=1 source=composer\n" });
+  await staleFastRefresh;
+  const staleFastRefreshCannotOverwriteToggle = fastModeState.enabled === true;
+  await refreshFastMode({
+    threadId: localThreadB.id,
+    quiet: true,
+    stateProbe: async () => ({ stdout: "state=unknown available=0 source=composer\n" })
+  });
+  const unknownFastRefreshWasRecorded = fastModeState.enabled === null
+    && fastModeState.available === false;
+  await refreshFastMode({
+    threadId: localThreadB.id,
+    quiet: true,
+    stateProbe: async () => ({ stdout: "state=on available=1 source=composer\n" })
+  });
+  const fastRefreshRecoversWithoutPageReentry = unknownFastRefreshWasRecorded
+    && fastModeState.enabled === true
+    && fastModeState.available === true;
+
+  activeDeepLinkNavigation = null;
+  let resolveFastLease;
+  const fastLeaseGate = new Promise((resolve) => { resolveFastLease = resolve; });
+  activeFastModeUpdate = fastLeaseGate;
+  let navigationAfterFastAttempts = 0;
+  const navigationAfterFast = navigateDeepLinkThread(localThreadA, 0, {
+    openUrl: async () => { navigationAfterFastAttempts += 1; },
+    waitFrontmost: async () => {},
+    waitFocused: async () => true,
+    sleep: async () => {}
+  });
+  await Promise.resolve();
+  const navigationWaitedForFastToggleBeforeRelease = navigationAfterFastAttempts === 0;
+  activeFastModeUpdate = null;
+  resolveFastLease(true);
+  await navigationAfterFast;
+  const navigationWaitsForFastToggle = navigationWaitedForFastToggleBeforeRelease
+    && navigationAfterFastAttempts === 1;
+  activeDeepLinkNavigation = null;
+
+  let resolveNewThreadLease;
+  const newThreadLease = new Promise((resolve) => { resolveNewThreadLease = resolve; });
+  activeFastModeUpdate = newThreadLease;
+  let newThreadMutations = 0;
+  const deferredNewThread = openNewThread("interaction-new-thread-after-fast", {
+    openApp: async () => { newThreadMutations += 1; },
+    sleep: async () => {},
+    bridge: () => {
+      newThreadMutations += 1;
+      return true;
+    }
+  });
+  await Promise.resolve();
+  const newThreadWaited = newThreadMutations === 0;
+  activeFastModeUpdate = null;
+  resolveNewThreadLease(true);
+  const newThreadOpened = await deferredNewThread;
+
+  let resolveSideChatLease;
+  const sideChatLease = new Promise((resolve) => { resolveSideChatLease = resolve; });
+  activeFastModeUpdate = sideChatLease;
+  let sideChatMutations = 0;
+  const deferredSideChat = openSideChat("interaction-side-chat-after-fast", {
+    nowMs: 1234,
+    openApp: async () => { sideChatMutations += 1; },
+    sleep: async () => {},
+    bridge: () => {
+      sideChatMutations += 1;
+      return true;
+    },
+    scheduleRefreshes: () => { sideChatMutations += 1; }
+  });
+  await Promise.resolve();
+  const sideChatWaited = sideChatMutations === 0;
+  activeFastModeUpdate = null;
+  resolveSideChatLease(true);
+  const sideChatOpened = await deferredSideChat;
+  const composerCreatingActionsWaitForFastToggle = newThreadWaited
+    && newThreadOpened
+    && newThreadMutations === 2
+    && sideChatWaited
+    && sideChatOpened
+    && sideChatMutations === 3;
+  pendingSideChatTarget = null;
+
+  primaryThreadId = localThreadB.id;
+  primaryThreadRow = localThreadB;
+  threadSlots = [localThreadB, localThreadA, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: false,
+    available: true,
+    failed: false
+  };
+  let releaseCreationSleep;
+  let creationSleepStarted;
+  const creationSleepGate = new Promise((resolve) => { releaseCreationSleep = resolve; });
+  const creationReachedSleep = new Promise((resolve) => { creationSleepStarted = resolve; });
+  const creationThenFastOrder = [];
+  const creationBeforeFast = openNewThread("interaction-creation-before-fast", {
+    openApp: async () => { creationThenFastOrder.push("open"); },
+    sleep: async () => {
+      creationSleepStarted();
+      await creationSleepGate;
+    },
+    bridge: () => {
+      creationThenFastOrder.push("create");
+      return true;
+    }
+  });
+  await creationReachedSleep;
+  let reverseFastProbeCount = 0;
+  const fastAfterCreation = toggleFastMode(fastContext, {
+    feedback: () => {},
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    stateProbe: async () => {
+      reverseFastProbeCount += 1;
+      return {
+        stdout: reverseFastProbeCount === 1
+          ? "state=off available=1 source=composer\n"
+          : "state=on available=1 source=composer\n"
+      };
+    },
+    setMode: async () => { creationThenFastOrder.push("fast"); }
+  });
+  await Promise.resolve();
+  const fastWaitedForEarlierCreation = !creationThenFastOrder.includes("fast");
+  releaseCreationSleep();
+  await Promise.all([creationBeforeFast, fastAfterCreation]);
+  const creationAndFastLeaseIsBidirectional = fastWaitedForEarlierCreation
+    && creationThenFastOrder.join(",") === "open,create,fast";
+
+  let releaseSupersededCreation;
+  let supersededCreationStarted;
+  const supersededCreationGate = new Promise((resolve) => { releaseSupersededCreation = resolve; });
+  const supersededCreationReady = new Promise((resolve) => { supersededCreationStarted = resolve; });
+  let supersededCreationBridges = 0;
+  const supersededCreation = openSideChat("interaction-creation-superseded", {
+    openApp: async () => {},
+    sleep: async () => {
+      supersededCreationStarted();
+      await supersededCreationGate;
+    },
+    bridge: () => {
+      supersededCreationBridges += 1;
+      return true;
+    },
+    scheduleRefreshes: () => {}
+  });
+  await supersededCreationReady;
+  let supersedingNavigationAttempts = 0;
+  const supersedingNavigation = navigateDeepLinkThread(localThreadA, 0, {
+    openUrl: async () => { supersedingNavigationAttempts += 1; },
+    waitFrontmost: async () => {},
+    waitFocused: async () => true,
+    sleep: async () => {}
+  });
+  await supersedingNavigation;
+  releaseSupersededCreation();
+  const supersededCreationResult = await supersededCreation;
+  const navigationSupersedesPendingCreation = !supersededCreationResult
+    && supersededCreationBridges === 0
+    && supersedingNavigationAttempts === 1;
+
+  let releaseSupersededNavigation;
+  let supersededNavigationStarted;
+  const supersededNavigationGate = new Promise((resolve) => { releaseSupersededNavigation = resolve; });
+  const supersededNavigationReady = new Promise((resolve) => { supersededNavigationStarted = resolve; });
+  let supersededNavigationFocusChecks = 0;
+  const supersededNavigation = navigateDeepLinkThread(localThreadC, 2, {
+    openUrl: async () => {
+      supersededNavigationStarted();
+      await supersededNavigationGate;
+    },
+    waitFrontmost: async () => {},
+    waitFocused: async () => {
+      supersededNavigationFocusChecks += 1;
+      return true;
+    },
+    sleep: async () => {}
+  });
+  await supersededNavigationReady;
+  let supersedingCreationBridges = 0;
+  const supersedingCreation = openNewThread("interaction-navigation-superseded", {
+    openApp: async () => {},
+    sleep: async () => {},
+    bridge: () => {
+      supersedingCreationBridges += 1;
+      return true;
+    }
+  });
+  await supersedingCreation;
+  releaseSupersededNavigation();
+  const supersededNavigationWasAborted = await supersededNavigation
+    .then(() => false, (error) => isAbortError(error));
+  const creationSupersedesPendingNavigation = supersededNavigationWasAborted
+    && supersededNavigationFocusChecks === 0
+    && supersedingCreationBridges === 1;
+
+  let releaseCancelledSameTarget;
+  let cancelledSameTargetStarted;
+  const cancelledSameTargetGate = new Promise((resolve) => { releaseCancelledSameTarget = resolve; });
+  const cancelledSameTargetReady = new Promise((resolve) => { cancelledSameTargetStarted = resolve; });
+  const cancelledSameTargetNavigation = navigateDeepLinkThread(localThreadA, 0, {
+    openUrl: async () => {
+      cancelledSameTargetStarted();
+      await cancelledSameTargetGate;
+    },
+    waitFrontmost: async () => {},
+    waitFocused: async () => true,
+    sleep: async () => {}
+  });
+  const cancelledSameTargetOutcome = cancelledSameTargetNavigation
+    .then(() => false, (error) => isAbortError(error));
+  await cancelledSameTargetReady;
+  let releaseInterleavedCreation;
+  let interleavedCreationStarted;
+  const interleavedCreationGate = new Promise((resolve) => { releaseInterleavedCreation = resolve; });
+  const interleavedCreationReady = new Promise((resolve) => { interleavedCreationStarted = resolve; });
+  const interleavedCreation = openNewThread("interaction-same-target-interleave", {
+    openApp: async () => {},
+    sleep: async () => {
+      interleavedCreationStarted();
+      await interleavedCreationGate;
+    },
+    bridge: () => true
+  });
+  await interleavedCreationReady;
+  let sameTargetRetryAttempts = 0;
+  const sameTargetRetry = navigateDeepLinkThread(localThreadA, 0, {
+    openUrl: async () => { sameTargetRetryAttempts += 1; },
+    waitFrontmost: async () => {},
+    waitFocused: async () => true,
+    sleep: async () => {}
+  });
+  const sameTargetRetryStartedFresh = sameTargetRetry !== cancelledSameTargetNavigation;
+  const sameTargetRetryResult = await sameTargetRetry;
+  releaseCancelledSameTarget();
+  releaseInterleavedCreation();
+  const cancelledSameTargetWasAborted = await cancelledSameTargetOutcome;
+  const interleavedCreationResult = await interleavedCreation;
+  const cancelledSameTargetDoesNotSwallowRetry = sameTargetRetryStartedFresh
+    && sameTargetRetryResult
+    && sameTargetRetryAttempts === 1
+    && cancelledSameTargetWasAborted
+    && !interleavedCreationResult;
+
   const passed = fastBadgeAllStates
     && standardHasNoFastBadge
     && knownTitleAmbiguityDetected
@@ -6056,8 +7223,18 @@ async function verifyInteractionPolicy() {
     && sameTitleVoiceTargetIsIdentitySafe
     && fallbackSearchRunsOnce
     && activationWaitRunsOnceBeforeNavigation
+    && successfulButUnreadyDirectRetries
+    && unifiedSearchRevalidatesWithoutDuplicate
+    && firstClickLocalRetries
     && sameTargetSharesNavigation
     && navigationLeaseCleared
+    && failedNavigationKeepsCurrentSlot
+    && verifiedNavigationPromotesCurrentSlot
+    && refreshPreservesCurrentSlot
+    && currentUnpinnedRemoteIsSlotOneException
+    && staleCurrentRequiresStrictIdentity
+    && freshSourceFlagsReplaceCachedFlags
+    && cancelledSideChatIsQuiet
     && staleHoldCannotDeleteNextPress
     && missingBaselineRejected
     && mediaPauseLeaseIsBalanced
@@ -6065,7 +7242,19 @@ async function verifyInteractionPolicy() {
     && failedResumeRetainsState
     && concurrentResumeBeforeDispatchIsCoalesced
     && postDispatchResumeRaceReassertsPause
-    && wrongTargetCannotSubmit;
+    && wrongTargetCannotSubmit
+    && offExitIsConfirmedState
+    && fastToggleWaitedForNavigation
+    && fastToggleIsCoalescedAndConfirmed
+    && fastSetTimeoutIsReconciled
+    && staleFastRefreshCannotOverwriteToggle
+    && fastRefreshRecoversWithoutPageReentry
+    && navigationWaitsForFastToggle
+    && composerCreatingActionsWaitForFastToggle
+    && creationAndFastLeaseIsBidirectional
+    && navigationSupersedesPendingCreation
+    && creationSupersedesPendingNavigation
+    && cancelledSameTargetDoesNotSwallowRetry;
   console.log(JSON.stringify({
     passed,
     fastBadgeAllStates,
@@ -6075,8 +7264,18 @@ async function verifyInteractionPolicy() {
     sameTitleVoiceTargetIsIdentitySafe,
     fallbackSearchRunsOnce,
     activationWaitRunsOnceBeforeNavigation,
+    successfulButUnreadyDirectRetries,
+    unifiedSearchRevalidatesWithoutDuplicate,
+    firstClickLocalRetries,
     sameTargetSharesNavigation,
     navigationLeaseCleared,
+    failedNavigationKeepsCurrentSlot,
+    verifiedNavigationPromotesCurrentSlot,
+    refreshPreservesCurrentSlot,
+    currentUnpinnedRemoteIsSlotOneException,
+    staleCurrentRequiresStrictIdentity,
+    freshSourceFlagsReplaceCachedFlags,
+    cancelledSideChatIsQuiet,
     staleHoldCannotDeleteNextPress,
     missingBaselineRejected,
     mediaPauseLeaseIsBalanced,
@@ -6084,12 +7283,30 @@ async function verifyInteractionPolicy() {
     failedResumeRetainsState,
     concurrentResumeBeforeDispatchIsCoalesced,
     postDispatchResumeRaceReassertsPause,
-    wrongTargetCannotSubmit
+    wrongTargetCannotSubmit,
+    offExitIsConfirmedState,
+    fastToggleWaitedForNavigation,
+    fastToggleIsCoalescedAndConfirmed,
+    fastSetTimeoutIsReconciled,
+    staleFastRefreshCannotOverwriteToggle,
+    fastRefreshRecoversWithoutPageReentry,
+    navigationWaitsForFastToggle,
+    composerCreatingActionsWaitForFastToggle,
+    creationAndFastLeaseIsBidirectional,
+    navigationSupersedesPendingCreation,
+    creationSupersedesPendingNavigation,
+    cancelledSameTargetDoesNotSwallowRetry
   }));
   if (!passed) process.exitCode = 1;
 
   activeRemoteNavigation?.controller.abort();
   activeRemoteNavigation = null;
+  activeDeepLinkNavigation?.controller.abort();
+  activeDeepLinkNavigation = null;
+  activeComposerCreation?.controller.abort();
+  activeComposerCreation = null;
+  activeFastModeRefresh = null;
+  activeFastModeUpdate = null;
   threadPressByContext.clear();
   voiceHeldContexts.clear();
   voiceReleasePendingContexts.clear();
@@ -6106,6 +7323,14 @@ async function verifyInteractionPolicy() {
   contextSentImages.clear();
   contextFeedback.clear();
   threadSlots = Array(THREAD_COUNT).fill(null);
+  primaryThreadId = null;
+  primaryThreadRow = null;
+  fastModeState = {
+    threadId: null,
+    enabled: null,
+    available: null,
+    failed: false
+  };
   socket = null;
 }
 
@@ -6144,9 +7369,10 @@ function runSelectedMode() {
       console.error(error);
       process.exitCode = 1;
     });
-  } else if (demoOutput || demoLightOutput || demoAnimationDirectory || gestureAnimationDirectory) {
+  } else if (demoOutput || demoLightOutput || completedKeyOutput || demoAnimationDirectory || gestureAnimationDirectory) {
     if (gestureAnimationDirectory) renderGestureAnimations(gestureAnimationDirectory, "dark");
     else if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
+    else if (completedKeyOutput) renderCompletedTaskKey(completedKeyOutput, "dark");
     else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
   } else if (snapshotMode) {
     readTopThreads()

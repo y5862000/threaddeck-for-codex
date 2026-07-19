@@ -77,6 +77,8 @@ The editable profile source lives under `profiles/source/unpacked`. `scripts/bui
 
 ThreadDeck owns the bundled previous-page actions and exposes a next-page action. They use Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while those keys participate in plugin-rendered completion overlays. Elgato-owned app-launch actions remain native and do not receive ThreadDeck overlays.
 
+The Dashboard keeps task action 1 at keypad position `0,1` as the current task or last successfully switched task. Position `1,1` contains the ThreadDeck-owned Fast mode toggle; the app-switch action remains available in the action list for custom profiles.
+
 ## Data refresh and rendering
 
 - Task metadata refreshes every 3 seconds while any ThreadDeck-owned action is visible.

@@ -1727,6 +1727,1017 @@ static int wait_for_codex_frontmost(CFTimeInterval timeout_seconds) {
   return 1;
 }
 
+typedef enum {
+  CODEX_FAST_MODE_UNKNOWN = -1,
+  CODEX_FAST_MODE_OFF = 0,
+  CODEX_FAST_MODE_ON = 1
+} CodexFastModeValue;
+
+typedef enum {
+  CODEX_FAST_CONTROL_NONE = 0,
+  CODEX_FAST_CONTROL_DIRECT = 1,
+  CODEX_FAST_CONTROL_SELECTOR = 2
+} CodexFastControlKind;
+
+typedef enum {
+  CODEX_FAST_ACTION_UNAVAILABLE = 0,
+  CODEX_FAST_ACTION_NONE = 1,
+  CODEX_FAST_ACTION_PRESS_DIRECT = 2,
+  CODEX_FAST_ACTION_SELECT_OPTION = 3
+} CodexFastAction;
+
+typedef struct {
+  bool fast_context;
+  bool speed_context;
+  bool mentions_fast;
+  bool mentions_standard;
+  bool enable_action;
+  bool disable_action;
+  bool explicit_on;
+  bool explicit_off;
+  bool exact_fast;
+  bool exact_standard;
+  bool exact_speed;
+} CodexFastTextSignals;
+
+typedef struct {
+  CFArrayRef attributes;
+  AXUIElementRef control;
+  CodexFastControlKind control_kind;
+  int control_score;
+  unsigned control_count;
+  CGPoint control_position;
+  CGSize control_size;
+  AXUIElementRef on_option;
+  AXUIElementRef off_option;
+  unsigned on_option_count;
+  unsigned off_option_count;
+  CodexFastModeValue value;
+  int value_score;
+  bool value_conflict;
+  bool available;
+  bool allow_popup_options;
+  bool composer_input_found;
+  CGPoint composer_input_position;
+  CGSize composer_input_size;
+  double composer_input_score;
+  unsigned visited;
+  CGPoint window_origin;
+  CGSize window_size;
+} CodexFastModeScan;
+
+enum {
+  FAST_ATTR_ROLE = 0,
+  FAST_ATTR_TITLE,
+  FAST_ATTR_VALUE,
+  FAST_ATTR_DESCRIPTION,
+  FAST_ATTR_HELP,
+  FAST_ATTR_IDENTIFIER,
+  FAST_ATTR_ROLE_DESCRIPTION,
+  FAST_ATTR_DOM_IDENTIFIER,
+  FAST_ATTR_SELECTED,
+  FAST_ATTR_ENABLED,
+  FAST_ATTR_HIDDEN,
+  FAST_ATTR_POSITION,
+  FAST_ATTR_SIZE,
+  FAST_ATTR_CHILDREN,
+  FAST_ATTR_MENU_MARK,
+  FAST_ATTR_COUNT
+};
+
+static bool codex_fast_text_contains_any(
+  NSString *text,
+  NSArray<NSString *> *needles
+) {
+  for (NSString *needle in needles) {
+    if ([text containsString:needle]) return true;
+  }
+  return false;
+}
+
+static CodexFastTextSignals codex_fast_signals_from_string(CFTypeRef value) {
+  CodexFastTextSignals signals = { 0 };
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return signals;
+  @autoreleasepool {
+    NSString *text = [[(__bridge NSString *)value lowercaseString]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (text.length == 0) return signals;
+    NSString *normalized = [[text stringByReplacingOccurrencesOfString:@"_" withString:@"-"]
+      stringByReplacingOccurrencesOfString:@"–" withString:@"-"];
+    signals.exact_fast = [normalized isEqualToString:@"fast"]
+      || [normalized isEqualToString:@"fast mode"]
+      || [normalized isEqualToString:@"빠름"]
+      || [normalized isEqualToString:@"빠른 모드"]
+      || [normalized isEqualToString:@"고속"]
+      || [normalized isEqualToString:@"고속 모드"];
+    signals.exact_standard = [normalized isEqualToString:@"standard"]
+      || [normalized isEqualToString:@"standard mode"]
+      || [normalized isEqualToString:@"표준"]
+      || [normalized isEqualToString:@"표준 모드"];
+    signals.exact_speed = [normalized isEqualToString:@"speed"]
+      || [normalized isEqualToString:@"response speed"]
+      || [normalized isEqualToString:@"속도"]
+      || [normalized isEqualToString:@"응답 속도"];
+    signals.mentions_fast = [normalized containsString:@"fast"]
+      || [normalized containsString:@"빠름"]
+      || [normalized containsString:@"빠른"]
+      || [normalized containsString:@"고속"];
+    signals.mentions_standard = [normalized containsString:@"standard"]
+      || [normalized containsString:@"표준"];
+    signals.speed_context = [normalized containsString:@"speed"]
+      || [normalized containsString:@"속도"];
+    signals.fast_context = [normalized containsString:@"fast mode"]
+      || [normalized containsString:@"fast-mode"]
+      || [normalized containsString:@"/fast"]
+      || [normalized containsString:@"빠른 모드"]
+      || [normalized containsString:@"고속 모드"];
+    signals.enable_action = codex_fast_text_contains_any(normalized, @[
+      @"turn on", @"switch on", @"enable", @"activate",
+      @"켜기", @"사용하기", @"활성화"
+    ]);
+    signals.disable_action = codex_fast_text_contains_any(normalized, @[
+      @"turn off", @"switch off", @"disable", @"deactivate",
+      @"끄기", @"사용 중지", @"비활성화"
+    ]);
+    signals.explicit_on = codex_fast_text_contains_any(normalized, @[
+      @"mode on", @"mode: on", @"enabled", @"active",
+      @"켜짐", @"사용 중", @"활성"
+    ]);
+    signals.explicit_off = codex_fast_text_contains_any(normalized, @[
+      @"mode off", @"mode: off", @"disabled", @"inactive",
+      @"꺼짐", @"사용 안 함", @"비활성"
+    ]);
+    // Negative forms contain their positive suffixes in English (deactivate /
+    // active) and Korean (비활성화 / 활성화). Keep those labels one-sided so
+    // a clear "turn off" control cannot degrade to an unknown state.
+    if ([normalized containsString:@"deactivate"]
+        || [normalized containsString:@"비활성화"]) {
+      signals.enable_action = false;
+    }
+    if ([normalized containsString:@"inactive"]
+        || [normalized containsString:@"비활성"]) {
+      signals.explicit_on = false;
+    }
+    // Korean action nouns contain the shorter state adjective. Treat the
+    // fixed composer commands 활성화/비활성화 as actions, while standalone
+    // 활성/비활성 continues to describe the current state.
+    if ([normalized containsString:@"비활성화"]) {
+      signals.explicit_off = false;
+    } else if ([normalized containsString:@"활성화"]) {
+      signals.explicit_on = false;
+    }
+  }
+  return signals;
+}
+
+static void merge_codex_fast_signals(
+  CodexFastTextSignals *destination,
+  CodexFastTextSignals source
+) {
+  destination->fast_context |= source.fast_context;
+  destination->speed_context |= source.speed_context;
+  destination->mentions_fast |= source.mentions_fast;
+  destination->mentions_standard |= source.mentions_standard;
+  destination->enable_action |= source.enable_action;
+  destination->disable_action |= source.disable_action;
+  destination->explicit_on |= source.explicit_on;
+  destination->explicit_off |= source.explicit_off;
+  destination->exact_fast |= source.exact_fast;
+  destination->exact_standard |= source.exact_standard;
+  destination->exact_speed |= source.exact_speed;
+}
+
+static bool codex_fast_role_equals(CFTypeRef role, CFStringRef expected) {
+  return role != NULL && CFGetTypeID(role) == CFStringGetTypeID()
+    && CFEqual(role, expected);
+}
+
+static bool codex_fast_batched_boolean(
+  CFArrayRef values,
+  CFIndex index,
+  bool *result
+) {
+  if (values == NULL || result == NULL || CFArrayGetCount(values) <= index) return false;
+  CFTypeRef value = CFArrayGetValueAtIndex(values, index);
+  if (value == NULL || CFGetTypeID(value) != CFBooleanGetTypeID()) return false;
+  *result = CFBooleanGetValue((CFBooleanRef)value);
+  return true;
+}
+
+static bool codex_fast_batched_numeric_boolean(
+  CFArrayRef values,
+  CFIndex index,
+  bool *result
+) {
+  if (values == NULL || result == NULL || CFArrayGetCount(values) <= index) return false;
+  CFTypeRef value = CFArrayGetValueAtIndex(values, index);
+  if (value == NULL || CFGetTypeID(value) != CFNumberGetTypeID()) return false;
+  int number = 0;
+  if (!CFNumberGetValue((CFNumberRef)value, kCFNumberIntType, &number)) return false;
+  if (number != 0 && number != 1) return false;
+  *result = number == 1;
+  return true;
+}
+
+static bool codex_fast_has_menu_mark(CFArrayRef values) {
+  if (values == NULL || CFArrayGetCount(values) <= FAST_ATTR_MENU_MARK) return false;
+  CFTypeRef value = CFArrayGetValueAtIndex(values, FAST_ATTR_MENU_MARK);
+  return value != NULL && CFGetTypeID(value) == CFStringGetTypeID()
+    && CFStringGetLength((CFStringRef)value) > 0;
+}
+
+static bool codex_fast_control_geometry_is_plausible(
+  CGPoint position,
+  CGSize size,
+  CGPoint window_origin,
+  CGSize window_size
+) {
+  if (window_size.width < 420 || window_size.height < 280
+      || size.width < 16 || size.width > 420
+      || size.height < 16 || size.height > 76) return false;
+  return position.x >= window_origin.x + window_size.width * 0.18
+    && position.x + size.width <= window_origin.x + window_size.width + 2
+    && position.y >= window_origin.y + window_size.height * 0.52
+    && position.y + size.height <= window_origin.y + window_size.height + 2;
+}
+
+static bool codex_fast_option_geometry_is_plausible(
+  CGPoint position,
+  CGSize size,
+  CGPoint window_origin,
+  CGSize window_size
+) {
+  if (size.width < 20 || size.width > 460 || size.height < 16 || size.height > 76) {
+    return false;
+  }
+  // Chromium popovers can extend a few pixels outside the focused window.
+  return position.x + size.width >= window_origin.x - 24
+    && position.x <= window_origin.x + window_size.width + 24
+    && position.y + size.height >= window_origin.y - 24
+    && position.y <= window_origin.y + window_size.height + 24;
+}
+
+static bool codex_fast_control_is_near_composer(
+  CGPoint control_position,
+  CGSize control_size,
+  CGPoint input_position,
+  CGSize input_size
+) {
+  if (control_size.width <= 0 || control_size.height <= 0
+      || input_size.width < 120 || input_size.height < 18) return false;
+  double control_center_x = control_position.x + control_size.width / 2.0;
+  double control_center_y = control_position.y + control_size.height / 2.0;
+  return control_center_x >= input_position.x - 120
+    && control_center_x <= input_position.x + input_size.width + 120
+    && control_center_y >= input_position.y - 100
+    && control_center_y <= input_position.y + input_size.height + 100;
+}
+
+static bool codex_accessibility_element_supports_press(AXUIElementRef element) {
+  if (element == NULL) return false;
+  CFArrayRef actions = NULL;
+  AXError error = AXUIElementCopyActionNames(element, &actions);
+  bool supports = error == kAXErrorSuccess && actions != NULL
+    && CFArrayContainsValue(
+      actions,
+      CFRangeMake(0, CFArrayGetCount(actions)),
+      kAXPressAction
+    );
+  if (actions != NULL) CFRelease(actions);
+  return supports;
+}
+
+static void consider_codex_fast_value(
+  CodexFastModeScan *scan,
+  CodexFastModeValue value,
+  int score
+) {
+  if (value == CODEX_FAST_MODE_UNKNOWN || score <= 0) return;
+  if (score > scan->value_score) {
+    scan->value = value;
+    scan->value_score = score;
+    scan->value_conflict = false;
+  } else if (score == scan->value_score && scan->value != value) {
+    scan->value = CODEX_FAST_MODE_UNKNOWN;
+    scan->value_conflict = true;
+  }
+}
+
+static void consider_codex_fast_control(
+  CodexFastModeScan *scan,
+  AXUIElementRef element,
+  CodexFastControlKind kind,
+  int score,
+  CGPoint position,
+  CGSize size
+) {
+  if (element == NULL || kind == CODEX_FAST_CONTROL_NONE || score <= 0) return;
+  if (score > scan->control_score) {
+    if (scan->control != NULL) CFRelease(scan->control);
+    scan->control = (AXUIElementRef)CFRetain(element);
+    scan->control_kind = kind;
+    scan->control_score = score;
+    scan->control_count = 1;
+    scan->control_position = position;
+    scan->control_size = size;
+  } else if (score == scan->control_score
+      && (scan->control == NULL || !CFEqual(scan->control, element))) {
+    scan->control_count += 1;
+  }
+}
+
+static void consider_codex_fast_option(
+  CodexFastModeScan *scan,
+  AXUIElementRef element,
+  CodexFastModeValue option
+) {
+  AXUIElementRef *target = option == CODEX_FAST_MODE_ON
+    ? &scan->on_option
+    : &scan->off_option;
+  unsigned *count = option == CODEX_FAST_MODE_ON
+    ? &scan->on_option_count
+    : &scan->off_option_count;
+  if (*target == NULL) {
+    *target = (AXUIElementRef)CFRetain(element);
+    *count = 1;
+  } else if (!CFEqual(*target, element)) {
+    *count += 1;
+  }
+}
+
+static CodexFastModeValue codex_fast_semantic_value(
+  CodexFastTextSignals signals
+) {
+  // State adjectives such as "enabled" and "disabled" contain the action
+  // stems "enable" and "disable". Prefer an explicit state before using a
+  // button's action label to infer the inverse current state.
+  if (signals.explicit_on && !signals.explicit_off) return CODEX_FAST_MODE_ON;
+  if (signals.explicit_off && !signals.explicit_on) return CODEX_FAST_MODE_OFF;
+  if (signals.disable_action && !signals.enable_action) return CODEX_FAST_MODE_ON;
+  if (signals.enable_action && !signals.disable_action) return CODEX_FAST_MODE_OFF;
+  if (signals.speed_context && signals.mentions_fast && !signals.mentions_standard) {
+    return CODEX_FAST_MODE_ON;
+  }
+  if (signals.speed_context && signals.mentions_standard && !signals.mentions_fast) {
+    return CODEX_FAST_MODE_OFF;
+  }
+  return CODEX_FAST_MODE_UNKNOWN;
+}
+
+static void collect_codex_fast_mode_controls(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexFastModeScan *scan
+) {
+  if (element == NULL || scan == NULL || depth > 30 || scan->visited >= 6000) return;
+  scan->visited += 1;
+
+  CFArrayRef values = NULL;
+  AXError error = AXUIElementCopyMultipleAttributeValues(
+    element,
+    scan->attributes,
+    0,
+    &values
+  );
+  if (error != kAXErrorSuccess || values == NULL
+      || CFArrayGetCount(values) < FAST_ATTR_COUNT) {
+    if (values != NULL) CFRelease(values);
+    return;
+  }
+
+  CFTypeRef role = CFArrayGetValueAtIndex(values, FAST_ATTR_ROLE);
+  bool is_button = codex_fast_role_equals(role, kAXButtonRole);
+  bool is_popup = codex_fast_role_equals(role, kAXPopUpButtonRole);
+  bool is_checkbox = codex_fast_role_equals(role, kAXCheckBoxRole)
+    || codex_fast_role_equals(role, CFSTR("AXSwitch"));
+  bool is_radio = codex_fast_role_equals(role, kAXRadioButtonRole);
+  bool is_menu_item = codex_fast_role_equals(role, CFSTR("AXMenuItem"));
+  bool actionable_role = is_button || is_popup || is_checkbox || is_radio || is_menu_item;
+
+  bool hidden = false;
+  bool enabled = true;
+  codex_fast_batched_boolean(values, FAST_ATTR_HIDDEN, &hidden);
+  codex_fast_batched_boolean(values, FAST_ATTR_ENABLED, &enabled);
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  bool has_geometry = copy_batched_point(values, FAST_ATTR_POSITION, &position)
+    && copy_batched_size(values, FAST_ATTR_SIZE, &size);
+  if (!hidden && has_geometry && role_is_text_input(role)) {
+    Boolean value_settable = false;
+    Boolean focus_settable = false;
+    AXUIElementIsAttributeSettable(element, kAXValueAttribute, &value_settable);
+    AXUIElementIsAttributeSettable(element, kAXFocusedAttribute, &focus_settable);
+    const double tolerance = 2.0;
+    bool in_composer_region = value_settable && focus_settable
+      && position.x >= scan->window_origin.x - tolerance
+      && position.x + size.width <= scan->window_origin.x + scan->window_size.width + tolerance
+      && position.y >= scan->window_origin.y + scan->window_size.height * 0.55
+      && position.y + size.height <= scan->window_origin.y + scan->window_size.height + tolerance
+      && size.width >= 120 && size.height >= 18;
+    if (in_composer_region) {
+      bool is_text_area = codex_fast_role_equals(role, kAXTextAreaRole);
+      double score = position.y + size.height
+        + (is_text_area ? scan->window_size.height : 0)
+        + size.width / 10000.0;
+      if (!scan->composer_input_found || score > scan->composer_input_score) {
+        scan->composer_input_found = true;
+        scan->composer_input_position = position;
+        scan->composer_input_size = size;
+        scan->composer_input_score = score;
+      }
+    }
+  }
+
+  CodexFastTextSignals signals = { 0 };
+  const CFIndex text_indices[] = {
+    FAST_ATTR_TITLE,
+    FAST_ATTR_VALUE,
+    FAST_ATTR_DESCRIPTION,
+    FAST_ATTR_HELP,
+    FAST_ATTR_IDENTIFIER,
+    FAST_ATTR_ROLE_DESCRIPTION,
+    FAST_ATTR_DOM_IDENTIFIER
+  };
+  for (size_t index = 0; index < sizeof(text_indices) / sizeof(text_indices[0]); index += 1) {
+    merge_codex_fast_signals(
+      &signals,
+      codex_fast_signals_from_string(CFArrayGetValueAtIndex(values, text_indices[index]))
+    );
+  }
+
+  bool selected = false;
+  bool has_selected = codex_fast_batched_boolean(values, FAST_ATTR_SELECTED, &selected);
+  if (!has_selected && codex_fast_has_menu_mark(values)) {
+    selected = true;
+    has_selected = true;
+  }
+  bool boolean_value = false;
+  bool has_boolean_value = codex_fast_batched_boolean(
+    values,
+    FAST_ATTR_VALUE,
+    &boolean_value
+  ) || codex_fast_batched_numeric_boolean(
+    values,
+    FAST_ATTR_VALUE,
+    &boolean_value
+  );
+
+  bool is_option = (is_radio || is_menu_item || (scan->allow_popup_options && is_button))
+    && (signals.exact_fast || signals.exact_standard);
+  bool in_control_region = has_geometry && codex_fast_control_geometry_is_plausible(
+    position,
+    size,
+    scan->window_origin,
+    scan->window_size
+  );
+  bool plausible_option = scan->allow_popup_options && has_geometry
+    && codex_fast_option_geometry_is_plausible(
+      position,
+      size,
+      scan->window_origin,
+      scan->window_size
+    );
+  bool supports_press = actionable_role && !hidden && enabled
+    && codex_accessibility_element_supports_press(element);
+
+  if (is_option && (in_control_region || plausible_option)) {
+    scan->available = true;
+    CodexFastModeValue option = signals.exact_fast
+      ? CODEX_FAST_MODE_ON
+      : CODEX_FAST_MODE_OFF;
+    if (has_selected && selected) consider_codex_fast_value(scan, option, 360);
+    if (supports_press && (scan->allow_popup_options || in_control_region)) {
+      consider_codex_fast_option(scan, element, option);
+    }
+    if (supports_press && has_selected && selected && in_control_region) {
+      // Always-visible Fast/Standard radio groups have no separate selector.
+      // Use only the selected option as the anchored group control while the
+      // exact requested option remains the idempotent action target.
+      consider_codex_fast_control(
+        scan,
+        element,
+        CODEX_FAST_CONTROL_SELECTOR,
+        405,
+        position,
+        size
+      );
+    }
+  }
+
+  // A model or reasoning popup also lives in the composer. Never classify a
+  // generic AXPopUpButton as the speed selector unless its own fixed metadata
+  // names Speed/Fast/Standard.
+  bool selector = in_control_region && (
+    (is_popup && (signals.exact_speed || signals.speed_context
+      || signals.fast_context || signals.exact_fast || signals.exact_standard))
+    || ((is_button || is_radio) && (signals.exact_speed || signals.speed_context))
+  );
+  bool direct = in_control_region && (is_button || is_checkbox || is_radio)
+    && (signals.fast_context || signals.exact_fast) && !selector && !is_option;
+  CodexFastModeValue semantic_value = codex_fast_semantic_value(signals);
+  if (selector) {
+    scan->available = true;
+    if (semantic_value != CODEX_FAST_MODE_UNKNOWN) {
+      consider_codex_fast_value(scan, semantic_value, 390);
+    }
+    if (supports_press) {
+      consider_codex_fast_control(
+        scan,
+        element,
+        CODEX_FAST_CONTROL_SELECTOR,
+        semantic_value == CODEX_FAST_MODE_UNKNOWN ? 360 : 410,
+        position,
+        size
+      );
+    }
+  } else if (direct) {
+    scan->available = true;
+    CodexFastModeValue direct_value = semantic_value;
+    int value_score = semantic_value == CODEX_FAST_MODE_UNKNOWN ? 0 : 440;
+    if (direct_value == CODEX_FAST_MODE_UNKNOWN && has_selected) {
+      direct_value = selected ? CODEX_FAST_MODE_ON : CODEX_FAST_MODE_OFF;
+      value_score = 420;
+    } else if (direct_value == CODEX_FAST_MODE_UNKNOWN && has_boolean_value) {
+      direct_value = boolean_value ? CODEX_FAST_MODE_ON : CODEX_FAST_MODE_OFF;
+      value_score = 400;
+    }
+    consider_codex_fast_value(scan, direct_value, value_score);
+    if (supports_press) {
+      // Prefer a selector over an unknowable blind toggle, but prefer a direct
+      // toggle when its current state is explicit.
+      int control_score = direct_value == CODEX_FAST_MODE_UNKNOWN ? 330 : 430;
+      consider_codex_fast_control(
+        scan,
+        element,
+        CODEX_FAST_CONTROL_DIRECT,
+        control_score,
+        position,
+        size
+      );
+    }
+  }
+
+  CFTypeRef children_value = CFArrayGetValueAtIndex(values, FAST_ATTR_CHILDREN);
+  if (children_value != NULL && CFGetTypeID(children_value) == CFArrayGetTypeID()) {
+    CFArrayRef children = (CFArrayRef)children_value;
+    for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+      CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+      if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+        collect_codex_fast_mode_controls((AXUIElementRef)child, depth + 1, scan);
+      }
+    }
+  }
+  CFRelease(values);
+}
+
+static void release_codex_fast_mode_scan(CodexFastModeScan *scan) {
+  if (scan == NULL) return;
+  if (scan->control != NULL) CFRelease(scan->control);
+  if (scan->on_option != NULL) CFRelease(scan->on_option);
+  if (scan->off_option != NULL) CFRelease(scan->off_option);
+  scan->control = NULL;
+  scan->on_option = NULL;
+  scan->off_option = NULL;
+}
+
+static bool copy_codex_fast_mode_scan(
+  bool include_popup_options,
+  CodexFastModeScan *scan
+) {
+  if (scan == NULL || !codex_is_frontmost()) return false;
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) return false;
+  AXUIElementSetMessagingTimeout(application, include_popup_options ? 0.45 : 0.65);
+  CFTypeRef window_value = NULL;
+  if (AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute, &window_value)
+        != kAXErrorSuccess
+      || window_value == NULL || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
+    if (window_value != NULL) CFRelease(window_value);
+    CFRelease(application);
+    return false;
+  }
+  AXUIElementRef window = (AXUIElementRef)window_value;
+  CGPoint origin = CGPointZero;
+  CGSize size = CGSizeZero;
+  if (!copy_element_position(window, &origin) || !copy_element_size(window, &size)) {
+    CFRelease(window_value);
+    CFRelease(application);
+    return false;
+  }
+
+  const void *attribute_values[FAST_ATTR_COUNT] = {
+    kAXRoleAttribute,
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    kAXRoleDescriptionAttribute,
+    CFSTR("AXDOMIdentifier"),
+    kAXSelectedAttribute,
+    kAXEnabledAttribute,
+    kAXHiddenAttribute,
+    kAXPositionAttribute,
+    kAXSizeAttribute,
+    kAXChildrenAttribute,
+    CFSTR("AXMenuItemMarkChar")
+  };
+  CFArrayRef attributes = CFArrayCreate(
+    kCFAllocatorDefault,
+    attribute_values,
+    FAST_ATTR_COUNT,
+    &kCFTypeArrayCallBacks
+  );
+  if (attributes == NULL) {
+    CFRelease(window_value);
+    CFRelease(application);
+    return false;
+  }
+  *scan = (CodexFastModeScan) {
+    .attributes = attributes,
+    .control = NULL,
+    .control_kind = CODEX_FAST_CONTROL_NONE,
+    .control_score = 0,
+    .control_count = 0,
+    .control_position = CGPointZero,
+    .control_size = CGSizeZero,
+    .on_option = NULL,
+    .off_option = NULL,
+    .on_option_count = 0,
+    .off_option_count = 0,
+    .value = CODEX_FAST_MODE_UNKNOWN,
+    .value_score = 0,
+    .value_conflict = false,
+    .available = false,
+    .allow_popup_options = include_popup_options,
+    .composer_input_found = false,
+    .composer_input_position = CGPointZero,
+    .composer_input_size = CGSizeZero,
+    .composer_input_score = -1,
+    .visited = 0,
+    .window_origin = origin,
+    .window_size = size
+  };
+  collect_codex_fast_mode_controls(
+    include_popup_options ? application : window,
+    0,
+    scan
+  );
+  if (scan->value_conflict) scan->value = CODEX_FAST_MODE_UNKNOWN;
+  bool composer_anchored = scan->composer_input_found
+    && scan->control != NULL
+    && scan->control_count == 1
+    && codex_fast_control_is_near_composer(
+      scan->control_position,
+      scan->control_size,
+      scan->composer_input_position,
+      scan->composer_input_size
+    );
+  if (!composer_anchored) {
+    if (scan->control != NULL) CFRelease(scan->control);
+    if (scan->on_option != NULL) CFRelease(scan->on_option);
+    if (scan->off_option != NULL) CFRelease(scan->off_option);
+    scan->control = NULL;
+    scan->on_option = NULL;
+    scan->off_option = NULL;
+    scan->control_kind = CODEX_FAST_CONTROL_NONE;
+    scan->control_count = 0;
+    scan->on_option_count = 0;
+    scan->off_option_count = 0;
+    scan->value = CODEX_FAST_MODE_UNKNOWN;
+    scan->value_score = 0;
+    scan->available = false;
+  }
+  CFRelease(attributes);
+  scan->attributes = NULL;
+  CFRelease(window_value);
+  CFRelease(application);
+  return true;
+}
+
+static const char *codex_fast_mode_value_name(CodexFastModeValue value) {
+  return value == CODEX_FAST_MODE_ON ? "on"
+    : value == CODEX_FAST_MODE_OFF ? "off"
+      : "unknown";
+}
+
+static int print_codex_fast_mode_state(void) {
+  CodexFastModeScan scan = { 0 };
+  bool scanned = copy_codex_fast_mode_scan(false, &scan);
+  CodexFastModeValue value = scanned ? scan.value : CODEX_FAST_MODE_UNKNOWN;
+  printf(
+    "state=%s available=%d confidence=%d visited=%u\n",
+    codex_fast_mode_value_name(value),
+    scanned && scan.available ? 1 : 0,
+    scanned ? scan.value_score : 0,
+    scanned ? scan.visited : 0
+  );
+  release_codex_fast_mode_scan(&scan);
+  // Known on and off states are both successful queries. Unknown remains a
+  // distinct exit so callers never silently render a stale toggle state.
+  return value == CODEX_FAST_MODE_UNKNOWN ? 2 : 0;
+}
+
+static CodexFastAction codex_fast_action_for_state(
+  CodexFastModeValue current,
+  CodexFastModeValue requested,
+  CodexFastControlKind control_kind,
+  bool exact_option_available
+) {
+  if (current == requested) return CODEX_FAST_ACTION_NONE;
+  if (exact_option_available || control_kind == CODEX_FAST_CONTROL_SELECTOR) {
+    return CODEX_FAST_ACTION_SELECT_OPTION;
+  }
+  if (current != CODEX_FAST_MODE_UNKNOWN
+      && control_kind == CODEX_FAST_CONTROL_DIRECT) {
+    return CODEX_FAST_ACTION_PRESS_DIRECT;
+  }
+  return CODEX_FAST_ACTION_UNAVAILABLE;
+}
+
+static bool perform_codex_accessibility_press(AXUIElementRef element) {
+  return element != NULL && codex_is_frontmost()
+    && codex_accessibility_element_supports_press(element)
+    && AXUIElementPerformAction(element, kAXPressAction) == kAXErrorSuccess;
+}
+
+static CodexFastModeValue wait_for_codex_fast_mode_value(
+  CodexFastModeValue requested,
+  CFTimeInterval timeout_seconds,
+  int *confidence_out,
+  unsigned *visited_out
+) {
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + timeout_seconds;
+  CodexFastModeValue last = CODEX_FAST_MODE_UNKNOWN;
+  do {
+    CodexFastModeScan scan = { 0 };
+    if (!copy_codex_fast_mode_scan(false, &scan)) return CODEX_FAST_MODE_UNKNOWN;
+    last = scan.value;
+    if (confidence_out != NULL) *confidence_out = scan.value_score;
+    if (visited_out != NULL) *visited_out = scan.visited;
+    release_codex_fast_mode_scan(&scan);
+    if (last == requested) return last;
+    usleep(60000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  return last;
+}
+
+static AXUIElementRef wait_for_codex_fast_option(
+  CodexFastModeValue requested,
+  CFTimeInterval timeout_seconds
+) {
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + timeout_seconds;
+  do {
+    CodexFastModeScan scan = { 0 };
+    if (!copy_codex_fast_mode_scan(true, &scan)) return NULL;
+    AXUIElementRef option = requested == CODEX_FAST_MODE_ON
+      ? scan.on_option
+      : scan.off_option;
+    unsigned count = requested == CODEX_FAST_MODE_ON
+      ? scan.on_option_count
+      : scan.off_option_count;
+    AXUIElementRef result = option != NULL && count == 1
+      ? (AXUIElementRef)CFRetain(option)
+      : NULL;
+    release_codex_fast_mode_scan(&scan);
+    if (result != NULL) return result;
+    usleep(40000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  return NULL;
+}
+
+static int set_codex_fast_mode(CodexFastModeValue requested) {
+  bool changed = false;
+  unsigned action_attempts = 0;
+  int confidence = 0;
+  unsigned visited = 0;
+  bool available = false;
+  CodexFastModeValue observed = CODEX_FAST_MODE_UNKNOWN;
+
+  for (unsigned attempt = 0; attempt < 2; attempt += 1) {
+    CodexFastModeScan scan = { 0 };
+    if (!copy_codex_fast_mode_scan(false, &scan)) break;
+    observed = scan.value;
+    confidence = scan.value_score;
+    visited = scan.visited;
+    available = scan.available;
+    bool exact_option_available = requested == CODEX_FAST_MODE_ON
+      ? scan.on_option != NULL && scan.on_option_count == 1
+      : scan.off_option != NULL && scan.off_option_count == 1;
+    CodexFastAction action = codex_fast_action_for_state(
+      observed,
+      requested,
+      scan.control_count == 1 ? scan.control_kind : CODEX_FAST_CONTROL_NONE,
+      exact_option_available
+    );
+    if (action == CODEX_FAST_ACTION_NONE) {
+      release_codex_fast_mode_scan(&scan);
+      printf(
+        "requested=%s state=%s changed=%d verified=1 available=%d attempts=%u confidence=%d visited=%u\n",
+        codex_fast_mode_value_name(requested),
+        codex_fast_mode_value_name(observed),
+        changed ? 1 : 0,
+        available ? 1 : 0,
+        action_attempts,
+        confidence,
+        visited
+      );
+      return 0;
+    }
+    if (action == CODEX_FAST_ACTION_UNAVAILABLE) {
+      release_codex_fast_mode_scan(&scan);
+      break;
+    }
+
+    bool acted = false;
+    if (action == CODEX_FAST_ACTION_PRESS_DIRECT) {
+      acted = scan.control_count == 1
+        && perform_codex_accessibility_press(scan.control);
+    } else {
+      AXUIElementRef option = requested == CODEX_FAST_MODE_ON
+        ? scan.on_option
+        : scan.off_option;
+      unsigned option_count = requested == CODEX_FAST_MODE_ON
+        ? scan.on_option_count
+        : scan.off_option_count;
+      if (option != NULL && option_count == 1) {
+        acted = perform_codex_accessibility_press(option);
+      } else if (scan.control_count == 1
+          && scan.control_kind == CODEX_FAST_CONTROL_SELECTOR
+          && perform_codex_accessibility_press(scan.control)) {
+        AXUIElementRef requested_option = wait_for_codex_fast_option(requested, 0.7);
+        acted = requested_option != NULL
+          && perform_codex_accessibility_press(requested_option);
+        if (requested_option != NULL) CFRelease(requested_option);
+      }
+    }
+    release_codex_fast_mode_scan(&scan);
+    if (!acted) break;
+    changed = true;
+    action_attempts += 1;
+    observed = wait_for_codex_fast_mode_value(
+      requested,
+      1.0,
+      &confidence,
+      &visited
+    );
+    if (observed == requested) {
+      printf(
+        "requested=%s state=%s changed=1 verified=1 available=1 attempts=%u confidence=%d visited=%u\n",
+        codex_fast_mode_value_name(requested),
+        codex_fast_mode_value_name(observed),
+        action_attempts,
+        confidence,
+        visited
+      );
+      return 0;
+    }
+    // Never press a direct toggle twice in one invocation: Chromium may have
+    // changed the mode while exposing a stale accessibility value. An exact
+    // Fast/Standard selection is idempotent and may safely retry once.
+    if (action == CODEX_FAST_ACTION_PRESS_DIRECT) break;
+  }
+
+  printf(
+    "requested=%s state=%s changed=%d verified=0 available=%d attempts=%u confidence=%d visited=%u\n",
+    codex_fast_mode_value_name(requested),
+    codex_fast_mode_value_name(observed),
+    changed ? 1 : 0,
+    available ? 1 : 0,
+    action_attempts,
+    confidence,
+    visited
+  );
+  return available ? 1 : 2;
+}
+
+static int codex_fast_mode_selftest(void) {
+  CodexFastTextSignals disable = codex_fast_signals_from_string(
+    CFSTR("Turn off Fast mode")
+  );
+  CodexFastTextSignals enable = codex_fast_signals_from_string(
+    CFSTR("Enable Fast mode")
+  );
+  CodexFastTextSignals korean = codex_fast_signals_from_string(
+    CFSTR("빠른 모드 끄기")
+  );
+  CodexFastTextSignals korean_enable = codex_fast_signals_from_string(
+    CFSTR("빠른 모드 활성화")
+  );
+  CodexFastTextSignals korean_disable = codex_fast_signals_from_string(
+    CFSTR("빠른 모드 비활성화")
+  );
+  CodexFastTextSignals deactivate = codex_fast_signals_from_string(
+    CFSTR("Deactivate Fast mode")
+  );
+  CodexFastTextSignals inactive = codex_fast_signals_from_string(
+    CFSTR("Fast mode inactive")
+  );
+  CodexFastTextSignals enabled = codex_fast_signals_from_string(
+    CFSTR("Fast mode enabled")
+  );
+  CodexFastTextSignals disabled = codex_fast_signals_from_string(
+    CFSTR("Fast mode disabled")
+  );
+  CodexFastTextSignals breakfast = codex_fast_signals_from_string(
+    CFSTR("Breakfast discussion")
+  );
+  CodexFastTextSignals speed = codex_fast_signals_from_string(CFSTR("Speed"));
+  merge_codex_fast_signals(
+    &speed,
+    codex_fast_signals_from_string(CFSTR("Fast"))
+  );
+  bool localized_labels = codex_fast_semantic_value(disable) == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(enable) == CODEX_FAST_MODE_OFF
+    && codex_fast_semantic_value(korean) == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(korean_enable) == CODEX_FAST_MODE_OFF
+    && codex_fast_semantic_value(korean_disable) == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(deactivate) == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(inactive) == CODEX_FAST_MODE_OFF
+    && codex_fast_semantic_value(enabled) == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(disabled) == CODEX_FAST_MODE_OFF;
+  bool exact_context_only = !breakfast.fast_context
+    && !breakfast.speed_context
+    && !breakfast.exact_fast;
+  bool split_speed_value = codex_fast_semantic_value(speed) == CODEX_FAST_MODE_ON;
+  bool idempotent_plan = codex_fast_action_for_state(
+    CODEX_FAST_MODE_ON,
+    CODEX_FAST_MODE_ON,
+    CODEX_FAST_CONTROL_DIRECT,
+    false
+  ) == CODEX_FAST_ACTION_NONE;
+  bool known_direct_toggle = codex_fast_action_for_state(
+    CODEX_FAST_MODE_OFF,
+    CODEX_FAST_MODE_ON,
+    CODEX_FAST_CONTROL_DIRECT,
+    false
+  ) == CODEX_FAST_ACTION_PRESS_DIRECT;
+  bool unknown_direct_rejected = codex_fast_action_for_state(
+    CODEX_FAST_MODE_UNKNOWN,
+    CODEX_FAST_MODE_ON,
+    CODEX_FAST_CONTROL_DIRECT,
+    false
+  ) == CODEX_FAST_ACTION_UNAVAILABLE;
+  bool unknown_selector_exact = codex_fast_action_for_state(
+    CODEX_FAST_MODE_UNKNOWN,
+    CODEX_FAST_MODE_ON,
+    CODEX_FAST_CONTROL_SELECTOR,
+    false
+  ) == CODEX_FAST_ACTION_SELECT_OPTION;
+  bool exact_option_beats_direct = codex_fast_action_for_state(
+    CODEX_FAST_MODE_ON,
+    CODEX_FAST_MODE_OFF,
+    CODEX_FAST_CONTROL_DIRECT,
+    true
+  ) == CODEX_FAST_ACTION_SELECT_OPTION;
+  CGPoint origin = CGPointMake(100, 80);
+  CGSize window = CGSizeMake(1200, 800);
+  bool composer_control = codex_fast_control_geometry_is_plausible(
+    CGPointMake(760, 760),
+    CGSizeMake(140, 34),
+    origin,
+    window
+  );
+  bool body_rejected = !codex_fast_control_geometry_is_plausible(
+    CGPointMake(760, 300),
+    CGSizeMake(140, 34),
+    origin,
+    window
+  );
+  bool composer_anchored = codex_fast_control_is_near_composer(
+    CGPointMake(760, 760),
+    CGSizeMake(140, 34),
+    CGPointMake(500, 680),
+    CGSizeMake(600, 120)
+  );
+  bool foreign_panel_rejected = !codex_fast_control_is_near_composer(
+    CGPointMake(180, 760),
+    CGSizeMake(140, 34),
+    CGPointMake(500, 680),
+    CGSizeMake(600, 120)
+  );
+  printf(
+    "localized_labels=%d exact_context_only=%d split_speed_value=%d idempotent_plan=%d known_direct_toggle=%d unknown_direct_rejected=%d unknown_selector_exact=%d exact_option_beats_direct=%d composer_geometry=%d body_rejected=%d composer_anchored=%d foreign_panel_rejected=%d\n",
+    localized_labels ? 1 : 0,
+    exact_context_only ? 1 : 0,
+    split_speed_value ? 1 : 0,
+    idempotent_plan ? 1 : 0,
+    known_direct_toggle ? 1 : 0,
+    unknown_direct_rejected ? 1 : 0,
+    unknown_selector_exact ? 1 : 0,
+    exact_option_beats_direct ? 1 : 0,
+    composer_control ? 1 : 0,
+    body_rejected ? 1 : 0,
+    composer_anchored ? 1 : 0,
+    foreign_panel_rejected ? 1 : 0
+  );
+  return localized_labels && exact_context_only && split_speed_value
+    && idempotent_plan && known_direct_toggle && unknown_direct_rejected
+    && unknown_selector_exact && exact_option_beats_direct
+    && composer_control && body_rejected
+    && composer_anchored && foreign_panel_rejected ? 0 : 1;
+}
+
 typedef struct {
   AXUIElementRef application;
   AXUIElementRef window;
@@ -3393,6 +4404,16 @@ static int search_and_open_codex_thread(
 
 int main(int argc, char **argv) {
   if (argc < 2) return 64;
+  if (strcmp(argv[1], "fast-mode-set") == 0) {
+    if (argc != 3) return 64;
+    if (strcmp(argv[2], "on") == 0) {
+      return set_codex_fast_mode(CODEX_FAST_MODE_ON);
+    }
+    if (strcmp(argv[2], "off") == 0) {
+      return set_codex_fast_mode(CODEX_FAST_MODE_OFF);
+    }
+    return 64;
+  }
   if (strcmp(argv[1], "codex-find-thread") == 0) {
     if (argc < 4) return 64;
     return find_or_open_codex_thread(
@@ -3495,6 +4516,8 @@ int main(int argc, char **argv) {
     return voice_release_retry_selftest();
   }
   if (strcmp(argv[1], "reasoning-state-selftest") == 0) return reasoning_state_selftest();
+  if (strcmp(argv[1], "fast-mode-selftest") == 0) return codex_fast_mode_selftest();
+  if (strcmp(argv[1], "fast-mode-state") == 0) return print_codex_fast_mode_state();
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) return voice_up() ? 0 : 1;
   else if (strcmp(argv[1], "send") == 0) tap_key(KEY_RETURN, 0);

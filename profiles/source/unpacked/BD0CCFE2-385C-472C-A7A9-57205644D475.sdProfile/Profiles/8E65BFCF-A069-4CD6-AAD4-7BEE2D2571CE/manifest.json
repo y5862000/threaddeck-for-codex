@@ -5,7 +5,7 @@
         "0,0": {
           "ActionID": "16901e50-f0f9-4165-bf7b-9a59814b4ce0",
           "LinkedTitle": false,
-          "Name": "Codex Top Thread 1",
+          "Name": "Codex Current / Last Switched Task",
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",

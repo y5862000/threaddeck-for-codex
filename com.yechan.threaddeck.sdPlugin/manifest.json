@@ -22,14 +22,14 @@
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Codex 상위 작업 1",
+      "Name": "Codex 현재/마지막 전환 작업",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "짧게 누르면 첫 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
+      "Tooltip": "현재 Codex 작업을 표시하며, 작업 전환에 성공하면 마지막으로 전환한 작업을 유지합니다. 짧게 누르면 해당 작업으로 이동하고, 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread1"
     },
@@ -224,6 +224,22 @@
       "Tooltip": "Command+Tab으로 다음 앱으로 전환합니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.appswitch"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Codex Fast mode",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "현재 Codex 작업의 작성창에서 Fast mode를 켜거나 끄고, 확인된 상태를 버튼에 표시합니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.fastmode"
     },
     {
       "Controllers": [

@@ -37,7 +37,7 @@ The overview and ThreadDeck gesture demos below are generated from the plugin's 
 - **Reliable switching** — open local tasks directly and activate the correct computer for an explicitly pinned remote task without moving or clicking the mouse pointer.
 - **Hardware dictation** — hold a task key to speak and auto-submit a follow-up, or use the dedicated microphone to leave a draft for review.
 - **Completion feedback** — every visible ThreadDeck-owned key acknowledges the first completion frame; the matching task continues with a stronger green pulse.
-- **Workflow controls** — new task, Side Chat, send, app switcher, page navigation, media keys, and an optional weekly quota ring.
+- **Workflow controls** — toggle Codex Fast mode, create a task or Side Chat, send, switch apps, change pages, control media, and optionally show a weekly quota ring.
 
 ## Install in 60 seconds
 
@@ -79,14 +79,18 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 
 | Key | Press behavior | Hold or release behavior |
 |---|---|---|
-| Task 1–8 | Starts opening that local, remote, or Side Chat task | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Current / last switched task (slot 1) | Opens the current task, or the last task whose switch ThreadDeck confirmed | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Task 2–8 | Starts opening that local, remote, or Side Chat task | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
 | Microphone | Starts dictation immediately and pauses supported audio-producing media apps | Keep held while speaking; release to stop, resume media, and leave the transcript in the composer **without submitting** |
 | Send | Release before 0.6 s to send Return | At **0.6 s** the key turns blue; release to send Command+Return |
 | App launcher | Tap to open or bring the configured app forward | Long-press to quit that app; the threshold and native artwork are managed by Stream Deck |
 | Weekly quota | — | Release to refresh CodexBar immediately |
 | New task / Side Chat | — | Release to run `⌥⌘O` / `⌥⌘S` |
+| Fast mode | — | Release to toggle Fast mode in the current task's Codex composer; the key shows only a confirmed state |
 | App switcher / media | Runs immediately on press | No alternate hold action |
 | Previous / next page | — | Release to cycle through the three ThreadDeck pages |
+
+The Dashboard's slot-1 task key is deliberately stable: it represents the currently identified Codex task and, after ThreadDeck confirms a task switch, keeps that last successful destination. A failed or ambiguous switch does not replace it.
 
 ## Keys with hold gestures
 
@@ -132,10 +136,10 @@ Task status uses a small, consistent vocabulary: active blue/purple, current pha
 ThreadDeck fills up to eight slots with user-facing tasks only:
 
 1. pinned and recent **local** tasks;
-2. **remote** tasks only when you explicitly pin them in Codex;
+2. **remote** tasks only when you explicitly pin them in Codex, apart from the current-task exception below;
 3. temporary **Side Chats** while their Codex session remains open.
 
-Unpinned remote history does not consume hardware slots. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
+Unpinned remote history does not consume ordinary hardware slots. The single exception is slot 1: when the currently verified task—or ThreadDeck's last successfully switched task—is remote, that exact task may remain there without a pin. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
 
 To put a remote task on the deck, open its computer in Codex once so its summary is cached, then pin only the task you want. Pressing the key prefers the exact task UUID exposed by Codex, then activates the verified sidebar or single unified-search result from the keyboard, which switches both the computer and task. Known duplicate titles require strict UUID identity; if Codex does not expose enough identity, ThreadDeck reports a duplicate instead of guessing.
 
@@ -150,8 +154,8 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 The bundled profile has three pages and can be rearranged in Stream Deck:
 
-1. **Dashboard** — quota, one task, new task, Side Chat, microphone, Send, app switcher, and back navigation.
-2. **Tasks** — task slots 1–7 plus back navigation. Task 8 is available in the action list for custom layouts.
+1. **Dashboard** — quota, the current/last successfully switched task, Fast mode, new task, Side Chat, microphone, Send, and back navigation. The Fast mode key occupies `1,1`; the task remains at `0,1`.
+2. **Tasks** — the current/last switched task, task slots 2–7, and back navigation. Task 8 is available in the action list for custom layouts.
 3. **Media** — previous track, rewind, play/pause, four app launchers, and back navigation. Forward page, next track, seek, mute, and volume actions are also available.
 
 Elgato-owned app-launch keys keep their native artwork, support their configured long-press-to-quit behavior, and do not receive ThreadDeck's completion overlay. ThreadDeck page-navigation keys do.

@@ -15,6 +15,7 @@ const ACTIONS = {
   voice: "com.yechan.threaddeck.voice",
   send: "com.yechan.threaddeck.send",
   appSwitch: "com.yechan.threaddeck.appswitch",
+  fastMode: "com.yechan.threaddeck.fastmode",
   mediaPrevious: "com.yechan.threaddeck.media.previous",
   mediaRewind: "com.yechan.threaddeck.media.rewind",
   mediaPlayPause: "com.yechan.threaddeck.media.playpause",

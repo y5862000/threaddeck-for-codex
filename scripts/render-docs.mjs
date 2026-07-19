@@ -10,6 +10,7 @@ const mediaDir = path.join(root, "docs", "media");
 const darkSvg = path.join(mediaDir, "neo-preview.svg");
 const lightSvg = path.join(mediaDir, "neo-preview-light.svg");
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "threaddeck-docs-"));
+const completedKeySvg = path.join(temporaryDirectory, "completed-task-key.svg");
 
 function runNode(...arguments_) {
   execFileSync(process.execPath, arguments_, { cwd: root, stdio: "inherit" });
@@ -25,6 +26,7 @@ try {
   fs.mkdirSync(mediaDir, { recursive: true });
   runNode("src/plugin.js", "--render-demo", darkSvg);
   runNode("src/plugin.js", "--render-demo-light", lightSvg);
+  runNode("src/plugin.js", "--render-completed-key", completedKeySvg);
 
   await rasterizeSvg(darkSvg, path.join(mediaDir, "neo-preview.png"), 1372, 724);
   await rasterizeSvg(lightSvg, path.join(mediaDir, "neo-preview-light.png"), 1372, 724);
@@ -33,8 +35,7 @@ try {
   const selectedKeys = new Map([
     ["quota-key.png", 0],
     ["side-chat-key.png", 1],
-    ["working-task-key.png", 4],
-    ["completed-task-key.png", 7]
+    ["working-task-key.png", 4]
   ]);
 
   for (const [fileName, index] of selectedKeys) {
@@ -43,6 +44,12 @@ try {
     fs.writeFileSync(temporarySvg, keys[index]);
     await rasterizeSvg(temporarySvg, path.join(mediaDir, fileName), 288, 288);
   }
+  await rasterizeSvg(
+    completedKeySvg,
+    path.join(mediaDir, "completed-task-key.png"),
+    288,
+    288
+  );
 
   console.log(`Rendered documentation images in ${mediaDir}`);
 } finally {
