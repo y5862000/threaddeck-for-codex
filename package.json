@@ -2,7 +2,7 @@
   "name": "threaddeck-for-codex",
   "version": "0.2.0",
   "private": true,
-  "description": "A local-first Stream Deck Neo dashboard for Codex Desktop on macOS.",
+  "description": "Monitor, switch, and dictate into Codex Desktop tasks from Stream Deck Neo on macOS.",
   "license": "MIT",
   "author": "ThreadDeck contributors",
   "homepage": "https://github.com/y5862000/threaddeck-for-codex#readme",

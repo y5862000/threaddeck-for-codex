@@ -99,7 +99,7 @@ ThreadDeck은 기본 프로필의 이전 페이지 액션을 소유하고 다음
 
 ## 문서 렌더러
 
-`scripts/render-docs.mjs`는 같은 버튼 렌더링 함수를 개인정보 없는 데모 모드로 실행해 다크·라이트 4 × 2 개요와 정확한 개별 버튼 PNG를 만듭니다. `scripts/render-animation.mjs`는 결정론적인 72프레임 상태 전이를 렌더링하고 공개된 Swift·ImageIO 헬퍼로 GIF를 인코딩합니다. 따라서 README 이미지와 GIF가 실제 배포 UI와 함께 바뀝니다.
+`scripts/render-docs.mjs`는 같은 버튼 렌더링 함수를 개인정보 없는 데모 모드로 실행해 다크·라이트 4 × 2 개요와 정확한 개별 버튼 PNG를 만듭니다. `scripts/render-animation.mjs`는 결정론적인 72프레임 개요와 작업 버튼 음성 입력, 전용 마이크, 보내기 길게 누르기, 앱 실행 안내 전이를 렌더링합니다. SVG는 macOS `sips`로 래스터화하고 공개된 Swift·ImageIO 헬퍼로 GIF를 인코딩합니다. ThreadDeck 집중 GIF의 버튼 상태는 배포 렌더러 출력 그대로이며 바깥에 한·영 타임라인만 추가합니다. Elgato 소유 앱 실행 동작은 실제 그림을 복제하지 않고 중립 안내 버튼으로 표현합니다.
 
 ## 안정성 경계
 

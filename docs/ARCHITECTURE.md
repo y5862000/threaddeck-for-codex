@@ -99,7 +99,7 @@ The plugin caches the last image for each context and avoids sending unchanged f
 
 ## Documentation renderer
 
-`scripts/render-docs.mjs` runs the same key-rendering functions in sanitized demo mode. It exports dark and light 4 × 2 feature overviews and exact individual-key PNGs. `scripts/render-animation.mjs` renders a deterministic 72-frame state sequence and encodes it with the open-source Swift/ImageIO helper. This keeps README images and the GIF synchronized with the shipped interface without hand-redrawing controls.
+`scripts/render-docs.mjs` runs the same key-rendering functions in sanitized demo mode. It exports dark and light 4 × 2 feature overviews and exact individual-key PNGs. `scripts/render-animation.mjs` renders a deterministic 72-frame overview plus focused task hold-to-talk, dedicated-microphone, Send long-press, and app-launcher guide sequences. It rasterizes SVGs with macOS `sips` and encodes GIFs with the open-source Swift/ImageIO helper. ThreadDeck key states remain production renderer output with bilingual timelines around them. The Elgato-owned app-launcher behavior is represented by an explicitly neutral guide key rather than copied native artwork.
 
 ## Stability boundary
 

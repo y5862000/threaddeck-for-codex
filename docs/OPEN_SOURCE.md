@@ -13,10 +13,10 @@ ThreadDeck's implementation is fully published under the [MIT License](../LICENS
 | `profiles/source/unpacked/` | Bundled `.streamDeckProfile` archive | `scripts/build-profile.sh` |
 | `assets/plugin.svg` | Plugin PNG assets | `scripts/build-assets.sh` |
 | Actual key-rendering functions in `src/plugin.js` | `docs/media/neo-preview*` and feature PNGs | `scripts/render-docs.mjs` |
-| Deterministic demo frames + `scripts/encode-gif.swift` | `docs/media/threaddeck-demo.gif` | `scripts/render-animation.mjs` |
+| Deterministic overview and gesture frames + `scripts/encode-gif.swift` | `docs/media/threaddeck-demo.gif`, task hold-to-talk, microphone hold, Send long-press, and neutral app-launcher guide GIFs | `scripts/render-animation.mjs` |
 | Plugin directory | `.streamDeckPlugin` installer | `pnpm run pack` |
 
-Generated `bin/`, profile archives, and release installers are ignored by Git because they are reproducibly built from the source above. Verification compares every bundled JavaScript module with its source byte-for-byte and rejects missing or stale modules. Documentation PNGs and the GIF are tracked so GitHub visitors can see the interface without running the plugin; their source is the same renderer shipped in the plugin.
+Generated `bin/`, profile archives, and release installers are ignored by Git because they are reproducibly built from the source above. Verification compares every bundled JavaScript module with its source byte-for-byte and rejects missing or stale modules. Documentation PNGs and GIFs are tracked so GitHub visitors can see the interface without running the plugin. ThreadDeck key artwork comes from the shipped renderer, with explanatory timelines around focused animations. The app-launcher GIF uses a neutral guide key because the bundled launchers and their real artwork are owned by Stream Deck.
 
 ## Dependency boundary
 

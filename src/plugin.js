@@ -205,6 +205,7 @@ const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
+const gestureAnimationDirectory = argument("--render-gesture-animations");
 const pluginStartedAtMs = Date.now();
 
 const contexts = new Map();
@@ -3240,9 +3241,11 @@ const DEMO_COMPLETED_ID = "00000000-0000-4000-8000-000000000002";
 function resetDemoEffects() {
   completionPulseStartedAt.clear();
   completionPulseReasonByThreadId.clear();
+  voiceHeldContexts.clear();
   voiceStateByContext.clear();
   voiceTargetThreadByContext.clear();
   voiceSessionIdByContext.clear();
+  sendLongPressArmedContexts.clear();
   globalCompletionStartedAtMs = null;
   globalCompletionThreadId = null;
   globalCompletionWasRendered = false;
@@ -3279,7 +3282,8 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
   let voiceState = "idle";
   if (animated && elapsedMs >= 1_000 && elapsedMs < 1_900) voiceState = "recording";
   else if (animated && elapsedMs >= 1_900 && elapsedMs < 2_550) voiceState = "transcribing";
-  else if (animated && elapsedMs >= 2_550 && elapsedMs < 3_200) voiceState = "sent";
+  else if (animated && elapsedMs >= 2_550 && elapsedMs < 2_850) voiceState = "submitting";
+  else if (animated && elapsedMs >= 2_850 && elapsedMs < 3_200) voiceState = "sent";
 
   if (hasCompleted) {
     completionPulseStartedAt.set(DEMO_WORKING_ID, completionStartMs);
@@ -3316,14 +3320,21 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
     serviceTier: "default",
     queueCount: 0
   };
+  let workingThreadSvg = threadSvg(workingThread, 0);
+  if (voiceState !== "idle") {
+    workingThreadSvg = workingThreadSvg.replace(
+      "</svg>",
+      `${voiceTargetOverlaySvg(voiceState, nowMs)}\n</svg>`
+    );
+  }
   const keySvgs = [
     usageSvg(74, false),
     sideChatSvg(),
     newThreadSvg(),
     sendSvg(),
-    threadSvg(workingThread, 0),
+    workingThreadSvg,
     appSwitchSvg(),
-    voiceSvg(voiceState, nowMs),
+    voiceSvg("idle", nowMs),
     threadSvg(completedThread, 1)
   ];
   const globalEffect = globalCompletionPulseState(nowMs);
@@ -3366,6 +3377,283 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   fixedRenderTimeMs = null;
   resetDemoEffects();
   console.log(`Rendered ${frameCount} animation frames in ${resolvedDirectory}`);
+}
+
+function documentationImage(svg, x, y, size) {
+  const data = Buffer.from(svg).toString("base64");
+  return `<image x="${x}" y="${y}" width="${size}" height="${size}" href="data:image/svg+xml;base64,${data}"/>`;
+}
+
+function gestureStageRows(stages, activeStage, accent) {
+  const rowHeight = 47;
+  return stages.map((stage, index) => {
+    const y = 92 + index * rowHeight;
+    const active = index === activeStage;
+    const completed = index < activeStage;
+    const fill = active ? accent : completed ? "#6F7782" : "#3A3A3C";
+    const text = active ? "#FFFFFF" : completed ? "#D6D9DE" : "#9A9EA5";
+    return `<g>
+      ${active ? `<rect x="390" y="${y - 25}" width="526" height="40" rx="12" fill="${accent}" fill-opacity=".14" stroke="${accent}" stroke-opacity=".52"/>` : ""}
+      <circle cx="415" cy="${y - 5}" r="8" fill="${fill}"/>
+      ${completed ? `<path d="M411 ${y - 5}L414 ${y - 2}L420 ${y - 9}" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>` : ""}
+      <text x="439" y="${y + 1}" fill="${text}" font-family="${FONT_STACK}" font-size="18" font-weight="${active ? 650 : 520}">${escapeXml(stage)}</text>
+    </g>`;
+  }).join("\n");
+}
+
+function gesturePreviewSvg({ title, subtitle, keySvg, stages, activeStage, accent, result }) {
+  return `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" text-rendering="optimizeLegibility">
+  <rect width="960" height="420" rx="32" fill="#1C1C1E"/>
+  <text x="42" y="48" fill="#F2F6FA" font-family="${FONT_STACK}" font-size="27" font-weight="700">${escapeXml(title)}</text>
+  <text x="42" y="76" fill="#AEB3BA" font-family="${FONT_STACK}" font-size="16.5" font-weight="500">${escapeXml(subtitle)}</text>
+  <rect x="42" y="98" width="300" height="274" rx="24" fill="#28282A" stroke="#3A3A3C"/>
+  ${documentationImage(keySvg, 80, 113, 224)}
+  <rect x="72" y="337" width="240" height="26" rx="13" fill="${accent}" fill-opacity=".14" stroke="${accent}" stroke-opacity=".55"/>
+  <text x="192" y="355" fill="${accent}" font-family="${FONT_STACK}" font-size="14.5" font-weight="650" text-anchor="middle">${escapeXml(result)}</text>
+  ${gestureStageRows(stages, activeStage, accent)}
+  <rect x="390" y="375" width="526" height="3" rx="1.5" fill="#343438"/>
+  <rect x="390" y="375" width="${Math.max(3, 526 * ((activeStage + 1) / stages.length))}" height="3" rx="1.5" fill="${accent}"/>
+  </svg>\n`;
+}
+
+function demoGestureThread(nowMs, voiceState = "idle") {
+  const thread = {
+    id: DEMO_WORKING_ID,
+    title: "릴리스 준비",
+    pinned: true,
+    status: "working",
+    startedAtMs: DEMO_EPOCH_MS - 4 * 60_000 - 12_000,
+    endedAtMs: null,
+    activity: { kind: "edit", label: "코드 수정" },
+    reasoningEffort: "ultra",
+    serviceTier: "priority",
+    queueCount: 1
+  };
+  const base = threadSvg(thread, 0);
+  if (voiceState === "idle") return base;
+  return base.replace("</svg>", `${voiceTargetOverlaySvg(voiceState, nowMs)}\n</svg>`);
+}
+
+function taskHoldGestureFrame(nowMs, elapsedMs) {
+  const holdSeconds = (THREAD_VOICE_LONG_PRESS_MS / 1000).toFixed(2);
+  const stages = [
+    `Hold ${holdSeconds} s · ${holdSeconds}초 길게`,
+    "Speak · 말하기",
+    "Release · 놓기",
+    "Transcribe · 받아쓰기",
+    "Submit · 자동 전송",
+    "Sent · 전송 확인"
+  ];
+  let state = "idle";
+  let activeStage = 0;
+  let accent = THEME.text;
+  let result = "TAP = OPEN · 짧게 = 작업 열기";
+  if (elapsedMs >= 1_400 && elapsedMs < 2_650) {
+    state = "recording";
+    activeStage = 1;
+    accent = THEME.amber;
+    result = "KEEP HOLDING · 계속 누르기";
+  } else if (elapsedMs >= 2_650 && elapsedMs < 3_150) {
+    state = "transcribing";
+    activeStage = 2;
+    accent = THEME.textSecondary;
+    result = "RELEASED · 녹음 종료";
+  } else if (elapsedMs >= 3_150 && elapsedMs < 3_950) {
+    state = "transcribing";
+    activeStage = 3;
+    accent = THEME.textSecondary;
+    result = "DRAFT STABILIZING · 초안 확인 중";
+  } else if (elapsedMs >= 3_950 && elapsedMs < 4_750) {
+    state = "submitting";
+    activeStage = 4;
+    accent = THEME.blue;
+    result = "AUTO SUBMIT · 자동 전송";
+  } else if (elapsedMs >= 4_750 && elapsedMs < 5_750) {
+    state = "sent";
+    activeStage = 5;
+    accent = THEME.green;
+    result = "SEND VERIFIED · 전송 확인";
+  }
+  return gesturePreviewSvg({
+    title: "Task key · 작업 버튼",
+    subtitle: "Tap to open, or hold to dictate and submit",
+    keySvg: demoGestureThread(nowMs, state),
+    stages,
+    activeStage,
+    accent,
+    result
+  });
+}
+
+function voiceHoldGestureFrame(nowMs, elapsedMs) {
+  const stages = [
+    "Press · 누르기",
+    "Speak while held · 누른 채 말하기",
+    "Release · 놓기",
+    "Transcribe · 받아쓰기",
+    "Draft ready · 초안 완료"
+  ];
+  let state = "idle";
+  let activeStage = 0;
+  let accent = THEME.text;
+  let result = "PRESS = RECORD · 누르면 즉시 녹음";
+  if (elapsedMs >= 800 && elapsedMs < 2_300) {
+    state = "recording";
+    activeStage = 1;
+    accent = THEME.amber;
+    result = "KEEP HOLDING · 누르는 동안 녹음";
+  } else if (elapsedMs >= 2_300 && elapsedMs < 2_800) {
+    state = "transcribing";
+    activeStage = 2;
+    accent = THEME.textSecondary;
+    result = "RELEASED · 녹음 종료";
+  } else if (elapsedMs >= 2_800 && elapsedMs < 3_800) {
+    state = "transcribing";
+    activeStage = 3;
+    accent = THEME.textSecondary;
+    result = "DRAFT ONLY · 자동 전송 안 함";
+  } else if (elapsedMs >= 3_800 && elapsedMs < 4_900) {
+    state = "complete";
+    activeStage = 4;
+    accent = THEME.green;
+    result = "REVIEW IN COMPOSER · 작성창에서 확인";
+  }
+  return gesturePreviewSvg({
+    title: "Microphone · 전용 마이크",
+    subtitle: "Push to talk; the transcript stays in the composer",
+    keySvg: voiceSvg(state, nowMs),
+    stages,
+    activeStage,
+    accent,
+    result
+  });
+}
+
+function sendHoldGestureFrame(nowMs, elapsedMs) {
+  const holdSeconds = (SEND_LONG_PRESS_MS / 1000).toFixed(1);
+  const stages = [
+    "Tap and release · 짧게 눌렀다 놓기",
+    "Return",
+    `Hold ${holdSeconds} s · ${holdSeconds}초 길게`,
+    "Blue = armed · 파랑 = 준비",
+    "Release · 놓아 실행"
+  ];
+  let armed = false;
+  let activeStage = 0;
+  let accent = THEME.text;
+  let result = "TAP = RETURN · 짧게 = Return";
+  if (elapsedMs >= 650 && elapsedMs < 1_450) {
+    activeStage = 1;
+    accent = THEME.green;
+    result = "KEYSTROKE: RETURN";
+  } else if (elapsedMs >= 2_150 && elapsedMs < 2_750) {
+    activeStage = 2;
+    result = "KEEP HOLDING · 계속 누르기";
+  } else if (elapsedMs >= 2_750 && elapsedMs < 4_050) {
+    armed = true;
+    activeStage = 3;
+    accent = THEME.blue;
+    result = "ARMED: COMMAND + RETURN";
+  } else if (elapsedMs >= 4_050 && elapsedMs < 4_950) {
+    activeStage = 4;
+    accent = THEME.blue;
+    result = "KEYSTROKE: COMMAND + RETURN";
+  }
+  return gesturePreviewSvg({
+    title: "Send key · 보내기 버튼",
+    subtitle: "The action fires when the key is released",
+    keySvg: sendSvg(armed),
+    stages,
+    activeStage,
+    accent,
+    result
+  });
+}
+
+function appLauncherGuideSvg(quitArmed = false) {
+  const accent = quitArmed ? THEME.red : THEME.text;
+  const chrome = quitArmed
+    ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.red}" fill-opacity=".10" stroke="${THEME.red}" stroke-opacity=".9" stroke-width="3"/>`
+    : "";
+  return shell(accent, `
+    <rect x="34" y="32" width="76" height="80" rx="17" fill="none" stroke="${accent}" stroke-width="5"/>
+    <rect x="49" y="47" width="18" height="18" rx="5" fill="${accent}"/>
+    <rect x="77" y="47" width="18" height="18" rx="5" fill="${accent}" opacity=".72"/>
+    <rect x="49" y="75" width="18" height="18" rx="5" fill="${accent}" opacity=".72"/>
+    <rect x="77" y="75" width="18" height="18" rx="5" fill="${accent}"/>
+    <text x="72" y="129" fill="${accent}" font-family="${FONT_STACK}" font-size="14" font-weight="700" text-anchor="middle">APP</text>`, "", chrome);
+}
+
+function appLauncherGestureFrame(nowMs, elapsedMs) {
+  const stages = [
+    "Tap · 짧게 누르기",
+    "Open or front · 열기/앞으로",
+    "Hold · 길게 누르기",
+    "Quit action · 앱 종료",
+    "Release · 놓기"
+  ];
+  let quitArmed = false;
+  let activeStage = 0;
+  let accent = THEME.text;
+  let result = "TAP = OPEN / FRONT · 짧게 = 열기";
+  if (elapsedMs >= 900 && elapsedMs < 1_700) {
+    activeStage = 1;
+    accent = THEME.green;
+    result = "APP OPENED OR FOCUSED · 앱 활성화";
+  } else if (elapsedMs >= 2_000 && elapsedMs < 3_100) {
+    activeStage = 2;
+    result = "KEEP HOLDING · 계속 누르기";
+  } else if (elapsedMs >= 3_100 && elapsedMs < 4_150) {
+    quitArmed = true;
+    activeStage = 3;
+    accent = THEME.red;
+    result = "LONG PRESS = QUIT · 길게 = 종료";
+  } else if (elapsedMs >= 4_150 && elapsedMs < 4_800) {
+    activeStage = 4;
+    accent = THEME.red;
+    result = "QUIT REQUESTED · 앱 종료 요청";
+  }
+  return gesturePreviewSvg({
+    title: "App launcher · 앱 실행",
+    subtitle: "Neutral guide for the bundled Stream Deck Open Application action",
+    keySvg: appLauncherGuideSvg(quitArmed),
+    stages,
+    activeStage,
+    accent,
+    result
+  });
+}
+
+function renderGestureAnimations(outputDirectory, mode = "dark") {
+  appearanceMode = mode;
+  THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
+  const resolvedDirectory = path.resolve(outputDirectory);
+  const framesPerSecond = 10;
+  const scenarios = [
+    { name: "task-hold-to-talk", durationMs: 6_000, render: taskHoldGestureFrame },
+    { name: "voice-hold-to-dictate", durationMs: 5_200, render: voiceHoldGestureFrame },
+    { name: "send-long-press", durationMs: 5_400, render: sendHoldGestureFrame },
+    { name: "app-launcher-long-press", durationMs: 5_000, render: appLauncherGestureFrame }
+  ];
+  for (const scenario of scenarios) {
+    const scenarioDirectory = path.join(resolvedDirectory, scenario.name);
+    fsSync.mkdirSync(scenarioDirectory, { recursive: true });
+    for (const entry of fsSync.readdirSync(scenarioDirectory)) {
+      if (/^frame-\d{3}\.svg$/.test(entry)) fsSync.unlinkSync(path.join(scenarioDirectory, entry));
+    }
+    const frameCount = Math.ceil(scenario.durationMs / 1000 * framesPerSecond);
+    for (let index = 0; index < frameCount; index += 1) {
+      resetDemoEffects();
+      const elapsedMs = Math.round(index / framesPerSecond * 1000);
+      const nowMs = DEMO_EPOCH_MS + elapsedMs;
+      fixedRenderTimeMs = nowMs;
+      const frame = scenario.render(nowMs, elapsedMs);
+      fsSync.writeFileSync(path.join(scenarioDirectory, `frame-${String(index).padStart(3, "0")}.svg`), frame);
+    }
+    console.log(`Rendered ${frameCount} ${scenario.name} animation frames in ${scenarioDirectory}`);
+  }
+  fixedRenderTimeMs = null;
+  resetDemoEffects();
 }
 
 function verifyCompletionFanout() {
@@ -3948,8 +4236,9 @@ function runSelectedMode() {
       console.error(error);
       process.exitCode = 1;
     });
-  } else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
-    if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
+  } else if (demoOutput || demoLightOutput || demoAnimationDirectory || gestureAnimationDirectory) {
+    if (gestureAnimationDirectory) renderGestureAnimations(gestureAnimationDirectory, "dark");
+    else if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
     else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
   } else if (snapshotMode) {
     readTopThreads()

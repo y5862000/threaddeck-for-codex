@@ -1,57 +1,108 @@
 import { execFileSync } from "node:child_process";
+import { randomUUID } from "node:crypto";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
-const outputPath = path.resolve(
+const overviewOutputPath = path.resolve(
   process.argv[2] || path.join(root, "docs", "media", "threaddeck-demo.gif")
 );
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "threaddeck-animation-"));
-const svgDirectory = path.join(temporaryDirectory, "svg");
-const pngDirectory = path.join(temporaryDirectory, "png");
+const mediaDirectory = path.join(root, "docs", "media");
+const overviewSvgDirectory = path.join(temporaryDirectory, "overview-svg");
+const overviewPngDirectory = path.join(temporaryDirectory, "overview-png");
+const gestureSvgDirectory = path.join(temporaryDirectory, "gesture-svg");
+const gesturePngDirectory = path.join(temporaryDirectory, "gesture-png");
 
-function rasterize(source, destination) {
-  execFileSync("/usr/bin/sips", [
-    "-s", "format", "png",
-    "-z", "507", "960",
-    source,
-    "--out", destination
-  ], { stdio: "ignore" });
+function rasterize(source, destination, width, height) {
+  try {
+    execFileSync("/usr/bin/sips", [
+      "-s", "format", "png",
+      "-z", String(height), String(width),
+      source,
+      "--out", destination
+    ], { stdio: "ignore" });
+  } catch (error) {
+    throw new Error(`Could not rasterize ${path.basename(source)}: ${error?.message ?? "unknown error"}`);
+  }
 }
 
-try {
-  fs.mkdirSync(svgDirectory, { recursive: true });
-  fs.mkdirSync(pngDirectory, { recursive: true });
+function encodeGif(pngDirectory, outputPath, framesPerSecond) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  const temporaryOutput = path.join(
+    path.dirname(outputPath),
+    `.${path.basename(outputPath)}.${process.pid}-${randomUUID()}.tmp.gif`
+  );
+  try {
+    execFileSync("/usr/bin/xcrun", [
+      "swift",
+      path.join(root, "scripts", "encode-gif.swift"),
+      pngDirectory,
+      temporaryOutput,
+      String(1 / framesPerSecond)
+    ], { cwd: root, stdio: "inherit" });
+    fs.renameSync(temporaryOutput, outputPath);
+  } finally {
+    fs.rmSync(temporaryOutput, { force: true });
+  }
+}
 
-  execFileSync(process.execPath, [
-    "src/plugin.js",
-    "--render-demo-animation",
-    svgDirectory
-  ], { cwd: root, stdio: "inherit" });
-
+function renderGif(svgDirectory, pngDirectory, outputPath, { width, height, framesPerSecond }) {
+  fs.mkdirSync(pngDirectory, { recursive: true });
   const frames = fs.readdirSync(svgDirectory)
     .filter((name) => name.endsWith(".svg"))
     .sort();
-  if (frames.length === 0) throw new Error("The plugin renderer produced no animation frames.");
+  if (frames.length === 0) throw new Error(`The plugin renderer produced no frames in ${svgDirectory}.`);
 
   for (const frame of frames) {
     rasterize(
       path.join(svgDirectory, frame),
-      path.join(pngDirectory, frame.replace(/\.svg$/, ".png"))
+      path.join(pngDirectory, frame.replace(/\.svg$/, ".png")),
+      width,
+      height
     );
   }
+  encodeGif(pngDirectory, outputPath, framesPerSecond);
+  console.log(`Rendered ${frames.length} frames to ${outputPath}`);
+}
 
-  execFileSync("/usr/bin/xcrun", [
-    "swift",
-    path.join(root, "scripts", "encode-gif.swift"),
-    pngDirectory,
-    outputPath,
-    String(1 / 12)
+try {
+  fs.mkdirSync(overviewSvgDirectory, { recursive: true });
+  fs.mkdirSync(gestureSvgDirectory, { recursive: true });
+  fs.mkdirSync(mediaDirectory, { recursive: true });
+
+  execFileSync(process.execPath, [
+    "src/plugin.js",
+    "--render-demo-animation",
+    overviewSvgDirectory
+  ], { cwd: root, stdio: "inherit" });
+  execFileSync(process.execPath, [
+    "src/plugin.js",
+    "--render-gesture-animations",
+    gestureSvgDirectory
   ], { cwd: root, stdio: "inherit" });
 
-  console.log(`Rendered animated documentation demo at ${outputPath}`);
+  renderGif(overviewSvgDirectory, overviewPngDirectory, overviewOutputPath, {
+    width: 960,
+    height: 507,
+    framesPerSecond: 12
+  });
+
+  const gestures = [
+    ["task-hold-to-talk", "task-hold-to-talk.gif"],
+    ["voice-hold-to-dictate", "voice-hold-to-dictate.gif"],
+    ["send-long-press", "send-long-press.gif"],
+    ["app-launcher-long-press", "app-launcher-long-press.gif"]
+  ];
+  for (const [scenario, fileName] of gestures) {
+    renderGif(
+      path.join(gestureSvgDirectory, scenario),
+      path.join(gesturePngDirectory, scenario),
+      path.join(mediaDirectory, fileName),
+      { width: 960, height: 420, framesPerSecond: 10 }
+    );
+  }
 } finally {
   fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 }

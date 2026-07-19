@@ -6,7 +6,7 @@ ThreadDeck runs locally. It has no telemetry, analytics, update server, remote A
 
 ## Local access
 
-- The plugin reads local Codex state under `~/.codex` and Codex Desktop logs to draw task cards, reconstruct remote turn timing, and track temporary Side Chats. It does not write to those files.
+- The plugin reads local Codex state under `~/.codex` and Codex Desktop logs to draw user task cards, reconstruct remote turn timing, and track temporary Side Chats. Remote cards come only from metadata already cached locally by Codex Desktop; ThreadDeck does not contact the remote Mac. Internal helper and review tasks are filtered before rendering. The plugin does not write to Codex database or session files.
 - The optional quota ring starts the separately installed `codexbar` command and reads its JSON output.
 - Keyboard and media actions are emitted by a small native helper and require macOS Accessibility permission for Stream Deck.
 - Task navigation and composer controls use exact accessibility focus plus keyboard activation. The helper does not synthesize mouse movement or coordinate clicks.
@@ -14,6 +14,8 @@ ThreadDeck runs locally. It has no telemetry, analytics, update server, remote A
 - For an exactly matched focused task, the helper may also return one fixed reasoning-level enum (`none` through `ultra`). Arbitrary accessibility text never crosses the helper boundary.
 - Task-key push-to-talk compares only length/hash metadata for the focused editable field to detect when transcription has stabilized. The helper never returns dictated text to the plugin.
 - Push-to-talk temporarily suspends local processes that Core Audio reports as actively producing sound, then resumes only those same process IDs when the key is released. Exit handlers release held modifiers and resume tracked processes where possible.
+
+Read-only Codex file access does not mean the hardware is passive: when the user presses a key, ThreadDeck can intentionally open Codex UI, start or stop dictation, and submit the dictated message through the visible composer controls.
 
 Because the plugin displays task titles, anyone who can see your Stream Deck may see sensitive project names. Do not use real private titles in issue screenshots.
 

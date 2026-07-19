@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Reorganized the English and Korean user guides around installation and physical key gestures, corrected the overview animation to show the real task-key auto-submit path, and added reproducible GIFs for task hold-to-talk, dedicated-microphone draft dictation, the blue Send long-press state, and the bundled app launchers' long-press-to-quit behavior. Stream Deck action tooltips now spell out the same thresholds and release behavior.
 - Excluded Codex subagent and guardian review rows from every task-button source using structural provenance (`thread_source`, `source.subagent`, and `agent_path`), with exact injected-title signatures as a legacy fallback. Hidden persistent IDs also cannot re-enter as temporary Side Chats.
 - Mapped turn- and timestamp-validated remote reasoning summaries into privacy-safe intermediate phases such as Planning, Analyzing, Implementing, Verifying, Running, and Summarizing; waiting, error, and terminal states still take precedence, and stale or mismatched phases are hidden.
 - Kept pinned/recent local tasks in the automatic list, included only explicitly pinned remote tasks, and made those remote keys activate the correct computer through Codex's own sidebar or unified search.
