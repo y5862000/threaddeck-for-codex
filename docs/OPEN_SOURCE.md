@@ -8,20 +8,21 @@ ThreadDeck's implementation is fully published under the [MIT License](../LICENS
 
 | Source | Generated artifact | Build step |
 |---|---|---|
-| `src/plugin.js` | `com.yechan.threaddeck.sdPlugin/bin/plugin.js` | `scripts/build.sh` |
+| Top-level `src/*.js` modules | Matching `com.yechan.threaddeck.sdPlugin/bin/*.js` modules, copied byte-for-byte | `scripts/build.sh` |
 | `native/keybridge.m` | Universal `com.yechan.threaddeck.sdPlugin/bin/keybridge` | `scripts/build-bridge.sh` |
 | `profiles/source/unpacked/` | Bundled `.streamDeckProfile` archive | `scripts/build-profile.sh` |
 | `assets/plugin.svg` | Plugin PNG assets | `scripts/build-assets.sh` |
 | Actual key-rendering functions in `src/plugin.js` | `docs/media/neo-preview*` and feature PNGs | `scripts/render-docs.mjs` |
-| Deterministic demo frames + `scripts/encode-gif.swift` | `docs/media/threaddeck-demo.gif` | `scripts/render-animation.mjs` |
+| Deterministic overview and gesture frames + `scripts/encode-gif.swift` | `docs/media/threaddeck-demo.gif`, task hold-to-talk, microphone hold, Send long-press, and neutral app-launcher guide GIFs | `scripts/render-animation.mjs` |
 | Plugin directory | `.streamDeckPlugin` installer | `pnpm run pack` |
 
-Generated `bin/`, profile archives, and release installers are ignored by Git because they are reproducibly built from the source above. Documentation PNGs and the GIF are tracked so GitHub visitors can see the interface without running the plugin; their source is the same renderer shipped in the plugin.
+Generated `bin/`, profile archives, and release installers are ignored by Git because they are reproducibly built from the source above. Verification compares every bundled JavaScript module with its source byte-for-byte and rejects missing or stale modules. Documentation PNGs and GIFs are tracked so GitHub visitors can see the interface without running the plugin. ThreadDeck key artwork comes from the shipped renderer, with explanatory timelines around focused animations. The app-launcher GIF uses a neutral guide key because the bundled launchers and their real artwork are owned by Stream Deck.
 
 ## Dependency boundary
 
 - The runtime Node.js plugin uses only built-in Node modules.
 - `@elgato/cli` is a development dependency used to validate and pack the plugin. It is MIT licensed and not bundled as application logic.
+- `sharp` is a development-only dependency used by `scripts/rasterize.mjs` to turn repository-owned SVGs into plugin and documentation PNGs. It and its platform packages are build tools and are not bundled in the runtime plugin. The exact Darwin `@img/sharp-libvips-*` 1.2.4 build packages carry `LGPL-3.0-or-later`; the license audit scopes its exception to those package names and that version while Sharp remains a development dependency, rather than allowing LGPL dependencies generally.
 - [CodexBar](https://github.com/steipete/CodexBar) is an optional, separately installed MIT-licensed executable used only for quota data.
 - Xcode Command Line Tools and macOS system frameworks compile and run the native helper.
 

@@ -42,8 +42,9 @@ Use the system font stack already defined in `src/plugin.js`. Korean falls back 
 - Use sanitized titles and stable demonstration states.
 - Keep the complete 4 × 2 grid visible for overview images.
 - Use exact individual key renders for feature callouts; do not redraw controls or simulate hardware.
+- For a bundled third-party action whose native artwork is not owned by this repository, use an explicitly labeled neutral guide instead of copying its icon or pretending the guide is runtime output.
 - Show both light and dark appearance when discussing appearance support.
-- Use the deterministic GIF from `pnpm run render-animation` when motion or completion behavior matters.
+- Use the deterministic GIFs from `pnpm run render-animation` when motion or completion behavior matters.
 
 ## Naming and attribution
 

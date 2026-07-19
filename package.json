@@ -1,8 +1,8 @@
 {
   "name": "threaddeck-for-codex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
-  "description": "A local-first Stream Deck Neo dashboard for Codex Desktop on macOS.",
+  "description": "Monitor, switch, and dictate into Codex Desktop tasks from Stream Deck Neo on macOS.",
   "license": "MIT",
   "author": "ThreadDeck contributors",
   "homepage": "https://github.com/y5862000/threaddeck-for-codex#readme",
@@ -20,20 +20,25 @@
     "stream-deck-neo"
   ],
   "scripts": {
+    "test": "node --test test/*.test.js",
     "build": "zsh scripts/build.sh",
-    "audit": "node scripts/audit-release.mjs && node scripts/audit-licenses.mjs",
+    "audit:release": "node scripts/audit-release.mjs",
+    "audit:licenses": "node scripts/audit-licenses.mjs",
+    "audit": "pnpm run audit:release && pnpm run audit:licenses",
     "check": "zsh scripts/verify.sh",
     "render-demo": "node src/plugin.js --render-demo docs/media/neo-preview.svg",
     "render-docs": "node scripts/render-docs.mjs",
     "render-animation": "node scripts/render-animation.mjs",
-    "pack": "pnpm run build && pnpm exec streamdeck pack com.yechan.threaddeck.sdPlugin --output release --force --no-update-check",
-    "release": "pnpm run build && pnpm run audit && pnpm run check && pnpm run pack"
+    "pack:artifact": "zsh scripts/pack.sh",
+    "pack": "pnpm run build && pnpm run pack:artifact",
+    "release": "pnpm run build && pnpm run check && pnpm run audit:licenses && pnpm run pack:artifact"
   },
   "engines": {
     "node": ">=20"
   },
   "devDependencies": {
-    "@elgato/cli": "1.7.4"
+    "@elgato/cli": "1.7.4",
+    "sharp": "0.34.5"
   },
   "packageManager": "pnpm@10.15.1"
 }

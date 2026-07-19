@@ -22,6 +22,22 @@
         "Keypad"
       ],
       "Icon": "images/action",
+      "Name": "Codex 현재/마지막 전환 작업",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "현재 Codex 작업을 표시하며, 작업 전환에 성공하면 마지막으로 전환한 작업을 유지합니다. 짧게 누르면 해당 작업으로 이동하고, 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 자동으로 보냅니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.thread1"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
       "Name": "Codex 상위 작업 1",
       "States": [
         {
@@ -29,9 +45,9 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 첫 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 정렬된 첫 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다. 현재/마지막 전환 작업 액션과 별도로 사용할 수 있습니다.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread1"
+      "UUID": "com.yechan.threaddeck.thread.top1"
     },
     {
       "Controllers": [
@@ -45,7 +61,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 두 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 두 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread2"
     },
@@ -61,7 +77,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 세 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 세 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread3"
     },
@@ -77,7 +93,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 네 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 네 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread4"
     },
@@ -93,7 +109,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 다섯 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 다섯 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread5"
     },
@@ -109,7 +125,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 여섯 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 여섯 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread6"
     },
@@ -125,7 +141,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 일곱 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 일곱 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread7"
     },
@@ -141,7 +157,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "고정 작업을 우선한 여덟 번째 Codex 작업의 상태를 표시하고, 누르면 해당 작업으로 이동합니다.",
+      "Tooltip": "짧게 누르면 여덟 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread8"
     },
@@ -189,7 +205,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "누르는 동안 출력 장치와 무관하게 재생 중인 미디어 앱을 잠시 멈추고 Codex 음성 입력 단축키 Ctrl+Shift+D를 유지합니다. 놓으면 미디어를 그대로 재개합니다.",
+      "Tooltip": "누르는 즉시 Codex 음성 입력을 시작하고 지원되는 미디어 앱을 잠시 멈춥니다. 놓으면 받아쓴 내용을 작성창에 남기고 미디어를 재개하며, 자동으로 전송하지는 않습니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.voice"
     },
@@ -205,7 +221,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "짧게 누르면 Return, 0.6초 이상 길게 누르면 Command+Return을 보냅니다.",
+      "Tooltip": "짧게 눌렀다 놓으면 Return을 보냅니다. 0.6초 이상 눌러 버튼이 파란색으로 바뀐 뒤 놓으면 Command+Return을 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.send"
     },
@@ -224,6 +240,22 @@
       "Tooltip": "Command+Tab으로 다음 앱으로 전환합니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.appswitch"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Codex Fast mode",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "현재 Codex 작업의 작성창에서 Fast mode를 켜거나 끄고, 확인된 상태를 버튼에 표시합니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.fastmode"
     },
     {
       "Controllers": [
@@ -390,7 +422,7 @@
   "Category": "ThreadDeck for Codex",
   "CategoryIcon": "images/category",
   "CodePath": "bin/plugin.js",
-  "Description": "Codex 작업 상태, 경과 시간, 사용량과 작업 전환 기능을 Stream Deck Neo에 표시하는 비공식 macOS 대시보드입니다.",
+  "Description": "Codex 작업 상태와 시간을 확인하고, 로컬·원격 작업 전환과 길게 누른 음성 후속 요청을 처리하는 Stream Deck Neo용 비공식 macOS 대시보드입니다.",
   "Icon": "images/plugin",
   "Name": "ThreadDeck for Codex",
   "Nodejs": {
@@ -417,5 +449,5 @@
   },
   "UUID": "com.yechan.threaddeck",
   "URL": "https://github.com/y5862000/threaddeck-for-codex",
-  "Version": "0.2.0.0"
+  "Version": "0.3.0.0"
 }

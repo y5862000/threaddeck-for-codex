@@ -3,23 +3,17 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { rasterizeSvg } from "./rasterize.mjs";
+
 const root = path.resolve(import.meta.dirname, "..");
 const mediaDir = path.join(root, "docs", "media");
 const darkSvg = path.join(mediaDir, "neo-preview.svg");
 const lightSvg = path.join(mediaDir, "neo-preview-light.svg");
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "threaddeck-docs-"));
+const completedKeySvg = path.join(temporaryDirectory, "completed-task-key.svg");
 
 function runNode(...arguments_) {
   execFileSync(process.execPath, arguments_, { cwd: root, stdio: "inherit" });
-}
-
-function rasterize(source, destination, width, height) {
-  execFileSync("/usr/bin/sips", [
-    "-s", "format", "png",
-    "-z", String(height), String(width),
-    source,
-    "--out", destination
-  ], { stdio: "ignore" });
 }
 
 function embeddedKeys(previewPath) {
@@ -28,26 +22,36 @@ function embeddedKeys(previewPath) {
     .map((match) => Buffer.from(match[1], "base64").toString("utf8"));
 }
 
-fs.mkdirSync(mediaDir, { recursive: true });
-runNode("src/plugin.js", "--render-demo", darkSvg);
-runNode("src/plugin.js", "--render-demo-light", lightSvg);
+try {
+  fs.mkdirSync(mediaDir, { recursive: true });
+  runNode("src/plugin.js", "--render-demo", darkSvg);
+  runNode("src/plugin.js", "--render-demo-light", lightSvg);
+  runNode("src/plugin.js", "--render-completed-key", completedKeySvg);
 
-rasterize(darkSvg, path.join(mediaDir, "neo-preview.png"), 1372, 724);
-rasterize(lightSvg, path.join(mediaDir, "neo-preview-light.png"), 1372, 724);
+  await rasterizeSvg(darkSvg, path.join(mediaDir, "neo-preview.png"), 1372, 724);
+  await rasterizeSvg(lightSvg, path.join(mediaDir, "neo-preview-light.png"), 1372, 724);
 
-const keys = embeddedKeys(darkSvg);
-const selectedKeys = new Map([
-  ["quota-key.png", 0],
-  ["side-chat-key.png", 1],
-  ["working-task-key.png", 4],
-  ["completed-task-key.png", 7]
-]);
+  const keys = embeddedKeys(darkSvg);
+  const selectedKeys = new Map([
+    ["quota-key.png", 0],
+    ["side-chat-key.png", 1],
+    ["working-task-key.png", 4]
+  ]);
 
-for (const [fileName, index] of selectedKeys) {
-  if (!keys[index]) throw new Error(`Missing key ${index} in ${darkSvg}`);
-  const temporarySvg = path.join(temporaryDirectory, `${index}.svg`);
-  fs.writeFileSync(temporarySvg, keys[index]);
-  rasterize(temporarySvg, path.join(mediaDir, fileName), 288, 288);
+  for (const [fileName, index] of selectedKeys) {
+    if (!keys[index]) throw new Error(`Missing key ${index} in ${darkSvg}`);
+    const temporarySvg = path.join(temporaryDirectory, `${index}.svg`);
+    fs.writeFileSync(temporarySvg, keys[index]);
+    await rasterizeSvg(temporarySvg, path.join(mediaDir, fileName), 288, 288);
+  }
+  await rasterizeSvg(
+    completedKeySvg,
+    path.join(mediaDir, "completed-task-key.png"),
+    288,
+    288
+  );
+
+  console.log(`Rendered documentation images in ${mediaDir}`);
+} finally {
+  fs.rmSync(temporaryDirectory, { recursive: true, force: true });
 }
-
-console.log(`Rendered documentation images in ${mediaDir}`);

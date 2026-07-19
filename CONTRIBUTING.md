@@ -18,10 +18,11 @@ You need macOS, Node.js 20+, pnpm, Xcode Command Line Tools, Stream Deck 7.4+, S
 ```sh
 pnpm install --frozen-lockfile
 pnpm run build
+pnpm run test
 pnpm run check
 ```
 
-`pnpm run build` compiles the universal native helper, copies the plugin source into the bundle, and builds the distributable profile. `pnpm run check` validates JavaScript, JSON, both helper architectures, the Stream Deck manifest, and the release privacy audit.
+`pnpm run build` compiles the universal native helper, copies every top-level `src/*.js` module byte-for-byte to the matching plugin `bin/*.js` path, rasterizes plugin SVG assets through the development-only Sharp dependency, and builds the distributable profile. `pnpm run test` runs the I/O-free parser and policy contracts with Node's built-in test runner. `pnpm run check` repeats those tests, verifies source-to-bundle byte parity with no missing or stale JavaScript modules, and validates the inline runtime contracts, JSON, both helper architectures, the Stream Deck manifest, documentation, and the release privacy audit.
 
 To build an installer:
 
@@ -29,12 +30,16 @@ To build an installer:
 pnpm run pack
 ```
 
+Packaging uses an exact temporary staging copy, so the Stream Deck packer's manifest normalization does not modify the verified plugin directory.
+
 To regenerate documentation screenshots from the real key renderer:
 
 ```sh
 pnpm run render-docs
 pnpm run render-animation
 ```
+
+Both commands use the same Sharp-based SVG rasterizer as the asset build; Sharp is installed by `pnpm install` and is not part of the shipped plugin runtime. GIF encoding additionally uses the repository's Swift/ImageIO helper.
 
 ## Project boundaries
 
@@ -47,7 +52,8 @@ pnpm run render-animation
 
 ## Pull request checklist
 
-- Run `pnpm run build`, `pnpm run audit`, and `pnpm run check`.
+- Run `pnpm run build`, `pnpm run test`, `pnpm run audit`, and `pnpm run check`.
+- If you add or rename a top-level `src/*.js` module, confirm the build produces the matching byte-identical `bin/*.js` module and removes any stale bundled name.
 - Describe the tested macOS, Stream Deck software, Stream Deck model, and Codex versions.
 - Include before/after photos or generated key renders for visual changes, with private titles removed.
 - Update English and Korean README content together when public behavior changes.
