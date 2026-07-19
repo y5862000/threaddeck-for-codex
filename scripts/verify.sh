@@ -42,6 +42,33 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" focused-thread-geometry-selftest
 "$BRIDGE" command-palette-selftest
 "$BRIDGE" media-bundle-selftest
+node - "$ROOT_DIR/native/keybridge.m" <<'NODE'
+const fs = require("node:fs");
+const source = fs.readFileSync(process.argv[2], "utf8");
+
+function functionBody(name) {
+  const start = source.indexOf(`static int ${name}(void)`);
+  if (start < 0) throw new Error(`Missing native function: ${name}`);
+  const open = source.indexOf("{", start);
+  let depth = 0;
+  for (let index = open; index < source.length; index += 1) {
+    if (source[index] === "{") depth += 1;
+    else if (source[index] === "}" && --depth === 0) return source.slice(open, index + 1);
+  }
+  throw new Error(`Unterminated native function: ${name}`);
+}
+
+for (const name of ["print_codex_fast_mode_state", "print_codex_composer_state"]) {
+  const body = functionBody(name);
+  if (!body.includes("copy_codex_fast_mode_scan(false, &scan)")) {
+    throw new Error(`${name} must use the closed passive composer scan`);
+  }
+  if (/fallback|activate_accessibility|perform_codex_accessibility|close_codex_intelligence_popover/.test(body)) {
+    throw new Error(`${name} must never open or interact with the model picker`);
+  }
+}
+NODE
+echo "Passive composer reads are interaction-free."
 if grep -Eq 'CGEventCreateMouseEvent|CGWarpMouseCursorPosition|kCGEventLeftMouse(Down|Up)' "$ROOT_DIR/native/keybridge.m"; then
   echo "keybridge must not synthesize mouse events" >&2
   exit 1

@@ -6,6 +6,8 @@
 
 - Collapsed Fast mode read, inversion, and selection into one native transaction, eliminating the repeated model-menu flashes that made a single physical press feel sluggish.
 - Stopped treating a merely live CoreAudio process as proof that media is playing. Voice input now pauses only when macOS also confirms active playback, so already-paused music or video cannot be toggled back on; an unknown playback state leaves media untouched.
+- Simplified the Fast mode key to an icon-only verified on/off state, kept text for attention states only, and redrew the lightning silhouette with a pointed apex so it no longer looks cropped.
+- Made Fast mode refresh after task switches fully read-only, so it never opens the model picker. Because Codex renders the closed picker's bolt as an Accessibility-hidden SVG, ThreadDeck preserves the exact task's recorded `service_tier` and last verified value; the real menu opens only for an explicit Fast mode key press.
 
 ## 0.3.1-beta — 2026-07-19
 
