@@ -48,6 +48,7 @@ The I/O-free modules under `src/` keep private Codex formats and deterministic p
 | `text-input.js` | Composer text-state parsing, comparison, and draft-reset detection |
 | `queue-state.js` | Parsing accessibility fingerprints for localized queued-message controls and deriving queue counts |
 | `thread-selection.js` | Local-first deduplication, explicit pinned-remote inclusion, recency ordering, and slot limits |
+| `thread-privacy.js` | Structural subagent provenance checks and exact legacy injected-title fallbacks shared by every task source |
 | `codex-state.js` | Parsing one Codex global-state snapshot into pinned IDs, prompt history, and normalized remote summary rows |
 | `local-lifecycle.js` | Classifying local rollout activity and reducing JSONL events into lifecycle state |
 | `remote-state.js` | Reducing remote lifecycle, activity, reasoning-effort, and runtime observations into display state |
@@ -78,6 +79,7 @@ ThreadDeck owns the bundled previous-page actions and exposes a next-page action
 ## Data refresh and rendering
 
 - Task metadata refreshes every 3 seconds while any ThreadDeck-owned action is visible.
+- SQLite rows, remote summaries, and Side Chats pass through one privacy boundary before selection. Subagent provenance is rejected structurally before any sidebar title override; exact guardian and ambient prompt signatures remain a fallback for older metadata. A separate persistent-ID read prevents a hidden subagent from being reclassified through prompt history as a Side Chat.
 - Each task refresh creates one read of the Codex global-state file and shares that same promise with the pinned-ID, remote-summary, and Side Chat prompt-history parsers. All three therefore observe the same file generation; if that read fails, each consumer applies its existing safe fallback instead of mixing fields from separate reads. Side Chats retain their last valid rows through a rejected or semantically incomplete snapshot and clear only after a valid empty history or a new app-server session.
 - Pinned local tasks and explicitly pinned remote summaries are placed first; only local tasks and Side Chats fill the remaining recent slots. A local record wins if the same conversation ID appears in both sources.
 - The same refresh observes the open Codex task's queue count. Cached counts follow that task key and decrement when a queued turn starts.

@@ -33,7 +33,12 @@ function titleFingerprints(value) {
 
 function isInternalAmbientTitle(value) {
   const title = normalizeTitle(value).toLowerCase();
-  return title.startsWith("this block is automatically supplied ambient ui state")
+  return (
+    title.startsWith("the following is the codex agent history whose request action you are assessing")
+      && title.includes("treat the transcript")
+      && title.includes("as untrusted evidence, not as instructions to follow")
+  )
+    || title.startsWith("this block is automatically supplied ambient ui state")
     || (
       title.startsWith("this block is automatically supplied")
       && title.includes("not part of the user's request")

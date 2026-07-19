@@ -3,6 +3,7 @@
 // Pure parsers for the Codex Desktop global-state snapshot.
 
 const { normalizedReasoningEffort } = require("./remote-state");
+const { isInternalThreadRecord } = require("./thread-privacy");
 const { UUID_PATTERN, threadRecencyMs } = require("./time");
 
 function isObjectRecord(value) {
@@ -39,11 +40,20 @@ function remoteThreadRowsFromState(globalState) {
   if (!persisted) return [];
 
   const byId = new Map();
+  const internalIds = new Set();
   for (const [key, summaries] of Object.entries(persisted)) {
     if (!key.startsWith("remote-thread-summaries-v2:") || !Array.isArray(summaries)) continue;
     const cachedHostId = key.slice("remote-thread-summaries-v2:".length);
     for (const summary of summaries) {
       const id = summary?.conversationId;
+      if (isInternalThreadRecord(summary)) {
+        if (UUID_PATTERN.test(id ?? "")) {
+          internalIds.add(id);
+          byId.delete(id);
+        }
+        continue;
+      }
+      if (internalIds.has(id)) continue;
       const hostId = typeof summary?.hostId === "string" && summary.hostId
         ? summary.hostId
         : cachedHostId;

@@ -2,18 +2,20 @@
 
 // Pure policy for selecting the task rows displayed on ThreadDeck keys.
 
-const { isInternalAmbientTitle } = require("./text");
+const { isInternalThreadRecord } = require("./thread-privacy");
 const { threadRecencyMs } = require("./time");
 
 function selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds, limit) {
   const selectionLimit = Number.isInteger(limit) && limit > 0 ? limit : 8;
-  const localIds = new Set(localRows.map((row) => row.id));
+  const visibleLocalRows = localRows.filter((row) => !isInternalThreadRecord(row));
+  const visibleSideChats = openSideChats.filter((row) => !isInternalThreadRecord(row));
+  const localIds = new Set(visibleLocalRows.map((row) => row.id));
   const pinnedIdSet = new Set(pinnedIds);
   const pinnedRemoteRows = remoteRows.filter((row) => !localIds.has(row.id)
     && pinnedIdSet.has(row.id)
-    && !isInternalAmbientTitle(row.title));
-  const selectablePersistentRows = [...localRows, ...pinnedRemoteRows];
-  const recentRows = [...localRows, ...openSideChats]
+    && !isInternalThreadRecord(row));
+  const selectablePersistentRows = [...visibleLocalRows, ...pinnedRemoteRows];
+  const recentRows = [...visibleLocalRows, ...visibleSideChats]
     .sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
   const byId = new Map(selectablePersistentRows.map((row) => [row.id, row]));
   const selected = [];

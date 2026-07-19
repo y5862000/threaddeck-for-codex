@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Excluded Codex subagent and guardian review rows from every task-button source using structural provenance (`thread_source`, `source.subagent`, and `agent_path`), with exact injected-title signatures as a legacy fallback. Hidden persistent IDs also cannot re-enter as temporary Side Chats.
 - Mapped turn- and timestamp-validated remote reasoning summaries into privacy-safe intermediate phases such as Planning, Analyzing, Implementing, Verifying, Running, and Summarizing; waiting, error, and terminal states still take precedence, and stale or mismatched phases are hidden.
 - Kept pinned/recent local tasks in the automatic list, included only explicitly pinned remote tasks, and made those remote keys activate the correct computer through Codex's own sidebar or unified search.
 - Stopped treating remote-summary recency timestamps as completion boundaries; completed durations now prefer explicit lifecycle ends or confirmed live `active` → `notLoaded` transitions, with transient disconnects ignored and unknown cold-start ends left unspecified.

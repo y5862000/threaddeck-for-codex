@@ -9,7 +9,6 @@ const { promisify } = require("node:util");
 
 const {
   compactLine,
-  isInternalAmbientTitle,
   normalizeTitle,
   stringFingerprint,
   titleFingerprints,
@@ -39,6 +38,7 @@ const {
   reasoningEffortForRemoteThread: reasoningEffortForRemoteThreadInStore,
 } = require("./remote-state");
 const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
+const { isInternalThreadRecord } = require("./thread-privacy");
 const { parseCodexQueueWindows, queueCountForWindow } = require("./queue-state");
 const {
   canContinueLogCursor,
@@ -1904,13 +1904,15 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
 }
 
 async function readEphemeralSideChats(
-  persistentRows,
+  persistentRowsOrIds,
   parentId,
   globalStatePromise = null
 ) {
   const sessionStartedAtMs = await readAppServerSessionStartMs();
   if (!Number.isFinite(sessionStartedAtMs)) return [];
-  const persistentIds = new Set(persistentRows.map((row) => row.id));
+  const persistentIds = persistentRowsOrIds instanceof Set
+    ? persistentRowsOrIds
+    : new Set(persistentRowsOrIds.map((row) => row.id));
 
   try {
     const state = await (globalStatePromise ?? readGlobalStateSnapshot());
@@ -1924,7 +1926,7 @@ async function readEphemeralSideChats(
       if (!Number.isFinite(createdAtMs)
           || createdAtMs + APP_SERVER_START_TOLERANCE_MS < sessionStartedAtMs) continue;
       const firstPrompt = prompts.find((prompt) => typeof prompt === "string" && prompt.trim());
-      if (!firstPrompt || isInternalAmbientTitle(firstPrompt)) continue;
+      if (!firstPrompt || isInternalThreadRecord({ title: firstPrompt })) continue;
       const rememberedParentId = sideChatParentById.get(id) ?? parentId ?? null;
       if (rememberedParentId) sideChatParentById.set(id, rememberedParentId);
       sideChats.push({
@@ -2401,13 +2403,27 @@ async function readSideChatLifecycles(threads) {
 }
 
 async function readThreadRows() {
-  const query = `SELECT id, title, cwd, rollout_path, recency_at, updated_at FROM threads WHERE archived=0 AND (agent_path IS NULL OR agent_path='') ORDER BY recency_at DESC, updated_at DESC;`;
+  const query = `SELECT id, title, cwd, rollout_path, recency_at, updated_at, source, thread_source, agent_path FROM threads WHERE archived=0 AND COALESCE(thread_source, '') <> 'subagent' AND (agent_path IS NULL OR agent_path='') AND lower(COALESCE(source, '')) <> 'subagent' AND COALESCE(source, '') NOT LIKE '%"subagent"%' ORDER BY recency_at DESC, updated_at DESC;`;
   const { stdout } = await execFileAsync(SQLITE, ["-readonly", "-json", STATE_DB, query], {
     timeout: 4000,
     maxBuffer: 4 * 1024 * 1024
   });
   const rows = stdout.trim() ? JSON.parse(stdout) : [];
   return Array.isArray(rows) ? rows : [];
+}
+
+async function readPersistentThreadIds() {
+  const query = "SELECT id FROM threads;";
+  const { stdout } = await execFileAsync(SQLITE, ["-readonly", "-json", STATE_DB, query], {
+    timeout: 4000,
+    maxBuffer: 2 * 1024 * 1024
+  });
+  const rows = stdout.trim() ? JSON.parse(stdout) : [];
+  return new Set(
+    (Array.isArray(rows) ? rows : [])
+      .map((row) => row?.id)
+      .filter((id) => typeof id === "string" && UUID_PATTERN.test(id))
+  );
 }
 
 async function readRemoteThreadRows(globalStatePromise = readGlobalStateSnapshot()) {
@@ -2552,18 +2568,20 @@ function selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds) {
 async function readTopThreads() {
   const queueWindowsPromise = readCodexQueueWindows();
   const globalStatePromise = readGlobalStateSnapshot();
-  const [rows, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
+  const [rows, persistentIds, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
     readThreadRows(),
+    readPersistentThreadIds(),
     readRemoteThreadRows(globalStatePromise),
     readPinnedIds(globalStatePromise),
     readActiveThreadIds(),
     readSidebarThreadNames()
   ]);
   const localRows = rows
+    .filter((row) => !isInternalThreadRecord(row))
     .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
-    .filter((row) => !isInternalAmbientTitle(row.title));
+    .filter((row) => !isInternalThreadRecord(row));
   const sideChats = await readEphemeralSideChats(
-    localRows,
+    persistentIds,
     localRows[0]?.id ?? null,
     globalStatePromise
   );
@@ -3519,6 +3537,7 @@ async function verifyThreadRefreshResilience() {
   const savedSideChatRowsCache = sideChatRowsCache;
   const savedSideChatParents = new Map(sideChatParentById);
   let sideChatCachePreserved = false;
+  let persistentSideChatReentryBlocked = false;
   try {
     const sessionStartedAtMs = sideChatCreatedAtMs - 1_000;
     appServerSessionCache = { checkedAtMs: Date.now(), startedAtMs: sessionStartedAtMs };
@@ -3548,11 +3567,17 @@ async function verifyThreadRefreshResilience() {
         "electron-persisted-atom-state": { "prompt-history": {} }
       })
     );
+    const blockedPersistentId = await readEphemeralSideChats(
+      new Set([stableThread.id, sideChatId]),
+      stableThread.id,
+      Promise.resolve(sideChatState)
+    );
     sideChatCachePreserved = first[0]?.id === sideChatId
       && afterReadFailure[0]?.id === sideChatId
       && afterSemanticFailure[0]?.id === sideChatId
       && afterValidEmptyState.length === 0
       && sideChatRowsCache.length === 0;
+    persistentSideChatReentryBlocked = blockedPersistentId.length === 0;
   } finally {
     appServerSessionCache = savedAppServerSessionCache;
     sideChatSessionStartMs = savedSideChatSessionStartMs;
@@ -3565,13 +3590,15 @@ async function verifyThreadRefreshResilience() {
     && keptLastGoodList
     && oneOffStartupHidden
     && startupErrorStable
-    && sideChatCachePreserved;
+    && sideChatCachePreserved
+    && persistentSideChatReentryBlocked;
   console.log(JSON.stringify({
     passed,
     retryAttempts,
     keptLastGoodList,
     oneOffStartupHidden,
     sideChatCachePreserved,
+    persistentSideChatReentryBlocked,
     startupErrorAfterFailures: startupErrorStable ? THREAD_REFRESH_STARTUP_ERROR_FAILURES : null
   }));
   if (!passed) process.exitCode = 1;
