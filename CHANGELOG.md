@@ -5,6 +5,7 @@
 ## Unreleased
 
 - Kept pinned/recent local tasks in the automatic list, included only explicitly pinned remote tasks, and made those remote keys activate the correct computer through Codex's own sidebar or unified search.
+- Replaced synthesized Codex row, composer-focus, dictation-stop, and Send mouse clicks with exact accessibility focus plus keyboard activation, so task keys are resolution-independent and no longer move the pointer. Long task-key holds now prepare composer focus asynchronously near the hold threshold instead of adding that work after the hold is recognized.
 - Guaranteed the first completion pulse frame reaches every visible ThreadDeck-owned key, then reduced grouped animation traffic for reliable Neo updates.
 - Made push-to-talk independent of the active keyboard input source, ended current app-scoped dictation through Codex's visible stop control on release, and detected failed audio starts.
 - Retried transient task-list read failures and kept the last good list so a one-off error card cannot flash across the keys.

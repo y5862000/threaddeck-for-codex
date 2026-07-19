@@ -90,7 +90,10 @@ const COMPLETION_STARTUP_GRACE_MS = 15_000;
 const COMPLETION_OBSERVATION_OVERLAP_MS = 1_500;
 const SEND_LONG_PRESS_MS = 600;
 const THREAD_VOICE_LONG_PRESS_MS = 550;
-const THREAD_VOICE_FOCUS_SETTLE_MS = 90;
+const THREAD_VOICE_FOCUS_PREP_LEAD_MS = 200;
+const THREAD_VOICE_FOCUS_SETTLE_MS = 60;
+const REMOTE_APP_ACTIVATION_SETTLE_MS = 80;
+const REMOTE_APP_ACTIVATION_RETRY_MS = 180;
 const VOICE_TRANSCRIPTION_POLL_INTERVAL_MS = 100;
 const VOICE_TEXT_PROBE_INTERVAL_MS = 200;
 const VOICE_TRANSCRIPTION_STABLE_MS = 450;
@@ -904,13 +907,32 @@ function beginThreadPress(context, slot) {
   const state = {
     slot,
     threadId: thread.id,
+    startedAtMs: Date.now(),
     held: true,
     armed: false,
     voiceStarted: false,
     timer: null,
-    openPromise: openThread(context, slot)
+    openPromise: null,
+    focusPromise: null
   };
   threadPressByContext.set(context, state);
+  state.openPromise = openThread(context, slot);
+  state.focusPromise = state.openPromise.then(async (opened) => {
+    if (!opened || threadPressByContext.get(context) !== state || !state.held) return false;
+    // Prepare focus close to the hold threshold instead of blocking the key-up
+    // event after it. This keeps short presses cancellable while removing the
+    // full composer-discovery cost from the start of a genuine voice hold.
+    const earliestFocusAtMs = state.startedAtMs
+      + THREAD_VOICE_LONG_PRESS_MS
+      - THREAD_VOICE_FOCUS_PREP_LEAD_MS;
+    const delayMs = Math.max(
+      THREAD_VOICE_FOCUS_SETTLE_MS,
+      earliestFocusAtMs - Date.now()
+    );
+    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
+    if (threadPressByContext.get(context) !== state || !state.held) return false;
+    return runKeyBridgeAwaited("codex-focus-composer", null, { quiet: true });
+  });
   state.timer = setTimeout(async () => {
     if (threadPressByContext.get(context) !== state || !state.held) return;
     state.armed = true;
@@ -919,7 +941,7 @@ function beginThreadPress(context, slot) {
       threadPressByContext.delete(context);
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, THREAD_VOICE_FOCUS_SETTLE_MS));
+    const composerFocused = await state.focusPromise;
     if (threadPressByContext.get(context) !== state || !state.held) {
       threadPressByContext.delete(context);
       return;
@@ -927,7 +949,8 @@ function beginThreadPress(context, slot) {
     clearFeedback(context);
     state.voiceStarted = beginVoiceHoldSync(context, {
       targetThreadId: state.threadId,
-      autoSubmit: true
+      autoSubmit: true,
+      composerAlreadyFocused: composerFocused
     });
     if (!state.voiceStarted) threadPressByContext.delete(context);
   }, THREAD_VOICE_LONG_PRESS_MS);
@@ -1025,6 +1048,30 @@ function runKeyBridge(command, context = null) {
     console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
   });
   return true;
+}
+
+async function runKeyBridgeAwaited(command, context = null, options = {}) {
+  const quiet = Boolean(options.quiet);
+  if (!accessibilityTrustedSync()) {
+    if (!quiet) {
+      if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
+      console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
+    }
+    return false;
+  }
+  try {
+    await execFileAsync(KEY_BRIDGE, [command], {
+      timeout: command.startsWith("codex-") ? 2500 : 1000,
+      maxBuffer: 64 * 1024
+    });
+    return true;
+  } catch (error) {
+    if (!quiet) {
+      if (context) showFeedback(context, "error", "키 입력 실패");
+      console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
+    }
+    return false;
+  }
 }
 
 function runKeyBridgeSync(command, context = null, options = {}) {
@@ -1541,8 +1588,16 @@ function beginVoiceHoldSync(context, options = {}) {
   if (targetThreadId) voiceTargetThreadByContext.set(context, targetThreadId);
   // Start with the composer focused so both the baseline and the final
   // transcript come from the same accessibility element.
-  runKeyBridgeSync("codex-focus-composer", null, { quiet: true });
-  const baseline = textInputStateSync();
+  if (!options.composerAlreadyFocused) {
+    runKeyBridgeSync("codex-focus-composer", null, { quiet: true });
+  }
+  let baseline = textInputStateSync();
+  if (!baseline && options.composerAlreadyFocused) {
+    // The prepared focus can become stale if Codex replaces the composer DOM
+    // during the final navigation frame. Retry only in that exceptional case.
+    runKeyBridgeSync("codex-focus-composer", null, { quiet: true });
+    baseline = textInputStateSync();
+  }
   voiceTranscriptionByContext.set(context, {
     baseline,
     lastObserved: baseline,
@@ -3348,21 +3403,26 @@ async function openThread(context, slot) {
   try {
     if (thread.remote) {
       await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
-      await new Promise((resolve) => setTimeout(resolve, 350));
+      await new Promise((resolve) => setTimeout(resolve, REMOTE_APP_ACTIVATION_SETTLE_MS));
       let opened = false;
       let lastError = null;
       let sawAmbiguousTitle = false;
-      for (const fingerprint of titleFingerprints(thread.title)) {
-        try {
-          await execFileAsync(KEY_BRIDGE, ["codex-open-thread", thread.id, fingerprint], {
-            timeout: 4000,
-            maxBuffer: 64 * 1024
-          });
-          opened = true;
-          break;
-        } catch (error) {
-          if (keyBridgeExitCode(error) === 3) sawAmbiguousTitle = true;
-          lastError = error;
+      for (let attempt = 0; attempt < 2 && !opened && !sawAmbiguousTitle; attempt += 1) {
+        if (attempt > 0) {
+          await new Promise((resolve) => setTimeout(resolve, REMOTE_APP_ACTIVATION_RETRY_MS));
+        }
+        for (const fingerprint of titleFingerprints(thread.title)) {
+          try {
+            await execFileAsync(KEY_BRIDGE, ["codex-open-thread", thread.id, fingerprint], {
+              timeout: 4000,
+              maxBuffer: 64 * 1024
+            });
+            opened = true;
+            break;
+          } catch (error) {
+            if (keyBridgeExitCode(error) === 3) sawAmbiguousTitle = true;
+            lastError = error;
+          }
         }
       }
       // Remote rows outside the currently expanded sidebar are not mounted in

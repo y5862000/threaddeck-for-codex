@@ -129,7 +129,7 @@ ThreadDeck refreshes this value in the background while any of its profile pages
 
 | Action | Default behavior |
 |---|---|
-| Open task | A short press opens a local task through `codex://`. For a remote task, ThreadDeck selects the exact Codex sidebar or unified-search result so Codex activates that task's computer before navigating. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for stable transcription, activate the composer's Send control, and verify that the draft cleared. |
+| Open task | A short press opens a local task through `codex://`. For a remote task, ThreadDeck focuses the exact title-matched Codex sidebar or unified-search control and activates it from the keyboard, so Codex switches computers without synthesized mouse coordinates or pointer movement. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for stable transcription, activate the composer's Send control, and verify that the draft cleared. |
 | New task | Sends `⌥⌘O`, opening a task outside the current project with the current Codex shortcut. |
 | Side Chat | Sends `⌥⌘S`. |
 | Push-to-talk | Focuses the Codex composer, starts dictation with `⌃⇧D`, then activates Codex's stop-dictation control and restores composer focus when the Stream Deck key is released. Active audio-producing apps are temporarily suspended and resumed around the hold. |

@@ -1219,53 +1219,27 @@ enum {
   THREAD_ATTR_COUNT
 };
 
-static bool click_screen_point(CGPoint click_position) {
-  CGEventRef current = CGEventCreate(NULL);
-  CGPoint original_position = current != NULL
-    ? CGEventGetLocation(current)
-    : click_position;
-  if (current != NULL) CFRelease(current);
-
-  CGEventRef down = CGEventCreateMouseEvent(
-    NULL,
-    kCGEventLeftMouseDown,
-    click_position,
-    kCGMouseButtonLeft
-  );
-  CGEventRef up = CGEventCreateMouseEvent(
-    NULL,
-    kCGEventLeftMouseUp,
-    click_position,
-    kCGMouseButtonLeft
-  );
-  if (down == NULL || up == NULL) {
-    if (down != NULL) CFRelease(down);
-    if (up != NULL) CFRelease(up);
-    return false;
-  }
-  CGEventPost(kCGHIDEventTap, down);
-  usleep(20000);
-  CGEventPost(kCGHIDEventTap, up);
-  CFRelease(down);
-  CFRelease(up);
-  usleep(50000);
-  CGWarpMouseCursorPosition(original_position);
-  return true;
+static bool focus_accessibility_element(AXUIElementRef element) {
+  if (element == NULL) return false;
+  Boolean settable = false;
+  if (AXUIElementIsAttributeSettable(element, kAXFocusedAttribute, &settable) != kAXErrorSuccess
+      || !settable) return false;
+  return AXUIElementSetAttributeValue(
+    element,
+    kAXFocusedAttribute,
+    kCFBooleanTrue
+  ) == kAXErrorSuccess;
 }
 
-static bool click_element_center(AXUIElementRef element) {
-  CGPoint position = CGPointZero;
-  CGSize size = CGSizeZero;
-  if (!copy_element_position(element, &position)
-      || !copy_element_size(element, &size)
-      || size.width < 2
-      || size.height < 2) return false;
-
-  CGPoint click_position = {
-    .x = position.x + size.width / 2,
-    .y = position.y + size.height / 2
-  };
-  return click_screen_point(click_position);
+static bool activate_accessibility_element_with_return(AXUIElementRef element) {
+  if (!focus_accessibility_element(element)) return false;
+  // Chromium exposes the task and composer controls as keyboard-focusable
+  // buttons. Activating the verified element with Return triggers React's
+  // normal handler without synthesizing a mouse event or using screen pixels.
+  usleep(12000);
+  tap_key(KEY_RETURN, 0);
+  usleep(18000);
+  return true;
 }
 
 #define CODEX_DICTATION_BUTTON_MAX 96
@@ -1529,49 +1503,116 @@ static bool frontmost_focused_element_is_text_input(void) {
   return is_text_input;
 }
 
-static CGPoint clamped_codex_composer_point(
-  CodexComposerControls *controls,
-  double x,
-  double y
+typedef struct {
+  AXUIElementRef element;
+  unsigned visited;
+  CGPoint window_origin;
+  CGSize window_size;
+  double best_score;
+} CodexComposerInputState;
+
+static void collect_codex_composer_inputs(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexComposerInputState *state
 ) {
-  double minimum_x = controls->window_origin.x + 20;
-  double maximum_x = controls->window_origin.x + controls->window_size.width - 20;
-  double minimum_y = controls->window_origin.y + controls->window_size.height * 0.55;
-  double maximum_y = controls->window_origin.y + controls->window_size.height - 20;
-  if (x < minimum_x) x = minimum_x;
-  if (x > maximum_x) x = maximum_x;
-  if (y < minimum_y) y = minimum_y;
-  if (y > maximum_y) y = maximum_y;
-  return (CGPoint) { .x = x, .y = y };
+  if (element == NULL || state == NULL || depth > 30 || state->visited >= 6000) return;
+  state->visited += 1;
+  if (element_is_hidden(element)) return;
+
+  CFTypeRef role_value = NULL;
+  AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role_value);
+  Boolean value_settable = false;
+  Boolean focus_settable = false;
+  AXUIElementIsAttributeSettable(element, kAXValueAttribute, &value_settable);
+  AXUIElementIsAttributeSettable(element, kAXFocusedAttribute, &focus_settable);
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  bool has_geometry = copy_element_position(element, &position)
+    && copy_element_size(element, &size);
+  const double geometry_tolerance = 2.0;
+  bool in_composer_region = has_geometry
+    && position.x >= state->window_origin.x - geometry_tolerance
+    && position.x + size.width <= state->window_origin.x + state->window_size.width + geometry_tolerance
+    && position.y >= state->window_origin.y + state->window_size.height * 0.55
+    && position.y + size.height <= state->window_origin.y + state->window_size.height + geometry_tolerance
+    && size.width >= 120
+    && size.height >= 18;
+  if (role_is_text_input(role_value) && value_settable && focus_settable && in_composer_region) {
+    bool is_text_area = CFEqual(role_value, kAXTextAreaRole);
+    double score = position.y + size.height
+      + (is_text_area ? state->window_size.height : 0)
+      + size.width / 10000.0;
+    if (state->element == NULL || score > state->best_score) {
+      if (state->element != NULL) CFRelease(state->element);
+      state->element = (AXUIElementRef)CFRetain(element);
+      state->best_score = score;
+    }
+  }
+  if (role_value != NULL) CFRelease(role_value);
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value) != kAXErrorSuccess
+      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_codex_composer_inputs((AXUIElementRef)child, depth + 1, state);
+    }
+  }
+  CFRelease(children_value);
+}
+
+static AXUIElementRef copy_codex_composer_input(CodexComposerControls *controls) {
+  CodexComposerInputState state = {
+    .element = NULL,
+    .visited = 0,
+    .window_origin = controls->window_origin,
+    .window_size = controls->window_size,
+    .best_score = -1
+  };
+  collect_codex_composer_inputs(controls->window, 0, &state);
+  return state.element;
 }
 
 static bool focus_codex_composer_with_controls(CodexComposerControls *controls) {
   if (!codex_is_frontmost()) return false;
-  CodexDictationButton left = controls->button_state.buttons[controls->left_index];
-  double center_y = left.position.y + left.size.height / 2;
-  const double offsets[][2] = {
-    { -120, -38 },
-    { -220, -38 },
-    { -120, -66 },
-    { -220, -66 },
-    { -220, 0 },
-    { -400, -38 }
-  };
-  for (unsigned index = 0; index < sizeof(offsets) / sizeof(offsets[0]); index += 1) {
-    CGPoint point = clamped_codex_composer_point(
-      controls,
-      left.position.x + offsets[index][0],
-      center_y + offsets[index][1]
-    );
-    if (click_screen_point(point) && frontmost_focused_element_is_text_input()) return true;
-  }
-  return false;
+  AXUIElementRef input = copy_codex_composer_input(controls);
+  bool focused = focus_accessibility_element(input);
+  if (input != NULL) CFRelease(input);
+  if (!focused) return false;
+  usleep(12000);
+  return frontmost_focused_element_is_text_input();
 }
 
 static bool focus_codex_composer_if_visible(void) {
   if (!codex_is_frontmost()) return false;
-  CodexComposerControls controls;
-  if (!copy_codex_composer_controls(&controls)) return false;
+  CodexComposerControls controls = { 0 };
+  controls.application = copy_codex_application();
+  if (controls.application == NULL) return false;
+  AXUIElementSetMessagingTimeout(controls.application, 0.5);
+  CFTypeRef window_value = NULL;
+  if (AXUIElementCopyAttributeValue(
+        controls.application,
+        kAXFocusedWindowAttribute,
+        &window_value
+      ) != kAXErrorSuccess
+      || window_value == NULL
+      || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
+    if (window_value != NULL) CFRelease(window_value);
+    release_codex_composer_controls(&controls);
+    return false;
+  }
+  controls.window = (AXUIElementRef)window_value;
+  if (!copy_element_position(controls.window, &controls.window_origin)
+      || !copy_element_size(controls.window, &controls.window_size)) {
+    release_codex_composer_controls(&controls);
+    return false;
+  }
   bool focused = focus_codex_composer_with_controls(&controls);
   release_codex_composer_controls(&controls);
   return focused;
@@ -1582,7 +1623,8 @@ static bool submit_codex_composer_if_visible(void) {
   CodexComposerControls controls;
   if (!copy_codex_composer_controls(&controls)) return false;
   CodexDictationButton submit = controls.button_state.buttons[controls.right_index];
-  bool submitted = submit.enabled && click_element_center(submit.element);
+  bool submitted = submit.enabled
+    && activate_accessibility_element_with_return(submit.element);
   if (submitted) {
     // Put focus back in the composer so the caller can verify that the draft
     // returned to its pre-dictation state instead of assuming a click sent it.
@@ -1599,24 +1641,15 @@ static bool stop_codex_composer_dictation_if_visible(void) {
   if (!copy_codex_composer_controls(&controls)) return false;
   CodexDictationButton stop = controls.button_state.buttons[controls.left_index];
 
-  bool stopped = false;
-  if (stop.enabled) {
-    // Chromium currently reports AXPress success without dispatching this
-    // React button's pointer handler. Use a real click while Codex is frontmost;
-    // if focus moved during the hold, AXPress remains the safe best effort and
-    // can never land on another application's window.
-    if (codex_is_frontmost()) {
-      stopped = click_element_center(stop.element);
-      if (stopped) {
-        // Clicking Stop focuses the button. Restore the composer immediately;
-        // otherwise the JS probe can mistake that focus change for transcript
-        // completion and Return will be delivered to the wrong control.
-        usleep(80000);
-        focus_codex_composer_with_controls(&controls);
-      }
-    } else {
-      stopped = AXUIElementPerformAction(stop.element, kAXPressAction) == kAXErrorSuccess;
-    }
+  bool stopped = stop.enabled && codex_is_frontmost()
+    ? activate_accessibility_element_with_return(stop.element)
+    : stop.enabled
+      && AXUIElementPerformAction(stop.element, kAXPressAction) == kAXErrorSuccess;
+  if (stopped && codex_is_frontmost()) {
+    // Keyboard activation focuses Stop. Restore the exact AXTextArea before
+    // the JS probe checks whether transcription has stabilized.
+    usleep(50000);
+    focus_codex_composer_with_controls(&controls);
   }
 
   release_codex_composer_controls(&controls);
@@ -1714,6 +1747,33 @@ static bool parse_fingerprint(const char *input, StringFingerprint *fingerprint)
   return true;
 }
 
+static AXUIElementRef copy_codex_thread_activation_target(AXUIElementRef element) {
+  AXUIElementRef current = element != NULL ? (AXUIElementRef)CFRetain(element) : NULL;
+  for (unsigned level = 0; current != NULL && level < 4; level += 1) {
+    CFArrayRef actions = NULL;
+    AXUIElementCopyActionNames(current, &actions);
+    bool supports_press = actions != NULL
+      && CFArrayContainsValue(
+        actions,
+        CFRangeMake(0, CFArrayGetCount(actions)),
+        kAXPressAction
+      );
+    if (actions != NULL) CFRelease(actions);
+    if (supports_press) return current;
+    CFTypeRef parent_value = NULL;
+    AXError parent_error = AXUIElementCopyAttributeValue(current, kAXParentAttribute, &parent_value);
+    CFRelease(current);
+    current = parent_error == kAXErrorSuccess
+      && parent_value != NULL
+      && CFGetTypeID(parent_value) == AXUIElementGetTypeID()
+      ? (AXUIElementRef)parent_value
+      : NULL;
+    if (current == NULL && parent_value != NULL) CFRelease(parent_value);
+  }
+  if (current != NULL) CFRelease(current);
+  return NULL;
+}
+
 static int find_or_open_codex_thread(
   const char *uuid,
   const char *fingerprint_input,
@@ -1723,6 +1783,9 @@ static int find_or_open_codex_thread(
   if (uuid == NULL || strlen(uuid) != 36 || !parse_fingerprint(fingerprint_input, &fingerprint)) {
     return 64;
   }
+  // Return is delivered as a normal keyboard event after the exact AX control
+  // is focused. Never risk delivering it to whichever other app is frontmost.
+  if (press && !codex_is_frontmost()) return 1;
   AXUIElementRef application = copy_codex_application();
   if (application == NULL) return 1;
   AXUIElementSetMessagingTimeout(application, 0.8);
@@ -1782,10 +1845,10 @@ static int find_or_open_codex_thread(
     }
     result = state.target_count == 1 ? 0 : state.target_count > 1 ? 3 : 1;
   } else if (state.target_count == 1) {
-    // Chromium can report a successful AXPress for a sidebar task row without
-    // dispatching React's pointer handler. A real click at the verified row
-    // bounds consistently runs Codex's host activation and navigation path.
-    result = click_element_center(state.targets[0]) ? 0 : 1;
+    AXUIElementRef activation_target = copy_codex_thread_activation_target(state.targets[0]);
+    bool activated = activate_accessibility_element_with_return(activation_target);
+    result = activated ? 0 : 1;
+    if (activation_target != NULL) CFRelease(activation_target);
   } else if (state.target_count > 1) {
     result = 3;
   }

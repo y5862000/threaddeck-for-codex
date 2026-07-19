@@ -21,6 +21,11 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 [[ "$ARCHS" == *x86_64* ]] || { echo "keybridge is missing x86_64" >&2; exit 1; }
 "$BRIDGE" voice-event-selftest
 "$BRIDGE" reasoning-state-selftest
+if grep -Eq 'CGEventCreateMouseEvent|CGWarpMouseCursorPosition|kCGEventLeftMouse(Down|Up)' "$ROOT_DIR/native/keybridge.m"; then
+  echo "keybridge must not synthesize mouse events" >&2
+  exit 1
+fi
+echo "Cursor-neutral accessibility activation check passed."
 
 pnpm exec streamdeck validate "$PLUGIN_DIR" --no-update-check
 node "$ROOT_DIR/scripts/audit-release.mjs"
