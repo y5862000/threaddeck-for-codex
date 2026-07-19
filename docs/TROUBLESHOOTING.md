@@ -6,11 +6,13 @@
 
 Install CodexBar and confirm that `codexbar usage --format json` works in Terminal. The plugin searches `CODEXBAR_PATH`, `~/.local/bin/codexbar`, `/opt/homebrew/bin/codexbar`, `/usr/local/bin/codexbar`, and finally your process `PATH`.
 
+ThreadDeck prefetches quota while another profile page is visible. Switching to the quota page shows the last successful value immediately, and a transient refresh failure does not replace that value with an error card.
+
 ## Shortcuts or push-to-talk do not work
 
 Open **System Settings → Privacy & Security → Accessibility** and allow **Stream Deck**. Quit and reopen Stream Deck after changing the permission.
 
-For task-key dictation, keep holding the task key while speaking. Releasing it activates Codex's visible stop-dictation control; ThreadDeck then waits for transcription to stabilize and submits the ordinary follow-up. If the key shows an error, confirm **Start dictation** is `Control+Shift+D`, Codex is frontmost, and the message editor is visible. ThreadDeck now detects when audio input never starts instead of leaving a false recording state on the key.
+For task-key dictation, keep holding the task key while speaking. Releasing it activates Codex's visible stop-dictation control and restores composer focus. ThreadDeck then waits for transcription to stabilize, activates the visible Send control, and confirms that the draft cleared; if needed, it retries once with Return while the composer is focused. If the key shows an error, confirm **Start dictation** is `Control+Shift+D`, Codex is frontmost, and the message editor is visible. ThreadDeck detects when audio input never starts instead of leaving a false recording state on the key.
 
 The active keyboard input source does not need to be changed to English. ThreadDeck emits the physical D key with an explicit Latin `D`, including while Korean input is active.
 

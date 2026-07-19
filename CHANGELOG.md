@@ -8,6 +8,8 @@
 - Guaranteed the first completion pulse frame reaches every visible ThreadDeck-owned key, then reduced grouped animation traffic for reliable Neo updates.
 - Made push-to-talk independent of the active keyboard input source, ended current app-scoped dictation through Codex's visible stop control on release, and detected failed audio starts.
 - Retried transient task-list read failures and kept the last good list so a one-off error card cannot flash across the keys.
+- Prefetched weekly quota on every visible ThreadDeck page and preserved the last good value, removing the multi-second wait when the quota page appears.
+- Restored composer focus after dictation, submitted through Codex's visible Send control, verified that the draft cleared, and retried safely with Return when needed.
 - Added actionable key feedback for missing Accessibility permission, duplicate remote titles, and unavailable remote tasks, plus regression checks for completion fan-out and voice event encoding.
 
 ## 0.2.0-beta — 2026-07-18

@@ -121,14 +121,16 @@ codexbar usage --format json
 
 Open CodexBar once, enable Codex in its provider settings, and confirm the command returns JSON. ThreadDeck searches common Homebrew paths automatically; set `CODEXBAR_PATH` only for a custom installation.
 
+ThreadDeck refreshes this value in the background while any of its profile pages is visible. Opening the quota page therefore uses the last successful value immediately, then refreshes it without replacing that value during a transient CodexBar failure.
+
 ## Actions and shortcuts
 
 | Action | Default behavior |
 |---|---|
-| Open task | A short press opens a local task through `codex://`. For a remote task, ThreadDeck selects the exact Codex sidebar or unified-search result so Codex activates that task's computer before navigating. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for transcription, and submit the ordinary follow-up automatically. |
+| Open task | A short press opens a local task through `codex://`. For a remote task, ThreadDeck selects the exact Codex sidebar or unified-search result so Codex activates that task's computer before navigating. Hold for 0.55 seconds to open it and start push-to-talk; release to stop recording, wait for stable transcription, activate the composer's Send control, and verify that the draft cleared. |
 | New task | Sends `⌥⌘O`, opening a task outside the current project with the current Codex shortcut. |
 | Side Chat | Sends `⌥⌘S`. |
-| Push-to-talk | Starts dictation with `⌃⇧D`, then activates Codex's stop-dictation control when the Stream Deck key is released. Active audio-producing apps are temporarily suspended and resumed around the hold. |
+| Push-to-talk | Focuses the Codex composer, starts dictation with `⌃⇧D`, then activates Codex's stop-dictation control and restores composer focus when the Stream Deck key is released. Active audio-producing apps are temporarily suspended and resumed around the hold. |
 | Send | Short press sends Return; holding for 0.6 seconds and releasing sends Command+Return. The key turns blue when the long-press action is armed. |
 | App switcher | Holds Command and taps Tab for a native app switch. |
 | Media | Previous/next, seek, play/pause, mute, and volume actions are available. |

@@ -94,7 +94,9 @@ const THREAD_VOICE_FOCUS_SETTLE_MS = 90;
 const VOICE_TRANSCRIPTION_POLL_INTERVAL_MS = 100;
 const VOICE_TEXT_PROBE_INTERVAL_MS = 200;
 const VOICE_TRANSCRIPTION_STABLE_MS = 450;
-const VOICE_TRANSCRIPTION_TIMEOUT_MS = 12_000;
+const VOICE_TRANSCRIPTION_TIMEOUT_MS = 20_000;
+const VOICE_AUTO_SUBMIT_STABLE_MS = 750;
+const VOICE_SUBMIT_VERIFY_DELAYS_MS = [180, 280, 440];
 const VOICE_START_VERIFY_MS = 1_500;
 const VOICE_COMPLETE_DISPLAY_MS = 900;
 const VOICE_ERROR_DISPLAY_MS = 1_300;
@@ -207,6 +209,8 @@ const snapshotMode = process.argv.includes("--snapshot");
 const completionContractMode = process.argv.includes("--verify-completion");
 const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
 const threadSelectionContractMode = process.argv.includes("--verify-thread-selection");
+const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
+const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
@@ -237,6 +241,7 @@ let activeThreadRefresh = null;
 let activeAppearanceRefresh = null;
 let threadSlots = Array(THREAD_COUNT).fill(null);
 let usageState = { remaining: null, failed: false };
+let hasLoadedUsageState = false;
 let pulse = false;
 let feedbackSerial = 0;
 let hasLoadedThreadState = false;
@@ -996,22 +1001,27 @@ function runKeyBridge(command, context = null) {
   return true;
 }
 
-function runKeyBridgeSync(command, context = null) {
+function runKeyBridgeSync(command, context = null, options = {}) {
+  const quiet = Boolean(options.quiet);
   const releasesHeldKeys = command === "voice-up" || command === "release";
   if (!releasesHeldKeys && !accessibilityTrustedSync()) {
-    if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
-    console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
+    if (!quiet) {
+      if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
+      console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
+    }
     return false;
   }
   try {
     execFileSync(KEY_BRIDGE, [command], {
       stdio: "ignore",
-      timeout: command === "voice-up" ? 2000 : 1000
+      timeout: command === "voice-up" || command.startsWith("codex-") ? 2500 : 1000
     });
     return true;
   } catch (error) {
-    if (context) showFeedback(context, "error", "키 입력 실패");
-    console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
+    if (!quiet) {
+      if (context) showFeedback(context, "error", "키 입력 실패");
+      console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
+    }
     return false;
   }
 }
@@ -1074,6 +1084,40 @@ function runKeyBridgeWithInput(command, args, input, timeoutMs = 6000) {
   });
 }
 
+function parseTextInputState(command, output) {
+  const focusedMatch = output.match(/^(\d+)\t([0-9a-f]{16})$/i);
+  if (command === "focused-text-state" && focusedMatch) {
+    return {
+      source: "focused",
+      candidates: 1,
+      length: Number(focusedMatch[1]),
+      hash: focusedMatch[2].toLowerCase()
+    };
+  }
+  const aggregateMatch = output.match(/^(\d+)\t(\d+)\t([0-9a-f]{16})$/i);
+  if (command === "editable-text-state" && aggregateMatch) {
+    return {
+      source: "aggregate",
+      candidates: Number(aggregateMatch[1]),
+      length: Number(aggregateMatch[2]),
+      hash: aggregateMatch[3].toLowerCase()
+    };
+  }
+  return null;
+}
+
+function sameTextInputState(left, right) {
+  return Boolean(left && right)
+    && left.source === right.source
+    && left.candidates === right.candidates
+    && left.length === right.length
+    && left.hash === right.hash;
+}
+
+function comparableTextInputStates(left, right) {
+  return Boolean(left && right) && left.source === right.source;
+}
+
 function textInputStateSync() {
   for (const command of ["focused-text-state", "editable-text-state"]) {
     try {
@@ -1083,12 +1127,8 @@ function textInputStateSync() {
         timeout: 700,
         maxBuffer: 128
       }).trim();
-      const focusedMatch = output.match(/^(\d+)\t([0-9a-f]{16})$/i);
-      if (focusedMatch) return `focused:${focusedMatch[1]}:${focusedMatch[2].toLowerCase()}`;
-      const aggregateMatch = output.match(/^(\d+)\t(\d+)\t([0-9a-f]{16})$/i);
-      if (aggregateMatch) {
-        return `aggregate:${aggregateMatch[1]}:${aggregateMatch[2]}:${aggregateMatch[3].toLowerCase()}`;
-      }
+      const state = parseTextInputState(command, output);
+      if (state) return state;
     } catch {
       // Codex currently does not expose a conventional focused text area on
       // every build. Fall through to the aggregate editable-region probe.
@@ -1211,19 +1251,86 @@ function resolveVoiceTargetThreadId(nowMs = Date.now()) {
   return mostRecentThreadId && visibleIds.has(mostRecentThreadId) ? mostRecentThreadId : null;
 }
 
-async function submitCompletedVoiceTranscription(context, targetThreadId) {
+function voiceSubmissionStillCurrent(context, targetThreadId) {
+  return contexts.has(context)
+    && voiceStateByContext.get(context) === "submitting"
+    && voiceTargetThreadByContext.get(context) === targetThreadId;
+}
+
+function voiceDraftReturnedToBaseline(current, tracker) {
+  if (!current || !tracker?.lastObserved) return false;
+  if (tracker.baseline && sameTextInputState(current, tracker.baseline)) return true;
+  return comparableTextInputStates(current, tracker.lastObserved)
+    && tracker.lastObserved.length > 0
+    && current.length === 0;
+}
+
+async function waitForVoiceDraftReset(context, targetThreadId, tracker, options = {}) {
+  const stateReader = options.stateReader ?? textInputStateSync;
+  const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const delays = options.delays ?? VOICE_SUBMIT_VERIFY_DELAYS_MS;
+  let stableResetCandidate = null;
+  let stableResetObservations = 0;
+  for (const delayMs of delays) {
+    await sleep(delayMs);
+    if (!voiceSubmissionStillCurrent(context, targetThreadId)) return false;
+    const current = stateReader();
+    if (voiceDraftReturnedToBaseline(current, tracker)) return true;
+    const changedAfterSubmit = comparableTextInputStates(current, tracker.lastObserved)
+      && !sameTextInputState(current, tracker.lastObserved);
+    if (!changedAfterSubmit) {
+      stableResetCandidate = null;
+      stableResetObservations = 0;
+      continue;
+    }
+    if (sameTextInputState(current, stableResetCandidate)) stableResetObservations += 1;
+    else {
+      stableResetCandidate = current;
+      stableResetObservations = 1;
+    }
+    // A composer that contained text before dictation may reset to a
+    // placeholder rather than the exact baseline fingerprint. Require the new
+    // post-submit state to remain unchanged across all three probes before
+    // accepting that form of reset.
+    if (stableResetObservations >= 3) return true;
+  }
+  return false;
+}
+
+async function submitCompletedVoiceTranscription(context, targetThreadId, tracker, options = {}) {
+  const openApp = options.openApp
+    ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 }));
+  const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const bridge = options.bridge ?? runKeyBridgeSync;
+  const waitForDraftReset = options.waitForDraftReset ?? waitForVoiceDraftReset;
+  const scheduleRefresh = options.scheduleRefresh ?? (() => setTimeout(() => void refreshThreads(), 500));
   try {
-    await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
-    await new Promise((resolve) => setTimeout(resolve, 140));
-    if (!contexts.has(context)
-        || voiceStateByContext.get(context) !== "submitting"
-        || voiceTargetThreadByContext.get(context) !== targetThreadId) return;
-    if (!runKeyBridgeSync("send", context)) {
+    await openApp();
+    await sleep(140);
+    if (!voiceSubmissionStillCurrent(context, targetThreadId)) return;
+
+    const clickedSubmit = bridge("codex-submit-composer", null, { quiet: true });
+    let confirmed = clickedSubmit
+      && await waitForDraftReset(context, targetThreadId, tracker, options);
+    if (!confirmed && voiceSubmissionStillCurrent(context, targetThreadId)) {
+      // The explicit button is preferred, but Codex can rebuild the composer
+      // between transcription and submission. Refocus the draft and retry with
+      // Return, then verify the draft actually cleared before showing success.
+      bridge("codex-focus-composer", null, { quiet: true });
+      if (!bridge("send", context)) {
+        failVoiceTranscription(context);
+        return;
+      }
+      confirmed = await waitForDraftReset(context, targetThreadId, tracker, options);
+    }
+    if (!voiceSubmissionStillCurrent(context, targetThreadId)) return;
+    if (!confirmed) {
       failVoiceTranscription(context);
+      console.error("Codex dictated message submission could not be confirmed");
       return;
     }
     setVoiceVisualState(context, "sent", VOICE_COMPLETE_DISPLAY_MS);
-    setTimeout(() => void refreshThreads(), 500);
+    scheduleRefresh();
   } catch (error) {
     failVoiceTranscription(context);
     console.error(`Could not submit dictated Codex message: ${error?.message ?? "unknown error"}`);
@@ -1235,7 +1342,7 @@ function completeVoiceTranscription(context, nowMs = Date.now()) {
   voiceTranscriptionByContext.delete(context);
   if (tracker?.autoSubmit && tracker.targetThreadId) {
     setVoiceVisualState(context, "submitting", null, nowMs);
-    void submitCompletedVoiceTranscription(context, tracker.targetThreadId);
+    void submitCompletedVoiceTranscription(context, tracker.targetThreadId, tracker);
     return;
   }
   setVoiceVisualState(context, "complete", VOICE_COMPLETE_DISPLAY_MS, nowMs);
@@ -1246,7 +1353,9 @@ function failVoiceTranscription(context, nowMs = Date.now()) {
   setVoiceVisualState(context, "error", VOICE_ERROR_DISPLAY_MS, nowMs);
 }
 
-function updateVoiceTranscriptionStates(nowMs = Date.now()) {
+function updateVoiceTranscriptionStates(nowMs = Date.now(), options = {}) {
+  const stateReader = options.stateReader ?? textInputStateSync;
+  const completionHandler = options.completionHandler ?? completeVoiceTranscription;
   for (const [context, tracker] of voiceTranscriptionByContext) {
     if (!contexts.has(context) || !contextSupportsVoice(context)) {
       cancelVoiceTranscription(context);
@@ -1261,25 +1370,29 @@ function updateVoiceTranscriptionStates(nowMs = Date.now()) {
     }
     tracker.lastProbeAtMs = nowMs;
 
-    const current = textInputStateSync();
-    if (current && !tracker.baseline && nowMs - tracker.releasedAtMs <= 350) {
-      tracker.baseline = current;
-      tracker.lastObserved = current;
-      tracker.stableSinceMs = null;
-    }
-    if (current && tracker.baseline && current !== tracker.baseline) {
-      if (current !== tracker.lastObserved) {
+    const current = stateReader();
+    const comparableToBaseline = comparableTextInputStates(current, tracker.baseline);
+    const changedFromBaseline = comparableToBaseline
+      && !sameTextInputState(current, tracker.baseline)
+      && current.length > 0;
+    if (changedFromBaseline) {
+      if (!sameTextInputState(current, tracker.lastObserved)) {
         tracker.lastObserved = current;
         tracker.stableSinceMs = nowMs;
       } else if (Number.isFinite(tracker.stableSinceMs)
-          && nowMs - tracker.stableSinceMs >= (tracker.autoSubmit ? 750 : VOICE_TRANSCRIPTION_STABLE_MS)) {
-        completeVoiceTranscription(context, nowMs);
+          && nowMs - tracker.stableSinceMs >= (tracker.autoSubmit
+            ? VOICE_AUTO_SUBMIT_STABLE_MS
+            : VOICE_TRANSCRIPTION_STABLE_MS)) {
+        completionHandler(context, nowMs);
         continue;
       }
-    } else if (current) {
+    } else if (comparableToBaseline) {
       tracker.lastObserved = current;
       tracker.stableSinceMs = null;
     } else {
+      // A button or search field can become focused while Codex finalizes the
+      // transcript. Never treat a switch between focused and aggregate probes
+      // as text input; wait for the composer state to become comparable again.
       tracker.stableSinceMs = null;
     }
 
@@ -1400,6 +1513,9 @@ function beginVoiceHoldSync(context, options = {}) {
   voiceStateByContext.delete(context);
   const targetThreadId = options.targetThreadId ?? resolveVoiceTargetThreadId();
   if (targetThreadId) voiceTargetThreadByContext.set(context, targetThreadId);
+  // Start with the composer focused so both the baseline and the final
+  // transcript come from the same accessibility element.
+  runKeyBridgeSync("codex-focus-composer", null, { quiet: true });
   const baseline = textInputStateSync();
   voiceTranscriptionByContext.set(context, {
     baseline,
@@ -1451,6 +1567,7 @@ function endVoiceHoldSync(context, trackTranscription = true) {
     autoSubmit: false,
     targetThreadId: voiceTargetThreadByContext.get(context) ?? null
   };
+  if (!tracker.baseline) tracker.baseline = textInputStateSync();
   tracker.lastObserved = tracker.baseline;
   tracker.stableSinceMs = null;
   tracker.lastProbeAtMs = null;
@@ -2730,20 +2847,28 @@ function renderGlobalCompletionContexts(nowMs = Date.now()) {
   return false;
 }
 
-async function refreshUsage(feedbackContext) {
+async function refreshUsage(feedbackContext, options = {}) {
   if (feedbackContext) showFeedback(feedbackContext, "loading", "확인 중");
   if (!activeUsageRefresh) {
     activeUsageRefresh = (async () => {
       try {
-        const usage = await readUsage();
+        const reader = typeof options.reader === "function" ? options.reader : readUsage;
+        const usage = await reader();
         const remaining = remainingPercent(usage?.secondary?.usedPercent);
+        if (remaining === null) throw new Error("Codex weekly usage was not returned");
         usageState = { remaining, failed: false };
+        hasLoadedUsageState = true;
         renderUsageContexts();
         return true;
       } catch (error) {
-        usageState = { remaining: null, failed: true };
-        renderUsageContexts();
-        console.error(`Codex usage refresh failed: ${error?.message ?? "unknown error"}`);
+        // A transient OAuth/network miss must not replace a known percentage
+        // with an error card when the user changes pages.
+        if (!hasLoadedUsageState) {
+          usageState = { remaining: null, failed: true };
+          renderUsageContexts();
+        }
+        const preservedState = hasLoadedUsageState ? "; keeping the last good value" : "";
+        console.error(`Codex usage refresh failed${preservedState}: ${error?.message ?? "unknown error"}`);
         return false;
       } finally {
         activeUsageRefresh = null;
@@ -3082,6 +3207,10 @@ function registerPlugin() {
 
   socket.addEventListener("open", () => {
     send({ event: registerEvent, uuid: pluginUUID });
+    // CodexBar takes several seconds on a cold request. Prime the cache while
+    // the current Stream Deck page is rendering so the usage page can appear
+    // with a value immediately.
+    void refreshUsage();
   });
 
   socket.addEventListener("message", async (event) => {
@@ -3102,6 +3231,7 @@ function registerPlugin() {
 
     if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
       contexts.set(message.context, message.action);
+      if (!hasLoadedUsageState) void refreshUsage();
       // Completion monitoring must have a baseline even when the active page
       // contains only usage, media, or navigation actions.
       if (!hasLoadedThreadState) void refreshThreads();
@@ -3187,7 +3317,9 @@ function registerPlugin() {
   }, 3000);
 
   setInterval(() => {
-    if ([...contexts.values()].includes(ACTIONS.weekly)) void refreshUsage();
+    // Keep the cached value warm on every ThreadDeck page, not only after the
+    // usage key has appeared. This removes the multi-second page-switch wait.
+    if (contexts.size > 0) void refreshUsage();
   }, 60_000);
 
   setInterval(() => {
@@ -3586,6 +3718,184 @@ function verifyThreadSelectionPolicy() {
   if (!passed) process.exitCode = 1;
 }
 
+async function verifyUsageCachePolicy() {
+  const weeklyContext = "usage-cache-weekly";
+  socket = { readyState: WebSocket.OPEN, send() {} };
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  activeUsageRefresh = null;
+  usageState = { remaining: null, failed: false };
+  hasLoadedUsageState = false;
+
+  // Simulate the plugin starting on a different page: the background refresh
+  // must populate a value even though no usage key is currently visible.
+  contexts.set("usage-cache-other-page", ACTIONS.voice);
+  const prefetched = await refreshUsage(null, {
+    reader: async () => ({ secondary: { usedPercent: 37 } })
+  });
+  contexts.set(weeklyContext, ACTIONS.weekly);
+  renderUsageContexts();
+  const firstVisibleSvg = contextImages.get(weeklyContext) ?? "";
+  const instantOnAppear = prefetched
+    && hasLoadedUsageState
+    && usageState.remaining === 63
+    && firstVisibleSvg.includes(">63</text>");
+
+  const lastGoodSvg = firstVisibleSvg;
+  const originalConsoleError = console.error;
+  let preservedAfterFailure = false;
+  let initialFailureIsVisible = false;
+  try {
+    console.error = () => {};
+    const failedRefresh = await refreshUsage(null, {
+      reader: async () => { throw new Error("simulated usage outage"); }
+    });
+    preservedAfterFailure = failedRefresh === false
+      && hasLoadedUsageState
+      && usageState.remaining === 63
+      && !usageState.failed
+      && contextImages.get(weeklyContext) === lastGoodSvg;
+
+    activeUsageRefresh = null;
+    usageState = { remaining: null, failed: false };
+    hasLoadedUsageState = false;
+    contextImages.clear();
+    contextSentImages.clear();
+    const initialFailure = await refreshUsage(null, {
+      reader: async () => { throw new Error("simulated first usage outage"); }
+    });
+    initialFailureIsVisible = initialFailure === false
+      && !hasLoadedUsageState
+      && usageState.failed
+      && (contextImages.get(weeklyContext) ?? "").includes(">--</text>");
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  const passed = instantOnAppear && preservedAfterFailure && initialFailureIsVisible;
+  console.log(JSON.stringify({
+    passed,
+    prefetchedRemaining: instantOnAppear ? 63 : null,
+    instantOnAppear,
+    preservedAfterFailure,
+    initialFailureIsVisible
+  }));
+  if (!passed) process.exitCode = 1;
+  socket = null;
+}
+
+async function verifyVoiceSubmissionPolicy() {
+  const context = "voice-submit-context";
+  const targetThreadId = "00000000-0000-4000-8000-000000000020";
+  const baseline = parseTextInputState("focused-text-state", "29\taaaaaaaaaaaaaaaa");
+  const transcript = parseTextInputState("focused-text-state", "18\tbbbbbbbbbbbbbbbb");
+  const buttonFocusFallback = parseTextInputState(
+    "editable-text-state",
+    "7\t0\tcccccccccccccccc"
+  );
+  socket = { readyState: WebSocket.OPEN, send() {} };
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  voiceTranscriptionByContext.clear();
+  voiceStateByContext.clear();
+  voiceStateResetAtMs.clear();
+  voiceTargetThreadByContext.clear();
+  contexts.set(context, ACTIONS.thread1);
+
+  const tracker = {
+    baseline,
+    lastObserved: baseline,
+    stableSinceMs: null,
+    lastProbeAtMs: null,
+    releasedAtMs: 1_000,
+    autoSubmit: true,
+    targetThreadId
+  };
+  voiceTranscriptionByContext.set(context, tracker);
+  let completions = 0;
+  updateVoiceTranscriptionStates(1_200, {
+    stateReader: () => buttonFocusFallback,
+    completionHandler: () => { completions += 1; }
+  });
+  const ignoredFocusTypeChange = completions === 0 && tracker.stableSinceMs === null;
+  updateVoiceTranscriptionStates(1_400, {
+    stateReader: () => transcript,
+    completionHandler: () => { completions += 1; }
+  });
+  updateVoiceTranscriptionStates(2_200, {
+    stateReader: () => transcript,
+    completionHandler: () => { completions += 1; }
+  });
+  const detectedStableTranscript = completions === 1;
+  voiceTranscriptionByContext.clear();
+
+  voiceStateByContext.set(context, "submitting");
+  voiceTargetThreadByContext.set(context, targetThreadId);
+  const alternateEmptyComposer = parseTextInputState(
+    "focused-text-state",
+    "29\tdddddddddddddddd"
+  );
+  const rejectedUnchangedDraft = !(await waitForVoiceDraftReset(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript
+  }, {
+    stateReader: () => transcript,
+    sleep: async () => {},
+    delays: [0, 0, 0]
+  }));
+  const acceptedStableReset = await waitForVoiceDraftReset(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript
+  }, {
+    stateReader: () => alternateEmptyComposer,
+    sleep: async () => {},
+    delays: [0, 0, 0]
+  });
+  const commands = [];
+  let verificationAttempts = 0;
+  await submitCompletedVoiceTranscription(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript
+  }, {
+    openApp: async () => {},
+    sleep: async () => {},
+    bridge(command) {
+      commands.push(command);
+      return true;
+    },
+    waitForDraftReset: async () => {
+      verificationAttempts += 1;
+      return verificationAttempts >= 2;
+    },
+    scheduleRefresh: () => {}
+  });
+  const retriedUnconfirmedSubmit = commands.join(",")
+    === "codex-submit-composer,codex-focus-composer,send";
+  const successRequiresConfirmation = verificationAttempts === 2
+    && voiceStateByContext.get(context) === "sent";
+
+  const passed = Boolean(baseline && transcript && buttonFocusFallback)
+    && ignoredFocusTypeChange
+    && detectedStableTranscript
+    && rejectedUnchangedDraft
+    && acceptedStableReset
+    && retriedUnconfirmedSubmit
+    && successRequiresConfirmation;
+  console.log(JSON.stringify({
+    passed,
+    ignoredFocusTypeChange,
+    detectedStableTranscript,
+    rejectedUnchangedDraft,
+    acceptedStableReset,
+    retriedUnconfirmedSubmit,
+    successRequiresConfirmation
+  }));
+  if (!passed) process.exitCode = 1;
+  socket = null;
+}
+
 process.once("SIGTERM", () => {
   releaseVoiceKeysSync();
   process.exit(0);
@@ -3605,6 +3915,16 @@ if (completionContractMode) {
   });
 } else if (threadSelectionContractMode) {
   verifyThreadSelectionPolicy();
+} else if (usageCacheContractMode) {
+  verifyUsageCachePolicy().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
+} else if (voiceSubmitContractMode) {
+  verifyVoiceSubmissionPolicy().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 } else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
   if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
   else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");

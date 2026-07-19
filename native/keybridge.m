@@ -37,6 +37,8 @@ enum {
 };
 
 static bool stop_codex_composer_dictation_if_visible(void);
+static bool focus_codex_composer_if_visible(void);
+static bool submit_codex_composer_if_visible(void);
 static bool codex_audio_input_is_running(void);
 
 static CGEventRef create_key_event(
@@ -1011,18 +1013,7 @@ enum {
   THREAD_ATTR_COUNT
 };
 
-static bool click_element_center(AXUIElementRef element) {
-  CGPoint position = CGPointZero;
-  CGSize size = CGSizeZero;
-  if (!copy_element_position(element, &position)
-      || !copy_element_size(element, &size)
-      || size.width < 2
-      || size.height < 2) return false;
-
-  CGPoint click_position = {
-    .x = position.x + size.width / 2,
-    .y = position.y + size.height / 2
-  };
+static bool click_screen_point(CGPoint click_position) {
   CGEventRef current = CGEventCreate(NULL);
   CGPoint original_position = current != NULL
     ? CGEventGetLocation(current)
@@ -1056,12 +1047,28 @@ static bool click_element_center(AXUIElementRef element) {
   return true;
 }
 
+static bool click_element_center(AXUIElementRef element) {
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  if (!copy_element_position(element, &position)
+      || !copy_element_size(element, &size)
+      || size.width < 2
+      || size.height < 2) return false;
+
+  CGPoint click_position = {
+    .x = position.x + size.width / 2,
+    .y = position.y + size.height / 2
+  };
+  return click_screen_point(click_position);
+}
+
 #define CODEX_DICTATION_BUTTON_MAX 96
 
 typedef struct {
   AXUIElementRef element;
   CGPoint position;
   CGSize size;
+  bool enabled;
 } CodexDictationButton;
 
 typedef struct {
@@ -1074,6 +1081,7 @@ typedef struct {
 enum {
   DICTATION_ATTR_ROLE = 0,
   DICTATION_ATTR_HIDDEN,
+  DICTATION_ATTR_ENABLED,
   DICTATION_ATTR_POSITION,
   DICTATION_ATTR_SIZE,
   DICTATION_ATTR_CHILDREN,
@@ -1119,12 +1127,16 @@ static void collect_codex_dictation_buttons(
 
   CFTypeRef role = CFArrayGetValueAtIndex(values, DICTATION_ATTR_ROLE);
   CFTypeRef hidden = CFArrayGetValueAtIndex(values, DICTATION_ATTR_HIDDEN);
+  CFTypeRef enabled = CFArrayGetValueAtIndex(values, DICTATION_ATTR_ENABLED);
   bool is_button = role != NULL
     && CFGetTypeID(role) == CFStringGetTypeID()
     && CFEqual(role, kAXButtonRole);
   bool is_hidden = hidden != NULL
     && CFGetTypeID(hidden) == CFBooleanGetTypeID()
     && CFBooleanGetValue((CFBooleanRef)hidden);
+  bool is_enabled = enabled == NULL
+    || CFGetTypeID(enabled) != CFBooleanGetTypeID()
+    || CFBooleanGetValue((CFBooleanRef)enabled);
   CGPoint position = CGPointZero;
   CGSize size = CGSizeZero;
   bool has_geometry = copy_batched_point(values, DICTATION_ATTR_POSITION, &position)
@@ -1138,7 +1150,8 @@ static void collect_codex_dictation_buttons(
     state->buttons[state->button_count++] = (CodexDictationButton) {
       .element = (AXUIElementRef)CFRetain(element),
       .position = position,
-      .size = size
+      .size = size,
+      .enabled = is_enabled
     };
   }
 
@@ -1170,98 +1183,237 @@ static bool codex_is_frontmost(void) {
   }
 }
 
-static bool stop_codex_composer_dictation_if_visible(void) {
-  if (!codex_audio_input_is_running()) return false;
-  AXUIElementRef application = copy_codex_application();
-  if (application == NULL) return false;
-  AXUIElementSetMessagingTimeout(application, 0.5);
+typedef struct {
+  AXUIElementRef application;
+  AXUIElementRef window;
+  CFArrayRef attributes;
+  CodexDictationButtonState button_state;
+  CGPoint window_origin;
+  CGSize window_size;
+  unsigned left_index;
+  unsigned right_index;
+} CodexComposerControls;
+
+static bool find_codex_composer_button_pair(
+  CodexDictationButtonState *state,
+  CGPoint window_origin,
+  CGSize window_size,
+  unsigned *left_index_out,
+  unsigned *right_index_out
+) {
+  bool found = false;
+  double best_y = -1;
+  double best_x = -1;
+  double lower_region = window_origin.y + window_size.height * 0.60;
+  double right_region = window_origin.x + window_size.width * 0.45;
+  for (unsigned left_index = 0; left_index < state->button_count; left_index += 1) {
+    CodexDictationButton left = state->buttons[left_index];
+    if (left.position.y < lower_region || left.position.x < right_region) continue;
+    for (unsigned right_index = 0; right_index < state->button_count; right_index += 1) {
+      if (left_index == right_index) continue;
+      CodexDictationButton right = state->buttons[right_index];
+      double row_delta = left.position.y - right.position.y;
+      if (row_delta < 0) row_delta = -row_delta;
+      double gap = right.position.x - (left.position.x + left.size.width);
+      if (row_delta > 3 || gap < 4 || gap > 18) continue;
+      if (!found || left.position.y > best_y
+          || (left.position.y == best_y && right.position.x > best_x)) {
+        found = true;
+        *left_index_out = left_index;
+        *right_index_out = right_index;
+        best_y = left.position.y;
+        best_x = right.position.x;
+      }
+    }
+  }
+  return found;
+}
+
+static void release_codex_composer_controls(CodexComposerControls *controls) {
+  release_codex_dictation_buttons(&controls->button_state);
+  if (controls->attributes != NULL) CFRelease(controls->attributes);
+  if (controls->window != NULL) CFRelease(controls->window);
+  if (controls->application != NULL) CFRelease(controls->application);
+  memset(controls, 0, sizeof(*controls));
+}
+
+static bool copy_codex_composer_controls(CodexComposerControls *controls) {
+  memset(controls, 0, sizeof(*controls));
+  controls->application = copy_codex_application();
+  if (controls->application == NULL) return false;
+  AXUIElementSetMessagingTimeout(controls->application, 0.5);
 
   CFTypeRef window_value = NULL;
-  if (AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute, &window_value)
-        != kAXErrorSuccess
+  if (AXUIElementCopyAttributeValue(
+        controls->application,
+        kAXFocusedWindowAttribute,
+        &window_value
+      ) != kAXErrorSuccess
       || window_value == NULL
       || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
     if (window_value != NULL) CFRelease(window_value);
-    CFRelease(application);
+    release_codex_composer_controls(controls);
     return false;
   }
-  AXUIElementRef window = (AXUIElementRef)window_value;
-  CGPoint window_origin = CGPointZero;
-  CGSize window_size = CGSizeZero;
-  if (!copy_element_position(window, &window_origin)
-      || !copy_element_size(window, &window_size)) {
-    CFRelease(window_value);
-    CFRelease(application);
+  controls->window = (AXUIElementRef)window_value;
+  if (!copy_element_position(controls->window, &controls->window_origin)
+      || !copy_element_size(controls->window, &controls->window_size)) {
+    release_codex_composer_controls(controls);
     return false;
   }
 
   const void *attribute_values[DICTATION_ATTR_COUNT] = {
     kAXRoleAttribute,
     kAXHiddenAttribute,
+    kAXEnabledAttribute,
     kAXPositionAttribute,
     kAXSizeAttribute,
     kAXChildrenAttribute
   };
-  CFArrayRef attributes = CFArrayCreate(
+  controls->attributes = CFArrayCreate(
     kCFAllocatorDefault,
     attribute_values,
     DICTATION_ATTR_COUNT,
     &kCFTypeArrayCallBacks
   );
-  if (attributes == NULL) {
-    CFRelease(window_value);
-    CFRelease(application);
+  if (controls->attributes == NULL) {
+    release_codex_composer_controls(controls);
     return false;
   }
 
-  CodexDictationButtonState state = {
-    .attributes = attributes,
+  controls->button_state = (CodexDictationButtonState) {
+    .attributes = controls->attributes,
     .button_count = 0,
     .visited = 0
   };
-  collect_codex_dictation_buttons(window, 0, &state);
-
-  AXUIElementRef stop_button = NULL;
-  double best_y = -1;
-  double best_x = -1;
-  double lower_region = window_origin.y + window_size.height * 0.60;
-  double right_region = window_origin.x + window_size.width * 0.45;
-  for (unsigned left_index = 0; left_index < state.button_count; left_index += 1) {
-    CodexDictationButton left = state.buttons[left_index];
-    if (left.position.y < lower_region || left.position.x < right_region) continue;
-    for (unsigned right_index = 0; right_index < state.button_count; right_index += 1) {
-      if (left_index == right_index) continue;
-      CodexDictationButton right = state.buttons[right_index];
-      double row_delta = left.position.y - right.position.y;
-      if (row_delta < 0) row_delta = -row_delta;
-      double gap = right.position.x - (left.position.x + left.size.width);
-      if (row_delta > 3 || gap < 4 || gap > 18) continue;
-      if (left.position.y > best_y
-          || (left.position.y == best_y && right.position.x > best_x)) {
-        stop_button = left.element;
-        best_y = left.position.y;
-        best_x = right.position.x;
-      }
-    }
+  collect_codex_dictation_buttons(controls->window, 0, &controls->button_state);
+  if (!find_codex_composer_button_pair(
+        &controls->button_state,
+        controls->window_origin,
+        controls->window_size,
+        &controls->left_index,
+        &controls->right_index
+      )) {
+    release_codex_composer_controls(controls);
+    return false;
   }
+  return true;
+}
+
+static bool frontmost_focused_element_is_text_input(void) {
+  CFTypeRef focused_value = NULL;
+  if (copy_frontmost_focused_element(&focused_value) != kAXErrorSuccess
+      || focused_value == NULL) return false;
+  AXUIElementRef focused = (AXUIElementRef)focused_value;
+  CFTypeRef role_value = NULL;
+  AXUIElementCopyAttributeValue(focused, kAXRoleAttribute, &role_value);
+  Boolean settable = false;
+  AXUIElementIsAttributeSettable(focused, kAXValueAttribute, &settable);
+  CFTypeRef text_value = NULL;
+  AXError value_error = AXUIElementCopyAttributeValue(focused, kAXValueAttribute, &text_value);
+  bool is_text_input = role_is_text_input(role_value)
+    && settable
+    && value_error == kAXErrorSuccess
+    && text_value != NULL
+    && (CFGetTypeID(text_value) == CFStringGetTypeID()
+      || CFGetTypeID(text_value) == CFAttributedStringGetTypeID());
+  if (text_value != NULL) CFRelease(text_value);
+  if (role_value != NULL) CFRelease(role_value);
+  CFRelease(focused_value);
+  return is_text_input;
+}
+
+static CGPoint clamped_codex_composer_point(
+  CodexComposerControls *controls,
+  double x,
+  double y
+) {
+  double minimum_x = controls->window_origin.x + 20;
+  double maximum_x = controls->window_origin.x + controls->window_size.width - 20;
+  double minimum_y = controls->window_origin.y + controls->window_size.height * 0.55;
+  double maximum_y = controls->window_origin.y + controls->window_size.height - 20;
+  if (x < minimum_x) x = minimum_x;
+  if (x > maximum_x) x = maximum_x;
+  if (y < minimum_y) y = minimum_y;
+  if (y > maximum_y) y = maximum_y;
+  return (CGPoint) { .x = x, .y = y };
+}
+
+static bool focus_codex_composer_with_controls(CodexComposerControls *controls) {
+  if (!codex_is_frontmost()) return false;
+  CodexDictationButton left = controls->button_state.buttons[controls->left_index];
+  double center_y = left.position.y + left.size.height / 2;
+  const double offsets[][2] = {
+    { -120, -38 },
+    { -220, -38 },
+    { -120, -66 },
+    { -220, -66 },
+    { -220, 0 },
+    { -400, -38 }
+  };
+  for (unsigned index = 0; index < sizeof(offsets) / sizeof(offsets[0]); index += 1) {
+    CGPoint point = clamped_codex_composer_point(
+      controls,
+      left.position.x + offsets[index][0],
+      center_y + offsets[index][1]
+    );
+    if (click_screen_point(point) && frontmost_focused_element_is_text_input()) return true;
+  }
+  return false;
+}
+
+static bool focus_codex_composer_if_visible(void) {
+  if (!codex_is_frontmost()) return false;
+  CodexComposerControls controls;
+  if (!copy_codex_composer_controls(&controls)) return false;
+  bool focused = focus_codex_composer_with_controls(&controls);
+  release_codex_composer_controls(&controls);
+  return focused;
+}
+
+static bool submit_codex_composer_if_visible(void) {
+  if (!codex_is_frontmost() || codex_audio_input_is_running()) return false;
+  CodexComposerControls controls;
+  if (!copy_codex_composer_controls(&controls)) return false;
+  CodexDictationButton submit = controls.button_state.buttons[controls.right_index];
+  bool submitted = submit.enabled && click_element_center(submit.element);
+  if (submitted) {
+    // Put focus back in the composer so the caller can verify that the draft
+    // returned to its pre-dictation state instead of assuming a click sent it.
+    usleep(120000);
+    focus_codex_composer_with_controls(&controls);
+  }
+  release_codex_composer_controls(&controls);
+  return submitted;
+}
+
+static bool stop_codex_composer_dictation_if_visible(void) {
+  if (!codex_audio_input_is_running()) return false;
+  CodexComposerControls controls;
+  if (!copy_codex_composer_controls(&controls)) return false;
+  CodexDictationButton stop = controls.button_state.buttons[controls.left_index];
 
   bool stopped = false;
-  if (stop_button != NULL) {
+  if (stop.enabled) {
     // Chromium currently reports AXPress success without dispatching this
     // React button's pointer handler. Use a real click while Codex is frontmost;
     // if focus moved during the hold, AXPress remains the safe best effort and
     // can never land on another application's window.
     if (codex_is_frontmost()) {
-      stopped = click_element_center(stop_button);
+      stopped = click_element_center(stop.element);
+      if (stopped) {
+        // Clicking Stop focuses the button. Restore the composer immediately;
+        // otherwise the JS probe can mistake that focus change for transcript
+        // completion and Return will be delivered to the wrong control.
+        usleep(80000);
+        focus_codex_composer_with_controls(&controls);
+      }
     } else {
-      stopped = AXUIElementPerformAction(stop_button, kAXPressAction) == kAXErrorSuccess;
+      stopped = AXUIElementPerformAction(stop.element, kAXPressAction) == kAXErrorSuccess;
     }
   }
 
-  release_codex_dictation_buttons(&state);
-  CFRelease(attributes);
-  CFRelease(window_value);
-  CFRelease(application);
+  release_codex_composer_controls(&controls);
   return stopped;
 }
 
@@ -1691,6 +1843,12 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "codex-queue-state") == 0) return print_codex_queue_state();
   else if (strcmp(argv[1], "codex-stop-dictation") == 0) {
     return stop_codex_composer_dictation_if_visible() ? 0 : 1;
+  }
+  else if (strcmp(argv[1], "codex-focus-composer") == 0) {
+    return focus_codex_composer_if_visible() ? 0 : 1;
+  }
+  else if (strcmp(argv[1], "codex-submit-composer") == 0) {
+    return submit_codex_composer_if_visible() ? 0 : 1;
   }
   else if (strcmp(argv[1], "release") == 0) release_voice_keys();
   else return 64;
