@@ -23,6 +23,7 @@ It:
 - merges pinned and recent local SQLite tasks with only explicitly pinned cached remote summaries from Codex JSON state, deduplicating by conversation ID;
 - normalizes working, completed, queued, error, and idle states;
 - reconstructs remote starts from UUIDv7 turn IDs and freezes ends only from explicit lifecycle markers or confirmed live runtime transitions, never summary recency timestamps;
+- normalizes remote reasoning-summary verbs into conservative intermediate phases in a separate turn-scoped, monotonic activity cache without exposing the source text;
 - tracks the active Desktop session so closed temporary Side Chats do not reappear as ordinary tasks;
 - renders every ThreadDeck-owned 144 × 144 key as SVG;
 - animates active reasoning cues, queue-advance acknowledgements, and completion pulses;

@@ -117,6 +117,8 @@ const REMOTE_REASONING_PROBE_CACHE_MS = 5_000;
 const REMOTE_REASONING_TURN_TOLERANCE_MS = 5_000;
 const REMOTE_RUNTIME_TERMINAL_CONFIRM_MS = 1_200;
 const REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS = 10_000;
+const REMOTE_ACTIVITY_STALE_MS = 120_000;
+const REMOTE_REASONING_SUMMARY_MAX_LENGTH = 8_192;
 const REASONING_EFFORT_VALUES = new Set([
   "none",
   "minimal",
@@ -291,6 +293,7 @@ const remoteLifecycleCache = new Map();
 const remoteLifecycleLogOffsets = new Map();
 const remoteReasoningEffortByThreadId = new Map();
 const remoteRuntimeObservationByThreadId = new Map();
+const remoteActivityByThreadId = new Map();
 const queueStateByThreadId = new Map();
 let remoteReasoningProbe = { threadId: null, checkedAtMs: 0 };
 
@@ -2199,6 +2202,174 @@ function remoteTurnStatus(value) {
   return null;
 }
 
+const REMOTE_ACTIVITY_VERB_GROUPS = [
+  [/^(?:planning|designing|defining|formulating|outlining|proposing|prioritizing|scheduling|specifying|clarifying)$/, { kind: "think", label: "계획 중" }],
+  [/^(?:analyzing|assessing|evaluating|identifying|diagnosing|investigating|comparing|examining|tracing)$/, { kind: "think", label: "분석 중" }],
+  [/^(?:implementing|adding|updating|fixing|refactoring|inserting|appending|applying|replacing|patching|modifying|reordering)$/, { kind: "edit", label: "구현 중" }],
+  [/^(?:optimizing|improving|enhancing)$/, { kind: "edit", label: "개선 중" }],
+  [/^(?:adjusting|refining)$/, { kind: "edit", label: "조정 중" }],
+  [/^(?:testing|verifying|validating|checking|confirming|auditing|benchmarking)$/, { kind: "inspect", label: "검증 중" }],
+  [/^(?:searching|researching|browsing|locating)$/, { kind: "search", label: "검색 중" }],
+  [/^(?:inspecting|reviewing|exploring|reading|extracting)$/, { kind: "inspect", label: "확인 중" }],
+  [/^(?:running|executing|building|compiling|installing|deploying|packaging|training|simulating|staging)$/, { kind: "command", label: "실행 중" }],
+  [/^(?:summarizing|documenting|reporting|finalizing|preparing|drafting|explaining|completing)$/, { kind: "answer", label: "정리 중" }]
+];
+
+function classifyRemoteReasoningSummary(value) {
+  const cleaned = String(value ?? "")
+    .replace(/[*_`#]/g, "")
+    .replace(/^[-–—:;,.\s]+/, "")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (!cleaned) return { kind: "think", label: "생각 중" };
+  const verb = cleaned.toLowerCase().match(/^[a-z]+/)?.[0] ?? null;
+  const verbGroup = verb
+    ? REMOTE_ACTIVITY_VERB_GROUPS.find(([pattern]) => pattern.test(verb))
+    : null;
+  if (verbGroup) {
+    return { ...verbGroup[1] };
+  }
+  if (/(계획|설계|정의|구상|우선순위)/.test(cleaned)) return { kind: "think", label: "계획 중" };
+  if (/(분석|평가|진단|비교|원인 파악|조사)/.test(cleaned)) return { kind: "think", label: "분석 중" };
+  if (/(구현|수정|개선|추가|리팩터|적용)/.test(cleaned)) return { kind: "edit", label: "구현 중" };
+  if (/(검증|테스트|확인|감사|벤치마크)/.test(cleaned)) return { kind: "inspect", label: "검증 중" };
+  if (/(검색|자료 찾|리서치|탐색)/.test(cleaned)) return { kind: "search", label: "검색 중" };
+  if (/(검토|읽기|살펴|점검)/.test(cleaned)) return { kind: "inspect", label: "확인 중" };
+  if (/(실행|빌드|배포|설치|훈련|시뮬레이션)/.test(cleaned)) return { kind: "command", label: "실행 중" };
+  if (/(요약|정리|문서|보고|마무리)/.test(cleaned)) return { kind: "answer", label: "정리 중" };
+  return { kind: "think", label: "생각 중" };
+}
+
+function remoteReasoningActivityFromLogLine(line) {
+  if (!line.includes("Reasoning summary item completed")) return null;
+  const raw = line.match(/\ssummary=(.*?)(?=\ssummaryPartCount=\d+\b)/)?.[1] ?? null;
+  if (raw === null || raw.length > REMOTE_REASONING_SUMMARY_MAX_LENGTH) return null;
+  let summaries;
+  try {
+    summaries = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(summaries)) return null;
+  const latest = [...summaries].reverse().find((item) => typeof item === "string" && item.trim());
+  return latest ? classifyRemoteReasoningSummary(latest) : null;
+}
+
+function remoteActivityTurnsMatch(left, right) {
+  if (!left || !right) return false;
+  if (left.turnId && right.turnId) return left.turnId === right.turnId;
+  return Number.isFinite(left.turnStartedAtMs)
+    && Number.isFinite(right.turnStartedAtMs)
+    && Math.abs(left.turnStartedAtMs - right.turnStartedAtMs) <= REMOTE_REASONING_TURN_TOLERANCE_MS;
+}
+
+function applyRemoteActivityLogLine(line, activities = remoteActivityByThreadId) {
+  if (typeof line !== "string" || !line) return false;
+  const timestampMs = Date.parse(line.slice(0, 24));
+  if (!Number.isFinite(timestampMs)) return false;
+
+  const store = (threadId, next) => {
+    if (!UUID_PATTERN.test(threadId ?? "")) return false;
+    const previous = activities.get(threadId) ?? null;
+    if (previous && timestampMs <= previous.observedAtMs) return false;
+    const turnStartedAtMs = Number.isFinite(next.turnStartedAtMs)
+      ? next.turnStartedAtMs
+      : previous?.turnStartedAtMs ?? null;
+    if (previous
+        && Number.isFinite(previous.turnStartedAtMs)
+        && Number.isFinite(turnStartedAtMs)
+        && turnStartedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.turnStartedAtMs) {
+      return false;
+    }
+    const candidate = {
+      turnId: Object.hasOwn(next, "turnId") ? next.turnId : previous?.turnId ?? null,
+      turnStartedAtMs,
+      activity: Object.hasOwn(next, "activity") ? next.activity : previous?.activity ?? null,
+      observedAtMs: timestampMs,
+      terminal: Boolean(next.terminal),
+      authoritativeTurnStart: Boolean(next.authoritativeTurnStart),
+      supersededTurnId: next.authoritativeTurnStart
+        ? previous?.turnId ?? previous?.supersededTurnId ?? null
+        : null
+    };
+    if (previous?.authoritativeTurnStart
+        && previous.supersededTurnId
+        && candidate.turnId === previous.supersededTurnId) return false;
+    const sameTurn = remoteActivityTurnsMatch(previous, candidate);
+    const newerTurn = previous
+      && Number.isFinite(previous.turnStartedAtMs)
+      && Number.isFinite(candidate.turnStartedAtMs)
+      && candidate.turnStartedAtMs > previous.turnStartedAtMs;
+    if (previous?.turnId && candidate.turnId
+        && previous.turnId !== candidate.turnId && !newerTurn) return false;
+    if (previous?.terminal && sameTurn && !candidate.terminal && !next.authoritativeTurnStart) return false;
+    activities.set(threadId, candidate);
+    return true;
+  };
+
+  if (line.includes("Reasoning summary turn-start config resolved")) {
+    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    return store(threadId, {
+      turnId: null,
+      turnStartedAtMs: timestampMs,
+      activity: { kind: "request", label: "요청 분석" },
+      terminal: false,
+      authoritativeTurnStart: true
+    });
+  }
+
+  if (line.includes("Reasoning summary item completed")) {
+    const threadId = line.match(/threadId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnStartedAtMs = uuidV7TimestampMs(turnId);
+    const activity = remoteReasoningActivityFromLogLine(line);
+    if (!threadId || !turnId || !Number.isFinite(turnStartedAtMs) || !activity) return false;
+    return store(threadId, { turnId, turnStartedAtMs, activity, terminal: false });
+  }
+
+  if (line.includes("maybe_resume_success")) {
+    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnId = line.match(/latestTurnId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const status = remoteTurnStatus(line.match(/latestTurnStatus=([^ ]+)/i)?.[1]);
+    const turnStartedAtMs = uuidV7TimestampMs(turnId);
+    if (!threadId || !turnId || !Number.isFinite(turnStartedAtMs)
+        || !["completed", "stopped", "error"].includes(status)) return false;
+    return store(threadId, {
+      turnId,
+      turnStartedAtMs,
+      activity: null,
+      terminal: true
+    });
+  }
+
+  if (line.includes("[desktop-notifications] show turn-complete")) {
+    const threadId = line.match(/(?:conversationId|threadId)=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnStartedAtMs = uuidV7TimestampMs(turnId);
+    if (!threadId || !turnId || !Number.isFinite(turnStartedAtMs)) return false;
+    return store(threadId, { turnId, turnStartedAtMs, activity: null, terminal: true });
+  }
+  return false;
+}
+
+function remoteWorkingActivity(
+  thread,
+  lifecycle,
+  nowMs = Date.now(),
+  activities = remoteActivityByThreadId
+) {
+  if (!thread?.id || lifecycle?.status !== "working") return null;
+  const observed = activities.get(thread.id) ?? null;
+  if (!observed?.activity || observed.terminal) return null;
+  const ageMs = nowMs - observed.observedAtMs;
+  if (ageMs < 0 || ageMs > REMOTE_ACTIVITY_STALE_MS) return null;
+  const currentTurn = {
+    turnId: lifecycle.latestTurnId ?? null,
+    turnStartedAtMs: Number.isFinite(lifecycle.startedAtMs) ? lifecycle.startedAtMs : null
+  };
+  return remoteActivityTurnsMatch(observed, currentTurn) ? observed.activity : null;
+}
+
 function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
   if (typeof line !== "string" || !line) return false;
   const timestampMs = Date.parse(line.slice(0, 24));
@@ -2219,6 +2390,16 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
     const latestTurnId = Object.hasOwn(next, "latestTurnId")
       ? next.latestTurnId
       : previous?.latestTurnId ?? null;
+    if (previous?.pendingTurnStart
+        && previous.supersededTurnId
+        && latestTurnId === previous.supersededTurnId) return false;
+    if (previous?.latestTurnId && latestTurnId
+        && previous.latestTurnId !== latestTurnId
+        && Number.isFinite(previous.startedAtMs)
+        && Number.isFinite(nextStartedAtMs)
+        && nextStartedAtMs < previous.startedAtMs) {
+      return false;
+    }
     const turnChanged = Boolean(
       previous?.latestTurnId
       && latestTurnId
@@ -2237,6 +2418,10 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
       terminalObservedAtMs: Object.hasOwn(next, "terminalObservedAtMs")
         ? next.terminalObservedAtMs
         : turnChanged ? null : previous?.terminalObservedAtMs ?? null,
+      pendingTurnStart: Boolean(next.pendingTurnStart),
+      supersededTurnId: next.pendingTurnStart
+        ? previous?.latestTurnId ?? previous?.supersededTurnId ?? null
+        : null,
       observedAtMs: Math.max(timestampMs, previous?.observedAtMs ?? 0)
     });
     return true;
@@ -2268,7 +2453,8 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
       endedAtMs: null,
       latestTurnId: null,
       lastActivityAtMs: timestampMs,
-      terminalObservedAtMs: null
+      terminalObservedAtMs: null,
+      pendingTurnStart: true
     });
   }
 
@@ -2289,9 +2475,14 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
 
   if (line.includes("[desktop-notifications] show turn-complete")) {
     const threadId = line.match(/(?:conversationId|threadId)=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const startedAtMs = uuidV7TimestampMs(turnId);
+    if (!threadId || !turnId || !Number.isFinite(startedAtMs)) return false;
     return update(threadId, {
       status: "completed",
+      startedAtMs,
       endedAtMs: timestampMs,
+      latestTurnId: turnId,
       terminalObservedAtMs: timestampMs
     });
   }
@@ -2334,7 +2525,10 @@ async function refreshRemoteLifecyclesFromLogs(nowMs = Date.now()) {
       }
       const lines = buffer.toString("utf8").split(/\r?\n/);
       if (start > 0) lines.shift();
-      for (const line of lines) applyRemoteLifecycleLogLine(line);
+      for (const line of lines) {
+        applyRemoteLifecycleLogLine(line);
+        applyRemoteActivityLogLine(line);
+      }
       remoteLifecycleLogOffsets.set(filePath, stat.size);
     } catch {
       // Preserve the last parsed lifecycle while a Desktop log rotates.
@@ -2485,7 +2679,8 @@ function observeRemoteRuntimeEnd(
 function remoteStatusForThread(
   thread,
   nowMs = Date.now(),
-  runtimeObservations = remoteRuntimeObservationByThreadId
+  runtimeObservations = remoteRuntimeObservationByThreadId,
+  remoteActivities = remoteActivityByThreadId
 ) {
   const runtimeStatus = thread.threadRuntimeStatus ?? { type: "notLoaded" };
   const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
@@ -2493,6 +2688,8 @@ function remoteStatusForThread(
   const runtimeEnd = observeRemoteRuntimeEnd(thread, lifecycle, nowMs, runtimeObservations);
   const reasoningEffort = reasoningEffortForRemoteThread(thread, lifecycle);
   const serviceTier = typeof thread.serviceTier === "string" ? thread.serviceTier : "default";
+  const observedActivity = remoteWorkingActivity(thread, lifecycle, nowMs, remoteActivities)
+    ?? { kind: "command", label: "원격 작업" };
 
   if (runtimeStatus.type === "active") {
     const flags = Array.isArray(runtimeStatus.activeFlags) ? runtimeStatus.activeFlags : [];
@@ -2508,7 +2705,7 @@ function remoteStatusForThread(
         ? { kind: "request", label: "원격 승인 대기" }
         : waitingOnUserInput
           ? { kind: "request", label: "원격 입력 대기" }
-          : { kind: "command", label: "원격 작업" }
+          : observedActivity
     };
   }
   if (runtimeStatus.type === "systemError") {
@@ -2541,7 +2738,7 @@ function remoteStatusForThread(
       endedAtMs: null,
       reasoningEffort,
       serviceTier,
-      activity: { kind: "command", label: "원격 작업" }
+      activity: observedActivity
     };
   }
   if (Number.isFinite(startedAtMs) && completionEvidence) {
@@ -4199,6 +4396,7 @@ function verifyRemoteLifecyclePolicy() {
   remoteLifecycleCache.clear();
   remoteReasoningEffortByThreadId.clear();
   remoteRuntimeObservationByThreadId.clear();
+  remoteActivityByThreadId.clear();
   remoteLifecycleCache.set(threadId, parsed);
   remoteReasoningEffortByThreadId.set(threadId, {
     effort: "high",
@@ -4206,6 +4404,18 @@ function verifyRemoteLifecyclePolicy() {
     turnStartedAtMs: startedAtMs
   });
 
+  const remoteActivities = new Map();
+  const lifecycleBeforeActivity = JSON.stringify(remoteLifecycleCache.get(threadId));
+  applyRemoteActivityLogLine(
+    `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${threadId}`,
+    remoteActivities
+  );
+  applyRemoteActivityLogLine(
+    `${new Date(reasoningObservedMs).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=["**Planning test implementation**"] summaryPartCount=1 threadId=${threadId} turnId=${turnId}`,
+    remoteActivities
+  );
+  const activityUpdatesDoNotMutateLifecycle = JSON.stringify(remoteLifecycleCache.get(threadId))
+    === lifecycleBeforeActivity;
   const runtimeObservations = new Map();
   const active = remoteStatusForThread({
     id: threadId,
@@ -4214,10 +4424,220 @@ function verifyRemoteLifecyclePolicy() {
     threadRuntimeStatus: { type: "active", activeFlags: [] },
     reasoningEffort: null,
     serviceTier: "default"
-  }, startedAtMs + 10_000, runtimeObservations);
+  }, startedAtMs + 10_000, runtimeObservations, remoteActivities);
+  const approvalOverridesActivity = remoteStatusForThread({
+    id: threadId,
+    remote: true,
+    threadRuntimeStatus: { type: "active", activeFlags: ["waitingOnApproval"] }
+  }, startedAtMs + 10_000, new Map(), remoteActivities).activity.label === "원격 승인 대기";
+  const inputOverridesActivity = remoteStatusForThread({
+    id: threadId,
+    remote: true,
+    threadRuntimeStatus: { type: "active", activeFlags: ["waitingOnUserInput"] }
+  }, startedAtMs + 10_000, new Map(), remoteActivities).activity.label === "원격 입력 대기";
+  const errorOverridesActivity = remoteStatusForThread({
+    id: threadId,
+    remote: true,
+    threadRuntimeStatus: { type: "systemError" }
+  }, startedAtMs + 10_000, new Map(), remoteActivities).activity.label === "원격 오류";
+
+  const activityThreadId = "019f0000-0000-7000-8000-00000000000a";
+  const activityStates = new Map();
+  const activityLine = (timestamp, activityTurnId, summaries) => (
+    `${new Date(timestamp).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=${JSON.stringify(summaries)} summaryPartCount=${summaries.length} threadId=${activityThreadId} turnId=${activityTurnId}`
+  );
+  applyRemoteActivityLogLine(
+    `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${activityThreadId}`,
+    activityStates
+  );
+  const planningLine = activityLine(reasoningObservedMs, turnId, ["**Planning final validation tests**"]);
+  const planningMapped = applyRemoteActivityLogLine(planningLine, activityStates)
+    && activityStates.get(activityThreadId)?.activity?.label === "계획 중";
+  const cumulativeLine = activityLine(reasoningObservedMs + 1_000, turnId, [
+    "**Planning final validation tests**",
+    "**Implementing compact activity cache**"
+  ]);
+  const cumulativeLatestMapped = applyRemoteActivityLogLine(cumulativeLine, activityStates)
+    && activityStates.get(activityThreadId)?.activity?.label === "구현 중";
+  const activityBeforeEmpty = JSON.stringify(activityStates.get(activityThreadId));
+  const emptySummaryIgnored = !applyRemoteActivityLogLine(
+    activityLine(reasoningObservedMs + 2_000, turnId, []),
+    activityStates
+  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityBeforeEmpty;
+  const activityAfterEmpty = JSON.stringify(activityStates.get(activityThreadId));
+  const malformedSummaryIgnored = !applyRemoteActivityLogLine(
+    `${new Date(reasoningObservedMs + 3_000).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=[broken summaryPartCount=1 threadId=${activityThreadId} turnId=${turnId}`,
+    activityStates
+  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterEmpty;
+  const olderActivityIgnored = !applyRemoteActivityLogLine(
+    activityLine(reasoningObservedMs + 500, turnId, ["**Searching older evidence**"]),
+    activityStates
+  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterEmpty;
+  const verifyLine = activityLine(reasoningObservedMs + 4_000, turnId, ["**Verifying release artifacts**"]);
+  const verificationMapped = applyRemoteActivityLogLine(verifyLine, activityStates)
+    && activityStates.get(activityThreadId)?.activity?.label === "검증 중";
+  const activityAfterVerification = JSON.stringify(activityStates.get(activityThreadId));
+  const duplicateOverlapIgnored = !applyRemoteActivityLogLine(verifyLine, activityStates)
+    && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterVerification;
+  const oversizedSummaryIgnored = !applyRemoteActivityLogLine(
+    activityLine(reasoningObservedMs + 5_000, turnId, ["x".repeat(REMOTE_REASONING_SUMMARY_MAX_LENGTH + 1)]),
+    activityStates
+  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterVerification;
+  const partAddedIgnored = !applyRemoteActivityLogLine(
+    `${new Date(reasoningObservedMs + 6_000).toISOString()} info [electron-message-handler] Reasoning summary part added payload={} threadId=${activityThreadId} turnId=${turnId}`,
+    activityStates
+  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterVerification;
+  const activityLifecycle = {
+    status: "working",
+    startedAtMs,
+    latestTurnId: turnId
+  };
+  const freshActivityShown = remoteWorkingActivity(
+    { id: activityThreadId },
+    activityLifecycle,
+    reasoningObservedMs + 4_500,
+    activityStates
+  )?.label === "검증 중";
+  const staleActivityHidden = remoteWorkingActivity(
+    { id: activityThreadId },
+    activityLifecycle,
+    reasoningObservedMs + 4_000 + REMOTE_ACTIVITY_STALE_MS + 1,
+    activityStates
+  ) === null;
+  const classifierUsesLeadingVerb = classifyRemoteReasoningSummary("Planning final validation tests").label === "계획 중"
+    && classifyRemoteReasoningSummary("Searching current documentation").label === "검색 중"
+    && classifyRemoteReasoningSummary("Summarizing final results").label === "정리 중";
+
+  const nextActivityTurnId = "019f780e-4bbf-7000-8000-00000000000b";
+  const nextActivityStartMs = uuidV7TimestampMs(nextActivityTurnId);
+  applyRemoteActivityLogLine(
+    `${new Date(nextActivityStartMs - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${activityThreadId}`,
+    activityStates
+  );
+  const newTurnStartClearsActivity = activityStates.get(activityThreadId)?.turnId === null
+    && activityStates.get(activityThreadId)?.activity?.label === "요청 분석";
+  const priorTurnActivityRejected = !applyRemoteActivityLogLine(
+    activityLine(nextActivityStartMs + 1_000, turnId, ["**Implementing stale prior turn**"]),
+    activityStates
+  ) && activityStates.get(activityThreadId)?.activity?.label === "요청 분석";
+  applyRemoteActivityLogLine(
+    activityLine(nextActivityStartMs + 2_000, nextActivityTurnId, ["**Analyzing current turn**"]),
+    activityStates
+  );
+  applyRemoteActivityLogLine(
+    `${new Date(nextActivityStartMs + 3_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${activityThreadId} latestTurnId=${nextActivityTurnId} latestTurnStatus=completed`,
+    activityStates
+  );
+  const lateTerminalActivityRejected = !applyRemoteActivityLogLine(
+    activityLine(nextActivityStartMs + 4_000, nextActivityTurnId, ["**Implementing after completion**"]),
+    activityStates
+  ) && activityStates.get(activityThreadId)?.terminal === true
+    && activityStates.get(activityThreadId)?.activity === null;
+
+  const quickThreadId = "019f0000-0000-7000-8000-00000000000e";
+  const quickTurnA = "019f77d5-d319-7000-8000-00000000000c";
+  const quickTurnB = "019f77d5-dae9-7000-8000-00000000000d";
+  const quickStartA = uuidV7TimestampMs(quickTurnA);
+  const quickStartB = uuidV7TimestampMs(quickTurnB);
+  const quickStates = new Map();
+  const quickActivityLine = (timestamp, quickTurnId, summary) => (
+    `${new Date(timestamp).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=${JSON.stringify([summary])} summaryPartCount=1 threadId=${quickThreadId} turnId=${quickTurnId}`
+  );
+  applyRemoteActivityLogLine(
+    `${new Date(quickStartA - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${quickThreadId}`,
+    quickStates
+  );
+  applyRemoteActivityLogLine(
+    quickActivityLine(quickStartA + 100, quickTurnA, "**Analyzing first turn**"),
+    quickStates
+  );
+  applyRemoteActivityLogLine(
+    `${new Date(quickStartA + 1_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${quickThreadId} latestTurnId=${quickTurnA} latestTurnStatus=completed`,
+    quickStates
+  );
+  applyRemoteActivityLogLine(
+    `${new Date(quickStartB - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${quickThreadId}`,
+    quickStates
+  );
+  const pendingQuickState = JSON.stringify(quickStates.get(quickThreadId));
+  const delayedPriorCompletionBeforeActivityIgnored = !applyRemoteActivityLogLine(
+    `${new Date(quickStartB - 100).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
+    quickStates
+  ) && JSON.stringify(quickStates.get(quickThreadId)) === pendingQuickState;
+  applyRemoteActivityLogLine(
+    quickActivityLine(quickStartB + 100, quickTurnB, "**Implementing quick retry**"),
+    quickStates
+  );
+  const quickRetryTurnRecovered = quickStates.get(quickThreadId)?.turnId === quickTurnB
+    && quickStates.get(quickThreadId)?.activity?.label === "구현 중"
+    && !quickStates.get(quickThreadId)?.terminal;
+  const quickStateBeforeDelayedCompletion = JSON.stringify(quickStates.get(quickThreadId));
+  const delayedPriorActivityCompletionIgnored = !applyRemoteActivityLogLine(
+    `${new Date(quickStartB + 500).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
+    quickStates
+  ) && JSON.stringify(quickStates.get(quickThreadId)) === quickStateBeforeDelayedCompletion;
+
+  const coldTerminalThreadId = "019f0000-0000-7000-8000-00000000000f";
+  const coldTerminalStates = new Map();
+  applyRemoteActivityLogLine(
+    `${new Date(quickStartA + 1_000).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${coldTerminalThreadId} turnId=${quickTurnA}`,
+    coldTerminalStates
+  );
+  const coldTerminalLine = `${new Date(quickStartA + 1_500).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=["**Implementing late activity**"] summaryPartCount=1 threadId=${coldTerminalThreadId} turnId=${quickTurnA}`;
+  const coldTerminalBlocksLateActivity = !applyRemoteActivityLogLine(coldTerminalLine, coldTerminalStates)
+    && coldTerminalStates.get(coldTerminalThreadId)?.terminal === true;
+
+  const quickLifecycles = new Map();
+  applyRemoteLifecycleLogLine(
+    `${new Date(quickStartA + 1_000).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
+    quickLifecycles
+  );
+  applyRemoteLifecycleLogLine(
+    `${new Date(quickStartB - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${quickThreadId}`,
+    quickLifecycles
+  );
+  const pendingQuickLifecycle = JSON.stringify(quickLifecycles.get(quickThreadId));
+  const delayedPriorCompletionBeforeLifecycleActivityIgnored = !applyRemoteLifecycleLogLine(
+    `${new Date(quickStartB - 100).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
+    quickLifecycles
+  ) && JSON.stringify(quickLifecycles.get(quickThreadId)) === pendingQuickLifecycle;
+  applyRemoteLifecycleLogLine(
+    `${new Date(quickStartB + 100).toISOString()} info [electron-message-handler] Reasoning summary item threadId=${quickThreadId} turnId=${quickTurnB}`,
+    quickLifecycles
+  );
+  const quickLifecycleRolloverRecovered = quickLifecycles.get(quickThreadId)?.status === "working"
+    && quickLifecycles.get(quickThreadId)?.latestTurnId === quickTurnB
+    && quickLifecycles.get(quickThreadId)?.endedAtMs === null;
+  const quickLifecycleBeforeDelayedCompletion = JSON.stringify(quickLifecycles.get(quickThreadId));
+  const delayedPriorLifecycleCompletionIgnored = !applyRemoteLifecycleLogLine(
+    `${new Date(quickStartB + 500).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
+    quickLifecycles
+  ) && JSON.stringify(quickLifecycles.get(quickThreadId)) === quickLifecycleBeforeDelayedCompletion;
+  const remoteActivityPolicyRecovered = planningMapped
+    && cumulativeLatestMapped
+    && emptySummaryIgnored
+    && malformedSummaryIgnored
+    && olderActivityIgnored
+    && verificationMapped
+    && duplicateOverlapIgnored
+    && oversizedSummaryIgnored
+    && partAddedIgnored
+    && freshActivityShown
+    && staleActivityHidden
+    && classifierUsesLeadingVerb
+    && newTurnStartClearsActivity
+    && priorTurnActivityRejected
+    && lateTerminalActivityRejected
+    && delayedPriorCompletionBeforeActivityIgnored
+    && delayedPriorCompletionBeforeLifecycleActivityIgnored
+    && quickRetryTurnRecovered
+    && delayedPriorActivityCompletionIgnored
+    && coldTerminalBlocksLateActivity
+    && quickLifecycleRolloverRecovered
+    && delayedPriorLifecycleCompletionIgnored;
 
   applyRemoteLifecycleLogLine(
-    `${new Date(endedAtMs).toISOString()} info [desktop-notifications] show turn-complete threadId=${threadId}`,
+    `${new Date(endedAtMs).toISOString()} info [desktop-notifications] show turn-complete threadId=${threadId} turnId=${turnId}`,
     remoteLifecycleCache
   );
   const completed = remoteStatusForThread({
@@ -4435,6 +4855,12 @@ function verifyRemoteLifecyclePolicy() {
     && active.status === "working"
     && active.startedAtMs === startedAtMs
     && active.reasoningEffort === "high"
+    && active.activity.label === "계획 중"
+    && activityUpdatesDoNotMutateLifecycle
+    && approvalOverridesActivity
+    && inputOverridesActivity
+    && errorOverridesActivity
+    && remoteActivityPolicyRecovered
     && completed.status === "completed"
     && completed.endedAtMs === endedAtMs
     && timingLabel(completed, endedAtMs) === "09:22"
@@ -4456,6 +4882,16 @@ function verifyRemoteLifecyclePolicy() {
     passed,
     uuidStartRecovered: parsed?.startedAtMs === startedAtMs,
     activeTimingRecovered: active.startedAtMs === startedAtMs,
+    remoteActivity: active.activity.label,
+    remoteActivityPolicyRecovered,
+    activityTimingIndependent: activityUpdatesDoNotMutateLifecycle,
+    activityPrecedenceRecovered: approvalOverridesActivity && inputOverridesActivity && errorOverridesActivity,
+    quickRetryActivityRecovered: quickRetryTurnRecovered && quickLifecycleRolloverRecovered,
+    delayedCompletionIsolation: delayedPriorCompletionBeforeActivityIgnored
+      && delayedPriorCompletionBeforeLifecycleActivityIgnored
+      && delayedPriorActivityCompletionIgnored
+      && coldTerminalBlocksLateActivity
+      && delayedPriorLifecycleCompletionIgnored,
     completedDuration: timingLabel(completed, endedAtMs),
     misleadingSummaryIgnored: completed.endedAtMs !== misleadingSummaryUpdatedAtMs,
     runtimeTransitionRecovered,
@@ -4473,6 +4909,7 @@ function verifyRemoteLifecyclePolicy() {
   remoteLifecycleCache.clear();
   remoteReasoningEffortByThreadId.clear();
   remoteRuntimeObservationByThreadId.clear();
+  remoteActivityByThreadId.clear();
   if (!passed) process.exitCode = 1;
 }
 
