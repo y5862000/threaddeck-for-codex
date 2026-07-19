@@ -1,9 +1,11 @@
 #include <ApplicationServices/ApplicationServices.h>
 #include <AppKit/AppKit.h>
 #include <CoreAudio/CoreAudio.h>
+#include <dispatch/dispatch.h>
 #include <IOKit/hidsystem/IOLLEvent.h>
 #include <IOKit/hidsystem/ev_keymap.h>
 #include <ctype.h>
+#include <dlfcn.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -480,11 +482,95 @@ static bool supported_media_output_is_running(void) {
   return active;
 }
 
+typedef enum {
+  SYSTEM_MEDIA_PLAYBACK_UNKNOWN = -1,
+  SYSTEM_MEDIA_PLAYBACK_PAUSED = 0,
+  SYSTEM_MEDIA_PLAYBACK_PLAYING = 1
+} SystemMediaPlaybackState;
+
+typedef void (*MediaRemoteIsPlayingFunction)(
+  dispatch_queue_t queue,
+  void (^completion)(Boolean is_playing)
+);
+
+static MediaRemoteIsPlayingFunction media_remote_is_playing_function(void) {
+  static MediaRemoteIsPlayingFunction function = NULL;
+  static dispatch_once_t once_token;
+  dispatch_once(&once_token, ^{
+    // MediaRemote is intentionally loaded at runtime: it is present in the
+    // macOS shared cache but has no public SDK import library. If Apple moves
+    // or removes the symbol, voice input must fail closed and leave playback
+    // untouched instead of falling back to a blind play/pause toggle.
+    void *handle = dlopen(
+      "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+      RTLD_LAZY | RTLD_LOCAL
+    );
+    if (handle == NULL) return;
+    void *symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying");
+    if (symbol == NULL) return;
+    memcpy(&function, &symbol, sizeof(function));
+  });
+  return function;
+}
+
+static SystemMediaPlaybackState system_media_playback_state(void) {
+  MediaRemoteIsPlayingFunction function = media_remote_is_playing_function();
+  if (function == NULL) return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+
+  __block SystemMediaPlaybackState state = SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+  dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+  function(
+    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+    ^(Boolean is_playing) {
+      state = is_playing
+        ? SYSTEM_MEDIA_PLAYBACK_PLAYING
+        : SYSTEM_MEDIA_PLAYBACK_PAUSED;
+      dispatch_semaphore_signal(completed);
+    }
+  );
+  long timed_out = dispatch_semaphore_wait(
+    completed,
+    dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC)
+  );
+  return timed_out == 0 ? state : SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+}
+
+static bool should_pause_media(
+  bool supported_output_running,
+  SystemMediaPlaybackState playback_state
+) {
+  return supported_output_running
+    && playback_state == SYSTEM_MEDIA_PLAYBACK_PLAYING;
+}
+
+static int print_system_media_playback_state(void) {
+  bool supported_output_running = supported_media_output_is_running();
+  SystemMediaPlaybackState playback_state = system_media_playback_state();
+  const char *state = playback_state == SYSTEM_MEDIA_PLAYBACK_PLAYING
+    ? "playing"
+    : playback_state == SYSTEM_MEDIA_PLAYBACK_PAUSED
+      ? "paused"
+      : "unknown";
+  printf(
+    "state=%s supported_output=%d\n",
+    state,
+    supported_output_running ? 1 : 0
+  );
+  return playback_state == SYSTEM_MEDIA_PLAYBACK_UNKNOWN ? 2 : 0;
+}
+
 static int pause_media_if_playing(void) {
-  if (!supported_media_output_is_running()) return 2;
+  bool supported_output_running = supported_media_output_is_running();
+  if (!supported_output_running) return 2;
+  SystemMediaPlaybackState playback_state = system_media_playback_state();
+  if (!should_pause_media(supported_output_running, playback_state)) {
+    return playback_state == SYSTEM_MEDIA_PLAYBACK_UNKNOWN ? 3 : 2;
+  }
   // Use the normal system media command instead of freezing a process with
   // SIGSTOP. Players can drain their audio buffer cleanly, avoiding a click,
   // and the matching resume command remains independent of screen layout.
+  // Crucially, never treat a merely alive CoreAudio process as proof of
+  // playback: a blind toggle would start media that was already paused.
   tap_media_key(MEDIA_PLAY_PAUSE);
   return 0;
 }
@@ -494,14 +580,32 @@ static int media_bundle_selftest(void) {
   bool helper = pausable_media_bundle(CFSTR("com.google.Chrome.helper"));
   bool rejects_codex = !pausable_media_bundle(CFSTR("com.openai.codex"));
   bool rejects_unknown = !pausable_media_bundle(CFSTR("example.unrelated.audio"));
+  bool playing_pauses = should_pause_media(true, SYSTEM_MEDIA_PLAYBACK_PLAYING);
+  bool paused_stays_paused = !should_pause_media(true, SYSTEM_MEDIA_PLAYBACK_PAUSED);
+  bool unknown_fails_closed = !should_pause_media(true, SYSTEM_MEDIA_PLAYBACK_UNKNOWN);
+  bool unsupported_stays_untouched = !should_pause_media(false, SYSTEM_MEDIA_PLAYBACK_PLAYING);
   printf(
-    "direct=%d helper=%d codex_rejected=%d unknown_rejected=%d\n",
+    "direct=%d helper=%d codex_rejected=%d unknown_rejected=%d "
+    "playing_pauses=%d paused_safe=%d unknown_safe=%d unsupported_safe=%d\n",
     direct ? 1 : 0,
     helper ? 1 : 0,
     rejects_codex ? 1 : 0,
-    rejects_unknown ? 1 : 0
+    rejects_unknown ? 1 : 0,
+    playing_pauses ? 1 : 0,
+    paused_stays_paused ? 1 : 0,
+    unknown_fails_closed ? 1 : 0,
+    unsupported_stays_untouched ? 1 : 0
   );
-  return direct && helper && rejects_codex && rejects_unknown ? 0 : 1;
+  return direct
+    && helper
+    && rejects_codex
+    && rejects_unknown
+    && playing_pauses
+    && paused_stays_paused
+    && unknown_fails_closed
+    && unsupported_stays_untouched
+    ? 0
+    : 1;
 }
 
 static void print_running_audio_processes(AudioObjectPropertySelector running_selector) {
@@ -3192,8 +3296,19 @@ static void collect_codex_fast_mode_controls(
     &boolean_value
   );
 
+  CodexFastModeValue semantic_value = codex_fast_semantic_value(signals);
+  CFTypeRef title_value = CFArrayGetValueAtIndex(values, FAST_ATTR_TITLE);
+  bool has_option_title = title_value != NULL
+    && CFGetTypeID(title_value) == CFStringGetTypeID()
+    && CFStringGetLength((CFStringRef)title_value) > 0;
+  bool descriptive_speed_option = scan->allow_popup_options
+    && is_menu_item
+    && has_option_title
+    && signals.speed_context
+    && semantic_value != CODEX_FAST_MODE_UNKNOWN
+    && (!has_expanded || !expanded);
   bool is_option = (is_radio || is_menu_item || (scan->allow_popup_options && is_button))
-    && (signals.exact_fast || signals.exact_standard);
+    && (signals.exact_fast || signals.exact_standard || descriptive_speed_option);
   bool in_control_region = has_geometry && codex_fast_control_geometry_is_plausible(
     position,
     size,
@@ -3231,7 +3346,9 @@ static void collect_codex_fast_mode_controls(
     scan->available = true;
     CodexFastModeValue option = signals.exact_fast
       ? CODEX_FAST_MODE_ON
-      : CODEX_FAST_MODE_OFF;
+      : signals.exact_standard
+        ? CODEX_FAST_MODE_OFF
+        : semantic_value;
     if (has_selected && selected) consider_codex_fast_value(scan, option, 360);
     if (supports_press && (scan->allow_popup_options || in_control_region)) {
       consider_codex_fast_option(scan, element, option);
@@ -3255,7 +3372,7 @@ static void collect_codex_fast_mode_controls(
   // generic AXPopUpButton as the speed selector unless its own fixed metadata
   // names Speed/Fast/Standard.
   bool popup_control_region = scan->allow_popup_options && plausible_option;
-  bool selector = (in_control_region || popup_control_region) && (
+  bool selector = !is_option && (in_control_region || popup_control_region) && (
     (is_popup && (signals.exact_speed || signals.speed_context
       || signals.fast_context || signals.exact_fast || signals.exact_standard))
     || ((is_button || is_radio || (popup_control_region && is_menu_item))
@@ -3269,7 +3386,6 @@ static void collect_codex_fast_mode_controls(
     && (is_button || is_checkbox || is_radio || compact_popup_toggle)
     && (signals.fast_context || signals.exact_fast) && !selector && !is_option;
   if (compact_popup_toggle) direct = !selector && !is_option;
-  CodexFastModeValue semantic_value = codex_fast_semantic_value(signals);
   if (selector) {
     scan->available = true;
     if (semantic_value != CODEX_FAST_MODE_UNKNOWN) {
@@ -3496,6 +3612,11 @@ static const char *codex_fast_mode_value_name(CodexFastModeValue value) {
 
 static bool perform_codex_accessibility_press(AXUIElementRef element);
 
+static bool perform_codex_accessibility_show_menu(AXUIElementRef element) {
+  return element != NULL && codex_is_frontmost()
+    && AXUIElementPerformAction(element, kAXShowMenuAction) == kAXErrorSuccess;
+}
+
 static bool codex_intelligence_trigger_expanded(
   AXUIElementRef trigger,
   bool *expanded_out
@@ -3514,7 +3635,10 @@ static void close_codex_intelligence_popover_if_opened(AXUIElementRef trigger) {
   if (trigger == NULL || !codex_is_frontmost()) return;
   bool expanded = false;
   if (codex_intelligence_trigger_expanded(trigger, &expanded)) {
-    if (expanded) perform_codex_accessibility_press(trigger);
+    if (expanded) {
+      tap_key(KEY_ESCAPE, 0);
+      usleep(30000);
+    }
     return;
   }
 
@@ -3527,7 +3651,10 @@ static void close_codex_intelligence_popover_if_opened(AXUIElementRef trigger) {
     && scan.control != NULL
     && scan.control_count == 1;
   release_codex_fast_mode_scan(&scan);
-  if (popup_visible) perform_codex_accessibility_press(trigger);
+  if (popup_visible) {
+    tap_key(KEY_ESCAPE, 0);
+    usleep(30000);
+  }
 }
 
 static bool copy_codex_fast_mode_scan_with_intelligence_fallback(
@@ -3553,7 +3680,10 @@ static bool copy_codex_fast_mode_scan_with_intelligence_fallback(
     expanded_known = codex_intelligence_trigger_expanded(trigger, &expanded);
   }
   bool opened_here = !(expanded_known && expanded);
-  if (opened_here && !perform_codex_accessibility_press(trigger)) {
+  if (opened_here
+      && !activate_accessibility_element_with_return(trigger)
+      && !perform_codex_accessibility_show_menu(trigger)
+      && !perform_codex_accessibility_press(trigger)) {
     CFRelease(trigger);
     *scan = shallow;
     return true;
@@ -3718,6 +3848,134 @@ static AXUIElementRef wait_for_codex_fast_option(
   return NULL;
 }
 
+static bool perform_codex_fast_action_for_scan(
+  CodexFastModeScan *scan,
+  CodexFastModeValue requested,
+  CodexFastAction action
+) {
+  if (scan == NULL) return false;
+  if (action == CODEX_FAST_ACTION_PRESS_DIRECT) {
+    return scan->control_count == 1
+      && (activate_accessibility_element_with_return(scan->control)
+        || perform_codex_accessibility_press(scan->control));
+  }
+  if (action != CODEX_FAST_ACTION_SELECT_OPTION) return false;
+
+  AXUIElementRef option = requested == CODEX_FAST_MODE_ON
+    ? scan->on_option
+    : scan->off_option;
+  unsigned option_count = requested == CODEX_FAST_MODE_ON
+    ? scan->on_option_count
+    : scan->off_option_count;
+  if (option != NULL && option_count == 1) {
+    return activate_accessibility_element_with_return(option)
+      || perform_codex_accessibility_press(option);
+  }
+  if (scan->control_count != 1
+      || scan->control_kind != CODEX_FAST_CONTROL_SELECTOR
+      || (!activate_accessibility_element_with_return(scan->control)
+        && !perform_codex_accessibility_press(scan->control))) return false;
+
+  AXUIElementRef requested_option = wait_for_codex_fast_option(requested, 0.7);
+  bool acted = requested_option != NULL
+    && (activate_accessibility_element_with_return(requested_option)
+      || perform_codex_accessibility_press(requested_option));
+  if (requested_option != NULL) CFRelease(requested_option);
+  return acted;
+}
+
+static bool wait_for_codex_intelligence_popover_closed(
+  AXUIElementRef trigger,
+  CodexFastModeValue requested,
+  CFTimeInterval timeout_seconds
+) {
+  if (trigger == NULL) return true;
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + timeout_seconds;
+  do {
+    bool expanded = false;
+    if (codex_intelligence_trigger_expanded(trigger, &expanded) && !expanded) {
+      return true;
+    }
+    // Current Chromium builds can leave AXExpanded stuck at true after a
+    // keyboard-selected menu item has already dismissed the popover. A
+    // read-only scan neither reopens nor clicks anything: accept an updated
+    // selected item, or the disappearance of both exact speed options, as the
+    // same successful consumption signal.
+    CodexFastModeScan popup = { 0 };
+    if (copy_codex_fast_mode_scan(true, &popup)) {
+      bool selected_target = popup.value == requested;
+      bool exact_options_visible = popup.on_option_count > 0
+        || popup.off_option_count > 0;
+      release_codex_fast_mode_scan(&popup);
+      if (selected_target || !exact_options_visible) return true;
+    }
+    usleep(25000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  return false;
+}
+
+static int toggle_codex_fast_mode(void) {
+  CodexFastModeScan scan = { 0 };
+  AXUIElementRef opened_trigger = NULL;
+  if (!copy_codex_fast_mode_scan_with_intelligence_fallback(
+        &scan,
+        &opened_trigger
+      )) {
+    printf("state=unknown available=0 changed=0 verified=0\n");
+    return 2;
+  }
+
+  CodexFastModeValue observed = scan.value;
+  CodexFastModeValue requested = observed == CODEX_FAST_MODE_ON
+    ? CODEX_FAST_MODE_OFF
+    : observed == CODEX_FAST_MODE_OFF
+      ? CODEX_FAST_MODE_ON
+      : CODEX_FAST_MODE_UNKNOWN;
+  bool exact_option_available = requested == CODEX_FAST_MODE_ON
+    ? scan.on_option != NULL && scan.on_option_count == 1
+    : requested == CODEX_FAST_MODE_OFF
+      ? scan.off_option != NULL && scan.off_option_count == 1
+      : false;
+  CodexFastAction action = codex_fast_action_for_state(
+    observed,
+    requested,
+    scan.control_count == 1 ? scan.control_kind : CODEX_FAST_CONTROL_NONE,
+    exact_option_available
+  );
+  bool acted = requested != CODEX_FAST_MODE_UNKNOWN
+    && action != CODEX_FAST_ACTION_UNAVAILABLE
+    && action != CODEX_FAST_ACTION_NONE
+    && perform_codex_fast_action_for_scan(&scan, requested, action);
+  bool verified = acted && wait_for_codex_intelligence_popover_closed(
+    scan.intelligence_trigger,
+    requested,
+    0.55
+  );
+  if (!verified && opened_trigger != NULL) {
+    close_codex_intelligence_popover_if_opened(opened_trigger);
+  }
+
+  const char *reasoning = scan.reasoning_effort != NULL
+    ? scan.reasoning_effort
+    : "unknown";
+  printf(
+    "requested=%s state=%s available=%d changed=%d verified=%d reasoning=%s service_tier=%s\n",
+    codex_fast_mode_value_name(requested),
+    verified ? codex_fast_mode_value_name(requested) : codex_fast_mode_value_name(observed),
+    scan.available ? 1 : 0,
+    acted ? 1 : 0,
+    verified ? 1 : 0,
+    reasoning,
+    verified && requested == CODEX_FAST_MODE_ON ? "priority"
+      : verified && requested == CODEX_FAST_MODE_OFF ? "default"
+        : "unknown"
+  );
+  if (opened_trigger != NULL) CFRelease(opened_trigger);
+  bool available = scan.available;
+  release_codex_fast_mode_scan(&scan);
+  return verified ? 0 : available ? 1 : 2;
+}
+
 static int set_codex_fast_mode(CodexFastModeValue requested) {
   bool changed = false;
   unsigned action_attempts = 0;
@@ -3769,28 +4027,7 @@ static int set_codex_fast_mode(CodexFastModeValue requested) {
       break;
     }
 
-    bool acted = false;
-    if (action == CODEX_FAST_ACTION_PRESS_DIRECT) {
-      acted = scan.control_count == 1
-        && perform_codex_accessibility_press(scan.control);
-    } else {
-      AXUIElementRef option = requested == CODEX_FAST_MODE_ON
-        ? scan.on_option
-        : scan.off_option;
-      unsigned option_count = requested == CODEX_FAST_MODE_ON
-        ? scan.on_option_count
-        : scan.off_option_count;
-      if (option != NULL && option_count == 1) {
-        acted = perform_codex_accessibility_press(option);
-      } else if (scan.control_count == 1
-          && scan.control_kind == CODEX_FAST_CONTROL_SELECTOR
-          && perform_codex_accessibility_press(scan.control)) {
-        AXUIElementRef requested_option = wait_for_codex_fast_option(requested, 0.7);
-        acted = requested_option != NULL
-          && perform_codex_accessibility_press(requested_option);
-        if (requested_option != NULL) CFRelease(requested_option);
-      }
-    }
+    bool acted = perform_codex_fast_action_for_scan(&scan, requested, action);
     release_codex_fast_mode_scan(&scan);
     close_codex_intelligence_popover_if_opened(opened_trigger);
     if (opened_trigger != NULL) CFRelease(opened_trigger);
@@ -3891,6 +4128,15 @@ static int codex_fast_mode_selftest(void) {
   CodexFastTextSignals standard_speed = codex_fast_signals_from_string(
     CFSTR("Speed Standard")
   );
+  CodexFastTextSignals korean_standard_speed = codex_fast_signals_from_string(
+    CFSTR("표준 기본 속도")
+  );
+  CodexFastTextSignals korean_fast_speed = codex_fast_signals_from_string(
+    CFSTR("빠름 1.5배 속도, 사용량 증가")
+  );
+  bool localized_speed_options =
+    codex_fast_semantic_value(korean_standard_speed) == CODEX_FAST_MODE_OFF
+    && codex_fast_semantic_value(korean_fast_speed) == CODEX_FAST_MODE_ON;
   bool compact_target_inversion = codex_fast_semantic_value(enable_standard)
       == CODEX_FAST_MODE_ON
     && codex_fast_semantic_value(korean_enable_standard) == CODEX_FAST_MODE_ON
@@ -3952,8 +4198,9 @@ static int codex_fast_mode_selftest(void) {
     CGSizeMake(600, 120)
   );
   printf(
-    "localized_labels=%d exact_context_only=%d split_speed_value=%d compact_target_inversion=%d idempotent_plan=%d known_direct_toggle=%d unknown_direct_rejected=%d unknown_selector_exact=%d exact_option_beats_direct=%d composer_geometry=%d body_rejected=%d composer_anchored=%d foreign_panel_rejected=%d\n",
+    "localized_labels=%d localized_speed_options=%d exact_context_only=%d split_speed_value=%d compact_target_inversion=%d idempotent_plan=%d known_direct_toggle=%d unknown_direct_rejected=%d unknown_selector_exact=%d exact_option_beats_direct=%d composer_geometry=%d body_rejected=%d composer_anchored=%d foreign_panel_rejected=%d\n",
     localized_labels ? 1 : 0,
+    localized_speed_options ? 1 : 0,
     exact_context_only ? 1 : 0,
     split_speed_value ? 1 : 0,
     compact_target_inversion ? 1 : 0,
@@ -3967,7 +4214,8 @@ static int codex_fast_mode_selftest(void) {
     composer_anchored ? 1 : 0,
     foreign_panel_rejected ? 1 : 0
   );
-  return localized_labels && exact_context_only && split_speed_value
+  return localized_labels && localized_speed_options
+    && exact_context_only && split_speed_value
     && compact_target_inversion
     && idempotent_plan && known_direct_toggle && unknown_direct_rejected
     && unknown_selector_exact && exact_option_beats_direct
@@ -5755,8 +6003,10 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "reasoning-state-selftest") == 0) return reasoning_state_selftest();
   if (strcmp(argv[1], "goal-state-selftest") == 0) return goal_state_selftest();
   if (strcmp(argv[1], "fast-mode-selftest") == 0) return codex_fast_mode_selftest();
+  if (strcmp(argv[1], "fast-mode-toggle") == 0) return toggle_codex_fast_mode();
   if (strcmp(argv[1], "fast-mode-state") == 0) return print_codex_fast_mode_state();
   if (strcmp(argv[1], "codex-composer-state") == 0) return print_codex_composer_state();
+  if (strcmp(argv[1], "media-playback-state") == 0) return print_system_media_playback_state();
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) return voice_up() ? 0 : 1;
   else if (strcmp(argv[1], "send") == 0) tap_key(KEY_RETURN, 0);

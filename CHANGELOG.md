@@ -2,6 +2,17 @@
 
 > [한국어 변경 기록](CHANGELOG.ko.md)
 
+## 0.3.2-beta — 2026-07-19
+
+- Collapsed Fast mode read, inversion, and selection into one native transaction, eliminating the repeated model-menu flashes that made a single physical press feel sluggish.
+- Stopped treating a merely live CoreAudio process as proof that media is playing. Voice input now pauses only when macOS also confirms active playback, so already-paused music or video cannot be toggled back on; an unknown playback state leaves media untouched.
+
+## 0.3.1-beta — 2026-07-19
+
+- Fixed packaged installations that stripped the native `keybridge` executable bit. The Node entry point now repairs and verifies the helper before any plugin mode starts, a release test reproduces the installed `0666` layout, and the package fails closed if self-repair does not work.
+- Updated Fast mode for the current Codex model menu. ThreadDeck now opens the exact accessibility-scoped selector with keyboard focus and Return when Chromium reports a successful but ineffective `AXPress`, recognizes Korean descriptive options such as `표준 기본 속도` and `빠름 1.5배 속도`, selects them without mouse coordinates, closes the menu with Escape, and confirms the resulting live state.
+- Added compatible explicit `sharp` build approval for both the pinned pnpm 10 toolchain and newer pnpm clients.
+
 ## 0.3.0-beta — 2026-07-19
 
 - Added a separately selectable **Top Task 1** action (`com.yechan.threaddeck.thread.top1`) without repurposing the existing Current / Last action. The bundled Tasks page now starts with Top Task 1, while the Dashboard keeps Current / Last and Fast mode; both task actions retain tap-to-open and hold-to-dictate behavior.
