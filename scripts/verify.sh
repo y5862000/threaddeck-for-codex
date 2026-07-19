@@ -25,6 +25,7 @@ node "$PLUGIN_DIR/bin/plugin.js" --verify-completion
 node "$PLUGIN_DIR/bin/plugin.js" --verify-refresh-resilience
 node "$PLUGIN_DIR/bin/plugin.js" --verify-usage-cache
 node "$PLUGIN_DIR/bin/plugin.js" --verify-voice-submit
+node "$PLUGIN_DIR/bin/plugin.js" --verify-interactions
 pnpm run test
 node "$ROOT_DIR/scripts/verify-docs.mjs"
 jq -e . "$PLUGIN_DIR/manifest.json" >/dev/null
@@ -33,7 +34,12 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 [[ "$ARCHS" == *arm64* ]] || { echo "keybridge is missing arm64" >&2; exit 1; }
 [[ "$ARCHS" == *x86_64* ]] || { echo "keybridge is missing x86_64" >&2; exit 1; }
 "$BRIDGE" voice-event-selftest
+"$BRIDGE" voice-release-selftest
 "$BRIDGE" reasoning-state-selftest
+"$BRIDGE" thread-fingerprint-selftest
+"$BRIDGE" focused-thread-geometry-selftest
+"$BRIDGE" command-palette-selftest
+"$BRIDGE" media-bundle-selftest
 if grep -Eq 'CGEventCreateMouseEvent|CGWarpMouseCursorPosition|kCGEventLeftMouse(Down|Up)' "$ROOT_DIR/native/keybridge.m"; then
   echo "keybridge must not synthesize mouse events" >&2
   exit 1

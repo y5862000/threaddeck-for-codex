@@ -22,7 +22,7 @@ pnpm run test
 pnpm run check
 ```
 
-`pnpm run build` compiles the universal native helper, copies every top-level `src/*.js` module byte-for-byte to the matching plugin `bin/*.js` path, and builds the distributable profile. `pnpm run test` runs the I/O-free parser and policy contracts with Node's built-in test runner. `pnpm run check` repeats those tests, verifies source-to-bundle byte parity with no missing or stale JavaScript modules, and validates the inline runtime contracts, JSON, both helper architectures, the Stream Deck manifest, documentation, and the release privacy audit.
+`pnpm run build` compiles the universal native helper, copies every top-level `src/*.js` module byte-for-byte to the matching plugin `bin/*.js` path, rasterizes plugin SVG assets through the development-only Sharp dependency, and builds the distributable profile. `pnpm run test` runs the I/O-free parser and policy contracts with Node's built-in test runner. `pnpm run check` repeats those tests, verifies source-to-bundle byte parity with no missing or stale JavaScript modules, and validates the inline runtime contracts, JSON, both helper architectures, the Stream Deck manifest, documentation, and the release privacy audit.
 
 To build an installer:
 
@@ -38,6 +38,8 @@ To regenerate documentation screenshots from the real key renderer:
 pnpm run render-docs
 pnpm run render-animation
 ```
+
+Both commands use the same Sharp-based SVG rasterizer as the asset build; Sharp is installed by `pnpm install` and is not part of the shipped plugin runtime. GIF encoding additionally uses the repository's Swift/ImageIO helper.
 
 ## Project boundaries
 

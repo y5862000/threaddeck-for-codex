@@ -37,7 +37,8 @@
     "node": ">=20"
   },
   "devDependencies": {
-    "@elgato/cli": "1.7.4"
+    "@elgato/cli": "1.7.4",
+    "sharp": "0.34.5"
   },
   "packageManager": "pnpm@10.15.1"
 }

@@ -12,7 +12,6 @@ const {
   normalizeTitle,
   stringFingerprint,
   titleFingerprints,
-  titleVariants,
   titleVisualWidth,
   wrapTitle
 } = require("./text");
@@ -95,6 +94,11 @@ const {
 } = require("./config");
 
 const execFileAsync = promisify(execFile);
+const VOICE_RELEASE_RETRY_DELAYS_MS = [180, 650];
+const VOICE_START_UNKNOWN_RETRY_DELAYS_MS = [120, 300, 600];
+const VOICE_MEDIA_RESUME_DEBOUNCE_MS = 120;
+const VOICE_MEDIA_REASSERT_DELAY_MS = 120;
+const VOICE_MEDIA_REASSERT_ATTEMPTS = 3;
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, ".codex"));
@@ -108,6 +112,24 @@ const CODEX_DESKTOP_LOG_ROOT = path.resolve(
   process.env.THREADDECK_CODEX_LOG_ROOT || path.join(USER_HOME, "Library", "Logs", "com.openai.codex")
 );
 const KEY_BRIDGE = path.join(__dirname, "keybridge");
+const RUNTIME_TRACE_PATH = path.resolve(
+  process.env.THREADDECK_TRACE_PATH
+    || path.join(USER_HOME, "Library", "Logs", "ThreadDeck", "runtime.jsonl")
+);
+const RUNTIME_TRACE_MAX_BYTES = 256 * 1024;
+const RUNTIME_TRACE_FIELDS = new Set([
+  "slot",
+  "remote",
+  "strategy",
+  "phase",
+  "result",
+  "reason",
+  "elapsedMs",
+  "coalesced",
+  "mediaPaused",
+  "baselineReady",
+  "held"
+]);
 
 function resolveCodexBar() {
   const candidates = [
@@ -129,8 +151,9 @@ function resolveCodexBar() {
 
 const CODEXBAR = resolveCodexBar();
 
-const REMOTE_APP_ACTIVATION_SETTLE_MS = 80;
 const REMOTE_APP_ACTIVATION_RETRY_MS = 180;
+const REMOTE_DIRECT_READY_POLL_DELAYS_MS = [0, 70, 120, 200, 320];
+const REMOTE_READY_POLL_DELAYS_MS = [0, 90, 160, 260, 420, 680];
 const REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES = 32 * 1024 * 1024;
 const REMOTE_REASONING_PROBE_CACHE_MS = 5_000;
 // Use fonts already supplied by macOS. The public plugin intentionally does
@@ -202,11 +225,22 @@ const completionContractMode = process.argv.includes("--verify-completion");
 const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
 const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
 const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
+const interactionContractMode = process.argv.includes("--verify-interactions");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
 const gestureAnimationDirectory = argument("--render-gesture-animations");
 const pluginStartedAtMs = Date.now();
+const runtimeTraceEnabled = !snapshotMode
+  && !completionContractMode
+  && !refreshResilienceContractMode
+  && !usageCacheContractMode
+  && !voiceSubmitContractMode
+  && !interactionContractMode
+  && !demoOutput
+  && !demoLightOutput
+  && !demoAnimationDirectory
+  && !gestureAnimationDirectory;
 
 const contexts = new Map();
 const contextImages = new Map();
@@ -217,7 +251,8 @@ const completionPulseStartedAt = new Map();
 const completionPulseReasonByThreadId = new Map();
 const observedCompletionEndMs = new Map();
 const voiceHeldContexts = new Set();
-const voiceSuspendedMediaPids = new Set();
+const voiceReleasePendingContexts = new Set();
+const voiceMediaPauseOwners = new Set();
 const voiceStateByContext = new Map();
 const voiceStateResetAtMs = new Map();
 const voiceTranscriptionByContext = new Map();
@@ -252,12 +287,51 @@ let lastOpenedThreadAtMs = null;
 let knownSideChatIds = new Set();
 let pendingSideChatTarget = null;
 let nextVoiceSessionId = 0;
+let voiceMediaPaused = false;
+let voiceMediaTransitionTail = Promise.resolve();
+let voiceMediaOwnerGeneration = 0;
+let voiceMediaResumeReassertPending = false;
+let voiceReleaseRetryGeneration = 0;
+let voiceReleaseRetryState = null;
+let voiceReleaseProbeOnly = false;
+let voiceReleaseAttemptInFlight = null;
+let shutdownCleanupStarted = false;
+let shutdownCleanupResult = true;
+let activeRemoteNavigation = null;
 let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
 let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
 let accessibilityTrustCache = { checkedAtMs: 0, trusted: null };
+let runtimeTraceTail = Promise.resolve();
 let pinnedIdsCache = [];
 let remoteThreadRowsCache = [];
 let sideChatRowsCache = [];
+
+function runtimeTrace(event, fields = {}) {
+  if (!runtimeTraceEnabled) return;
+  const safeFields = {};
+  for (const [key, value] of Object.entries(fields)) {
+    if (!RUNTIME_TRACE_FIELDS.has(key)) continue;
+    if (typeof value === "boolean" || Number.isFinite(value)) safeFields[key] = value;
+    else if (typeof value === "string" && value.length <= 48) safeFields[key] = value;
+  }
+  const line = `${JSON.stringify({
+    at: new Date().toISOString(),
+    event: String(event).slice(0, 64),
+    ...safeFields
+  })}\n`;
+  runtimeTraceTail = runtimeTraceTail.then(async () => {
+    await fs.mkdir(path.dirname(RUNTIME_TRACE_PATH), { recursive: true });
+    try {
+      const stat = await fs.stat(RUNTIME_TRACE_PATH);
+      if (stat.size >= RUNTIME_TRACE_MAX_BYTES) await fs.truncate(RUNTIME_TRACE_PATH, 0);
+    } catch {
+      // The first trace event creates the file below.
+    }
+    await fs.appendFile(RUNTIME_TRACE_PATH, line, "utf8");
+  }).catch(() => {
+    // Diagnostics must never interfere with Stream Deck input handling.
+  });
+}
 let sideChatSessionStartMs = null;
 const sideChatParentById = new Map();
 const sideChatLifecycleCache = new Map();
@@ -488,8 +562,8 @@ function flowingReasoningSlider(accent, label, fast) {
     return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(2)}" fill="#FFFFFF" opacity="${opacity.toFixed(2)}"/>`;
   }).join("");
   const modeIconPath = "M21 14L17.2 20.3H21L19.8 27L26 19H22.3L24.3 14Z";
-  const restModeIcon = fast ? `<path d="${modeIconPath}" fill="${THEME.text}" fill-opacity=".88"/>` : "";
-  const filledModeIcon = fast ? `<path d="${modeIconPath}" fill="#FFFFFF" fill-opacity=".92"/>` : "";
+  const restModeIcon = fast ? `<path data-mode="fast" d="${modeIconPath}" fill="${THEME.text}" fill-opacity=".88"/>` : "";
+  const filledModeIcon = fast ? `<path data-mode="fast" d="${modeIconPath}" fill="#FFFFFF" fill-opacity=".92"/>` : "";
   const textX = fast ? 30 : 16;
   const fontSize = label.text.length >= 8 ? 14.8 : 16;
   const ambientGlow = appearance.ultra
@@ -603,6 +677,7 @@ function completionPulseChrome(effect) {
 }
 
 function threadHeader(accent, status, statusLabel, activity, pulsing = false, reasoningEffort = null, serviceTier = null, completionEffect = null) {
+  const fast = isFastServiceTier(serviceTier);
   if (status === "completed") {
     const strength = completionEffect?.strength ?? 0;
     const baseFillOpacity = appearanceMode === "light" ? 0.14 : 0;
@@ -614,12 +689,12 @@ function threadHeader(accent, status, statusLabel, activity, pulsing = false, re
     return `
   <rect x="9" y="8" width="126" height="28" rx="14" fill="${THEME.raised}"/>
   <rect x="9" y="8" width="126" height="28" rx="14" fill="${THEME.green}" fill-opacity="${fillOpacity}" stroke="${THEME.green}" stroke-opacity="${strokeOpacity}"/>
+  ${fast ? `<path data-mode="fast" d="M27 12L20 23H26L24 32L34 19H28L31 12Z" fill="${THEME.text}" fill-opacity=".9"/>` : ""}
   <path d="M61 22L68 28L83 16" fill="none" stroke="${THEME.green}" stroke-width="${checkWidth}" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M61 22L68 28L83 16" fill="none" stroke="${THEME.text}" stroke-opacity="${brightCheckOpacity}" stroke-width="${checkWidth}" stroke-linecap="round" stroke-linejoin="round"/>`;
   }
   const info = typeof activity === "string" ? { kind: "idle", label: activity } : activity ?? { kind: "idle", label: "상태 확인 중" };
   const opacity = pulsing ? (pulse ? 1 : 0.5) : 1;
-  const fast = status === "working" && isFastServiceTier(serviceTier);
   const activityLabel = detailedActivityLabel(info);
   const label = compactLine(status === "working" ? activityLabel : statusLabel, fast ? 5.7 : 6.8);
   if (status === "working") {
@@ -629,7 +704,7 @@ function threadHeader(accent, status, statusLabel, activity, pulsing = false, re
   const anchor = fast ? "start" : "middle";
   const fontSize = label.length >= 9 ? 14.8 : 16;
   const modeIcon = fast
-    ? `<path d="M23 12L16 23H22L20 32L30 19H24L27 12Z" fill="${accent}" opacity="${opacity}"/>`
+    ? `<path data-mode="fast" d="M23 12L16 23H22L20 32L30 19H24L27 12Z" fill="${accent}" opacity="${opacity}"/>`
     : "";
   return `
   <rect x="9" y="8" width="126" height="28" rx="14" fill="${THEME.raised}"/>
@@ -748,15 +823,19 @@ function voiceTargetOverlaySvg(state, nowMs = renderTimeMs()) {
   const dotOpacity = (offset) => (0.34 + 0.66 * (0.5 + 0.5 * Math.sin(transcribingPhase + offset))).toFixed(3);
   const accent = state === "recording"
     ? THEME.amber
+    : state === "preparing"
+      ? THEME.blue
+      : state === "transcribing"
+        ? THEME.textSecondary
+        : state === "submitting"
+          ? THEME.textSecondary
+          : state === "error"
+            ? THEME.amber
+            : THEME.green;
+  const neutralState = state === "preparing" || state === "transcribing" || state === "submitting";
+  const border = state === "preparing"
+    ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.blue}" fill-opacity=".05" stroke="${THEME.blue}" stroke-opacity=".62" stroke-width="2.4"/>`
     : state === "transcribing"
-    ? THEME.textSecondary
-    : state === "submitting"
-      ? THEME.textSecondary
-    : state === "error"
-      ? THEME.amber
-      : THEME.green;
-  const neutralState = state === "transcribing" || state === "submitting";
-  const border = state === "transcribing"
     ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.text}" fill-opacity="${transcribingFillOpacity}" stroke="${THEME.textSecondary}" stroke-opacity="${transcribingStrokeOpacity}" stroke-width="2.2"/>`
     : state === "submitting"
       ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.text}" fill-opacity=".035" stroke="${THEME.textSecondary}" stroke-opacity=".52" stroke-width="2.4"/>`
@@ -765,7 +844,11 @@ function voiceTargetOverlaySvg(state, nowMs = renderTimeMs()) {
     ? `<path d="M113 22L118 27L127 16" fill="none" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round" stroke-linejoin="round"/>`
     : state === "error"
       ? `<path d="M120 15V24" stroke="#FFFFFF" stroke-width="3" stroke-linecap="round"/><circle cx="120" cy="29" r="1.8" fill="#FFFFFF"/>`
-      : state === "transcribing"
+      : state === "preparing"
+        ? `<circle cx="114" cy="23" r="1.65" fill="${THEME.text}" fill-opacity=".42"/>
+           <circle cx="120" cy="23" r="1.65" fill="${THEME.text}" fill-opacity=".7"/>
+           <circle cx="126" cy="23" r="1.65" fill="${THEME.text}"/>`
+        : state === "transcribing"
         ? `<circle cx="114" cy="23" r="1.65" fill="${THEME.text}" fill-opacity="${dotOpacity(0)}"/>
            <circle cx="120" cy="23" r="1.65" fill="${THEME.text}" fill-opacity="${dotOpacity(-2.1)}"/>
            <circle cx="126" cy="23" r="1.65" fill="${THEME.text}" fill-opacity="${dotOpacity(-4.2)}"/>`
@@ -774,15 +857,17 @@ function voiceTargetOverlaySvg(state, nowMs = renderTimeMs()) {
       : `<rect x="117" y="14" width="6" height="11" rx="3" fill="#FFFFFF"/><path d="M113.5 22V23C113.5 26.6 116.4 29.5 120 29.5C123.6 29.5 126.5 26.6 126.5 23V22M120 29.5V33" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>`;
   const bannerLabel = state === "recording"
     ? "말하는 중"
-    : state === "transcribing"
-      ? "받아쓰기 중"
-      : state === "submitting"
-        ? "제출 중"
-        : state === "sent"
-          ? "전송 완료"
-          : state === "complete"
-            ? "입력 완료"
-          : "입력 실패";
+    : state === "preparing"
+      ? "전환 준비"
+      : state === "transcribing"
+        ? "받아쓰기 중"
+        : state === "submitting"
+          ? "제출 중"
+          : state === "sent"
+            ? "전송 완료"
+            : state === "complete"
+              ? "입력 완료"
+              : "입력 실패";
   const bannerTextColor = state === "recording" || state === "error"
     ? THEME.amber
     : state === "complete" || state === "sent"
@@ -843,16 +928,29 @@ function endSendPress(context) {
   runKeyBridge(longPress ? "send-command" : "send", context);
 }
 
+function releaseThreadMediaPause(state, context) {
+  if (!state?.mediaPauseStarted || state.mediaPauseReleased) return;
+  // A failed native voice-up deliberately keeps this context's media lease.
+  // Some Stream Deck lifecycle paths tear down the press state immediately
+  // after ending voice; never let that secondary cleanup bypass the confirmed
+  // release gate and resume playback into a microphone that may still be live.
+  if (voiceReleasePendingContexts.has(context)) return;
+  state.mediaPauseReleased = true;
+  void state.resumeMedia(context);
+}
+
 function cancelThreadPress(context, releaseVoice = true) {
   const state = threadPressByContext.get(context);
   if (!state) return;
   state.held = false;
   if (state.timer) clearTimeout(state.timer);
-  threadPressByContext.delete(context);
-  if (releaseVoice && state.voiceStarted) endVoiceHoldSync(context, false);
+  if (threadPressByContext.get(context) === state) threadPressByContext.delete(context);
+  if (releaseVoice && state.voiceStarted) state.endVoice(context, false);
+  else releaseThreadMediaPause(state, context);
+  if (voiceStateByContext.get(context) === "preparing") setVoiceVisualState(context, "idle");
 }
 
-function beginThreadPress(context, slot) {
+function beginThreadPress(context, slot, options = {}) {
   if (threadPressByContext.has(context)) return;
   const thread = threadSlots[slot];
   if (!thread?.id) {
@@ -867,12 +965,24 @@ function beginThreadPress(context, slot) {
     held: true,
     armed: false,
     voiceStarted: false,
+    mediaPauseStarted: false,
+    mediaPauseReleased: false,
+    mediaPausePromise: null,
     timer: null,
     openPromise: null,
-    focusPromise: null
+    focusPromise: null,
+    pauseMedia: options.pauseMedia ?? pauseMediaForVoice,
+    resumeMedia: options.resumeMedia ?? resumeMediaAfterVoice,
+    beginVoice: options.beginVoice ?? beginVoiceHoldSync,
+    endVoice: options.endVoice ?? endVoiceHoldSync,
+    focusComposer: options.focusComposer
+      ?? (() => runKeyBridgeAwaited("codex-focus-composer", null, { quiet: true })),
+    sleep: options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))),
+    schedule: options.schedule ?? setTimeout
   };
   threadPressByContext.set(context, state);
-  state.openPromise = openThread(context, slot);
+  const open = options.openThread ?? openThread;
+  state.openPromise = Promise.resolve(open(context, slot));
   state.focusPromise = state.openPromise.then(async (opened) => {
     if (!opened || threadPressByContext.get(context) !== state || !state.held) return false;
     // Prepare focus close to the hold threshold instead of blocking the key-up
@@ -881,34 +991,57 @@ function beginThreadPress(context, slot) {
     const earliestFocusAtMs = state.startedAtMs
       + THREAD_VOICE_LONG_PRESS_MS
       - THREAD_VOICE_FOCUS_PREP_LEAD_MS;
-    const delayMs = Math.max(
+    const initialDelayMs = Math.max(
       THREAD_VOICE_FOCUS_SETTLE_MS,
       earliestFocusAtMs - Date.now()
     );
-    if (delayMs > 0) await new Promise((resolve) => setTimeout(resolve, delayMs));
-    if (threadPressByContext.get(context) !== state || !state.held) return false;
-    return runKeyBridgeAwaited("codex-focus-composer", null, { quiet: true });
+    const retryDelaysMs = [initialDelayMs, 90, 160, 280];
+    for (const delayMs of retryDelaysMs) {
+      if (delayMs > 0) await state.sleep(delayMs);
+      if (threadPressByContext.get(context) !== state || !state.held) return false;
+      if (await state.focusComposer()) return true;
+    }
+    return false;
   });
-  state.timer = setTimeout(async () => {
+  state.timer = state.schedule(async () => {
     if (threadPressByContext.get(context) !== state || !state.held) return;
     state.armed = true;
+    state.mediaPauseStarted = true;
+    state.mediaPausePromise = state.pauseMedia(context);
+    voiceTargetThreadByContext.set(context, state.threadId);
+    setVoiceVisualState(context, "preparing");
+    runtimeTrace("thread-hold", {
+      slot: slot + 1,
+      remote: Boolean(thread.remote),
+      phase: "armed",
+      held: true
+    });
     const opened = await state.openPromise;
     if (threadPressByContext.get(context) !== state || !state.held || !opened) {
-      threadPressByContext.delete(context);
+      if (threadPressByContext.get(context) === state) threadPressByContext.delete(context);
+      releaseThreadMediaPause(state, context);
+      if (voiceStateByContext.get(context) === "preparing") setVoiceVisualState(context, "idle");
       return;
     }
     const composerFocused = await state.focusPromise;
     if (threadPressByContext.get(context) !== state || !state.held) {
-      threadPressByContext.delete(context);
+      if (threadPressByContext.get(context) === state) threadPressByContext.delete(context);
+      releaseThreadMediaPause(state, context);
+      if (voiceStateByContext.get(context) === "preparing") setVoiceVisualState(context, "idle");
       return;
     }
     clearFeedback(context);
-    state.voiceStarted = beginVoiceHoldSync(context, {
+    state.voiceStarted = state.beginVoice(context, {
       targetThreadId: state.threadId,
       autoSubmit: true,
-      composerAlreadyFocused: composerFocused
+      requireBaseline: true,
+      composerAlreadyFocused: composerFocused,
+      pauseMedia: () => state.mediaPausePromise
     });
-    if (!state.voiceStarted) threadPressByContext.delete(context);
+    if (!state.voiceStarted && threadPressByContext.get(context) === state) {
+      threadPressByContext.delete(context);
+      releaseThreadMediaPause(state, context);
+    }
   }, THREAD_VOICE_LONG_PRESS_MS);
 }
 
@@ -917,8 +1050,18 @@ function endThreadPress(context) {
   if (!state) return;
   state.held = false;
   if (state.timer) clearTimeout(state.timer);
-  if (state.voiceStarted) endVoiceHoldSync(context, true);
-  if (!state.armed || state.voiceStarted) threadPressByContext.delete(context);
+  threadPressByContext.delete(context);
+  if (state.voiceStarted) state.endVoice(context, true);
+  else releaseThreadMediaPause(state, context);
+  if (!state.voiceStarted && voiceStateByContext.get(context) === "preparing") {
+    setVoiceVisualState(context, "idle");
+  }
+  runtimeTrace("thread-hold", {
+    slot: state.slot + 1,
+    phase: "release",
+    result: state.voiceStarted ? "recording" : state.armed ? "cancelled-before-start" : "tap",
+    held: false
+  });
 }
 
 function appSwitchSvg() {
@@ -1075,28 +1218,73 @@ function accessibilityTrustedSync(nowMs = Date.now()) {
   return trusted;
 }
 
+function primeAccessibilityTrust() {
+  execFile(KEY_BRIDGE, ["accessibility-preflight"], { timeout: 800 }, (error) => {
+    accessibilityTrustCache = {
+      checkedAtMs: Date.now(),
+      trusted: !error
+    };
+  });
+}
+
 function keyBridgeExitCode(error) {
   const value = Number(error?.exitCode ?? error?.code);
   return Number.isInteger(value) ? value : null;
 }
 
-function runKeyBridgeWithInput(command, args, input, timeoutMs = 6000) {
+function abortedOperationError() {
+  const error = new Error("operation aborted");
+  error.name = "AbortError";
+  return error;
+}
+
+function isAbortError(error) {
+  return error?.name === "AbortError" || error?.code === "ABORT_ERR";
+}
+
+function sleepWithSignal(delayMs, signal = null) {
+  if (signal?.aborted) return Promise.reject(abortedOperationError());
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal?.removeEventListener("abort", onAbort);
+      resolve();
+    }, delayMs);
+    const onAbort = () => {
+      clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
+      reject(abortedOperationError());
+    };
+    signal?.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function runKeyBridgeWithInput(command, args, input, options = {}) {
+  const timeoutMs = Number.isFinite(options) ? options : options.timeoutMs ?? 6000;
+  const signal = Number.isFinite(options) ? null : options.signal ?? null;
+  if (signal?.aborted) return Promise.reject(abortedOperationError());
   return new Promise((resolve, reject) => {
     const child = spawn(KEY_BRIDGE, [command, ...args], {
       stdio: ["pipe", "ignore", "ignore"]
     });
     let settled = false;
+    let timer = null;
+    const onAbort = () => {
+      child.kill("SIGTERM");
+      finish(abortedOperationError());
+    };
     const finish = (error = null) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
+      signal?.removeEventListener("abort", onAbort);
       if (error) reject(error);
       else resolve();
     };
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       child.kill("SIGTERM");
       finish(new Error(`Key bridge ${command} timed out`));
     }, timeoutMs);
+    signal?.addEventListener("abort", onAbort, { once: true });
     child.on("error", (error) => finish(error));
     child.on("close", (code, signal) => {
       if (code === 0) finish();
@@ -1267,6 +1455,16 @@ function voiceSubmissionStillCurrent(context, targetThreadId, sessionId) {
     && voiceSessionIdByContext.get(context) === sessionId;
 }
 
+async function voiceTargetIsFocused(targetThreadId, options = {}) {
+  const thread = threadSlots.find((candidate) => candidate?.id === targetThreadId);
+  if (!thread) return false;
+  // Submission safety needs the same identity-aware focused-header probe used
+  // after remote navigation. In particular, a title-only queue match cannot
+  // distinguish two tasks with the same visible title; ambiguous rows must be
+  // verified by their UUID before any dictated text is submitted.
+  return remoteThreadIsFocused(thread, options);
+}
+
 async function waitForVoiceDraftReset(context, targetThreadId, tracker, options = {}) {
   const stateReader = options.stateReader ?? textInputStateSync;
   const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
@@ -1306,10 +1504,18 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
   const bridge = options.bridge ?? runKeyBridgeSync;
   const waitForDraftReset = options.waitForDraftReset ?? waitForVoiceDraftReset;
   const scheduleRefresh = options.scheduleRefresh ?? (() => setTimeout(() => void refreshThreads(), 500));
+  const targetFocused = options.targetFocused ?? voiceTargetIsFocused;
+  const requireTargetFocus = async (phase) => {
+    if (await targetFocused(targetThreadId)) return true;
+    failVoiceTranscription(context);
+    runtimeTrace("voice-submit", { phase, result: "not-focused" });
+    return false;
+  };
   try {
     await openApp();
     await sleep(140);
     if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
+    if (!await requireTargetFocus("target-check")) return;
 
     const clickedSubmit = bridge("codex-submit-composer", null, { quiet: true });
     let confirmed = clickedSubmit
@@ -1318,6 +1524,9 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
       // The explicit button is preferred, but Codex can rebuild the composer
       // between transcription and submission. Refocus the draft and retry with
       // Return, then verify the draft actually cleared before showing success.
+      // Recheck immediately before that fallback so a task switch during the
+      // first confirmation wait can never submit into the new task.
+      if (!await requireTargetFocus("fallback-target-check")) return;
       bridge("codex-focus-composer", null, { quiet: true });
       if (!bridge("send", context)) {
         failVoiceTranscription(context);
@@ -1413,60 +1622,25 @@ function updateVoiceTranscriptionStates(nowMs = Date.now(), options = {}) {
   }
 }
 
-function isPausableMediaBundle(bundleId) {
-  return [
-    /^com\.apple\.(Music|Podcasts|TV|QuickTimePlayerX)$/i,
-    /^com\.spotify\.client$/i,
-    /^com\.google\.Chrome/i,
-    /^com\.apple\.(Safari|WebKit)/i,
-    /^company\.thebrowser\.Browser/i,
-    /^com\.brave\.Browser/i,
-    /^com\.microsoft\.edgemac/i,
-    /^com\.vivaldi\.Vivaldi/i,
-    /^com\.operasoftware\.Opera/i,
-    /^org\.mozilla\.firefox/i,
-    /^org\.videolan\.vlc/i,
-    /^com\.colliderli\.iina/i,
-    /^tv\.plex/i,
-    /^com\.plexamp/i
-  ].some((pattern) => pattern.test(bundleId));
+function parseAudioInputState(output) {
+  const state = String(output ?? "").trim().toLowerCase();
+  return state === "active" || state === "inactive" || state === "unknown"
+    ? state
+    : "unknown";
 }
 
-function runningMediaProcessesSync() {
+function codexAudioInputStateSync() {
+  let output = "";
   try {
-    const output = execFileSync(KEY_BRIDGE, ["audio-processes"], {
+    output = execFileSync(KEY_BRIDGE, ["audio-input-state"], {
       encoding: "utf8",
       stdio: ["ignore", "pipe", "ignore"],
       timeout: 1000
-    }).trim();
-    if (!output) return [];
-    return output
-      .split(/\r?\n/)
-      .map((line) => {
-        const [pidText, bundleId = ""] = line.split("\t");
-        return { pid: Number(pidText), bundleId: bundleId.trim() };
-      })
-      .filter(({ pid, bundleId }) => Number.isInteger(pid) && pid > 1 && pid !== process.pid && isPausableMediaBundle(bundleId));
+    });
   } catch (error) {
-    console.error(`Could not enumerate active audio processes: ${error?.message ?? "unknown error"}`);
+    output = error?.stdout ?? "";
   }
-  return [];
-}
-
-function codexAudioInputActiveSync() {
-  try {
-    const output = execFileSync(KEY_BRIDGE, ["audio-input-processes"], {
-      encoding: "utf8",
-      stdio: ["ignore", "pipe", "ignore"],
-      timeout: 1000
-    });
-    return output.split(/\r?\n/).some((line) => {
-      const [, bundleId = ""] = line.split("\t");
-      return bundleId.trim().startsWith("com.openai.codex");
-    });
-  } catch {
-    return false;
-  }
+  return parseAudioInputState(output);
 }
 
 function clearVoiceStartVerification(context) {
@@ -1475,62 +1649,541 @@ function clearVoiceStartVerification(context) {
   voiceStartVerificationTimers.delete(context);
 }
 
-function verifyVoiceStarted(context) {
+function normalizeVoiceReleaseOutcome(value) {
+  if (value === true) return "inactive";
+  if (value === false || value == null) return "unconfirmed-no-action";
+  const match = String(value).match(
+    /(?:outcome=)?(inactive|unconfirmed-no-action|unconfirmed-after-stop-action|unknown-possible-action|unknown)/i
+  );
+  return match ? match[1].toLowerCase() : "unknown";
+}
+
+function nativeVoiceReleaseOutcomeSync(context, options = {}) {
+  if (options.probeOnly) {
+    const stateReader = options.audioInputState ?? codexAudioInputStateSync;
+    const state = parseAudioInputState(stateReader());
+    return state === "inactive" ? "inactive" : state;
+  }
+
+  let output = "";
+  let succeeded = false;
+  try {
+    output = execFileSync(KEY_BRIDGE, ["voice-up"], {
+      encoding: "utf8",
+      stdio: ["ignore", "pipe", "ignore"],
+      timeout: 2500,
+      maxBuffer: 1024
+    });
+    succeeded = true;
+  } catch (error) {
+    output = error?.stdout ?? "";
+  }
+  return classifyNativeVoiceReleaseOutput(output, succeeded);
+}
+
+function classifyNativeVoiceReleaseOutput(output, succeeded) {
+  const rawOutput = String(output ?? "").trim();
+  const outcome = normalizeVoiceReleaseOutcome(rawOutput);
+  // Compatibility with a previously built helper that returned only an exit
+  // status. A successful legacy voice-up is confirmed. Empty output on failure
+  // stays unknown: the process may have timed out after pressing Stop but
+  // before flushing its final outcome, so another full voice-up is unsafe.
+  if (outcome === "unknown" && succeeded) return "inactive";
+  if (outcome === "unknown" && !rawOutput) return "unknown-possible-action";
+  if (outcome === "unknown" && !/(?:outcome=)?unknown/i.test(rawOutput)) {
+    return "unknown-possible-action";
+  }
+  return outcome;
+}
+
+async function codexAudioInputStateAsync() {
+  let output = "";
+  try {
+    const result = await execFileAsync(KEY_BRIDGE, ["audio-input-state"], {
+      encoding: "utf8",
+      timeout: 1000,
+      maxBuffer: 1024
+    });
+    output = result.stdout;
+  } catch (error) {
+    output = error?.stdout ?? "";
+  }
+  return parseAudioInputState(output);
+}
+
+async function nativeVoiceReleaseOutcomeAsync(options = {}) {
+  if (options.probeOnly) {
+    const stateReader = options.audioInputState ?? codexAudioInputStateAsync;
+    const state = parseAudioInputState(await stateReader());
+    return state === "inactive" ? "inactive" : state;
+  }
+
+  let output = "";
+  let succeeded = false;
+  try {
+    const result = await execFileAsync(KEY_BRIDGE, ["voice-up"], {
+      encoding: "utf8",
+      timeout: 2500,
+      maxBuffer: 1024
+    });
+    output = result.stdout;
+    succeeded = true;
+  } catch (error) {
+    output = error?.stdout ?? "";
+  }
+  return classifyNativeVoiceReleaseOutput(output, succeeded);
+}
+
+function voiceReleaseOutcomeSync(context, options = {}) {
+  if (typeof options.releaseVoice === "function") {
+    try {
+      return normalizeVoiceReleaseOutcome(options.releaseVoice(context, {
+        probeOnly: voiceReleaseProbeOnly
+      }));
+    } catch {
+      return "unknown-possible-action";
+    }
+  }
+  if (options.bridge) {
+    try {
+      if (voiceReleaseProbeOnly) {
+        const stateReader = options.audioInputState ?? codexAudioInputStateSync;
+        const state = parseAudioInputState(stateReader());
+        return state === "inactive" ? "inactive" : state;
+      }
+      return options.bridge("voice-up", context, { quiet: Boolean(options.quiet) })
+        ? "inactive"
+        : "unconfirmed-no-action";
+    } catch {
+      return "unknown-possible-action";
+    }
+  }
+  return nativeVoiceReleaseOutcomeSync(context, {
+    probeOnly: voiceReleaseProbeOnly,
+    audioInputState: options.audioInputState
+  });
+}
+
+async function voiceReleaseOutcomeAsync(context, options = {}) {
+  if (typeof options.releaseVoice === "function") {
+    try {
+      return normalizeVoiceReleaseOutcome(await options.releaseVoice(context, {
+        probeOnly: voiceReleaseProbeOnly
+      }));
+    } catch {
+      return "unknown-possible-action";
+    }
+  }
+  if (options.bridge) {
+    try {
+      if (voiceReleaseProbeOnly) {
+        const stateReader = options.audioInputState ?? codexAudioInputStateAsync;
+        const state = parseAudioInputState(await stateReader());
+        return state === "inactive" ? "inactive" : state;
+      }
+      return await options.bridge("voice-up", context, { quiet: Boolean(options.quiet) })
+        ? "inactive"
+        : "unconfirmed-no-action";
+    } catch {
+      return "unknown-possible-action";
+    }
+  }
+  return nativeVoiceReleaseOutcomeAsync({
+    probeOnly: voiceReleaseProbeOnly,
+    audioInputState: options.audioInputState
+  });
+}
+
+function cancelVoiceReleaseRetry() {
+  const state = voiceReleaseRetryState;
+  voiceReleaseRetryState = null;
+  voiceReleaseRetryGeneration += 1;
+  if (state?.timer != null) {
+    try {
+      state.clearSchedule(state.timer);
+    } catch {
+      // A stale generation check still prevents the callback from acting.
+    }
+  }
+}
+
+function scheduleVoiceReleaseRetry(context, releaseContexts, options = {}) {
+  const pendingContexts = [...new Set(releaseContexts)]
+    .filter((pendingContext) => voiceReleasePendingContexts.has(pendingContext));
+  if (pendingContexts.length === 0) return;
+  cancelVoiceReleaseRetry();
+  const generation = ++voiceReleaseRetryGeneration;
+  const state = {
+    generation,
+    context,
+    contexts: pendingContexts,
+    attempt: 0,
+    timer: null,
+    delays: options.retryDelays ?? VOICE_RELEASE_RETRY_DELAYS_MS,
+    schedule: options.retrySchedule ?? setTimeout,
+    clearSchedule: options.retryClearSchedule ?? clearTimeout,
+    bridge: options.bridge,
+    releaseVoice: options.releaseVoice,
+    audioInputState: options.audioInputState,
+    resumeMedia: options.resumeMedia,
+    onSuccess: options.onRetrySuccess
+  };
+  voiceReleaseRetryState = state;
+
+  const scheduleNext = () => {
+    if (voiceReleaseRetryState !== state || state.generation !== voiceReleaseRetryGeneration) return;
+    if (state.attempt >= state.delays.length) {
+      voiceReleaseRetryState = null;
+      voiceReleaseRetryGeneration += 1;
+      return;
+    }
+    const delayMs = state.delays[state.attempt];
+    state.timer = state.schedule(async () => {
+      if (voiceReleaseRetryState !== state || state.generation !== voiceReleaseRetryGeneration) return;
+      state.timer = null;
+      const stillPending = state.contexts.filter((pendingContext) => (
+        voiceReleasePendingContexts.has(pendingContext)
+      ));
+      if (stillPending.length === 0) {
+        cancelVoiceReleaseRetry();
+        return;
+      }
+      const onSuccess = state.onSuccess;
+      const released = await confirmVoiceReleaseAsync(state.context, stillPending, {
+        bridge: state.bridge,
+        releaseVoice: state.releaseVoice,
+        audioInputState: state.audioInputState,
+        resumeMedia: state.resumeMedia,
+        scheduleRetry: false,
+        quiet: true,
+        isCurrent: () => voiceReleaseRetryState === state
+          && state.generation === voiceReleaseRetryGeneration
+      });
+      if (released == null) return;
+      if (released) {
+        try {
+          onSuccess?.();
+        } catch {
+          // The release is safe even if a now-removed Stream Deck context can
+          // no longer update its transcription visual.
+        }
+        return;
+      }
+      if (voiceReleaseRetryState !== state
+          || state.generation !== voiceReleaseRetryGeneration) return;
+      state.attempt += 1;
+      scheduleNext();
+    }, Math.max(0, delayMs));
+  };
+  scheduleNext();
+}
+
+function applyVoiceReleaseOutcome(context, releaseContexts, outcome, options = {}) {
+  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoice;
+  const affectedContexts = [...new Set(releaseContexts)].filter(Boolean);
+  if (affectedContexts.length === 0 && !options.force) return true;
+
+  const commandContext = context ?? affectedContexts.at(-1) ?? null;
+  const released = outcome === "inactive";
+  if (outcome === "unconfirmed-after-stop-action" || outcome === "unknown-possible-action") {
+    voiceReleaseProbeOnly = true;
+  }
+  else if (released) voiceReleaseProbeOnly = false;
+  runtimeTrace("voice-hold", {
+    phase: "release",
+    result: released ? "released" : "failed"
+  });
+
+  for (const affectedContext of affectedContexts) {
+    clearVoiceStartVerification(affectedContext);
+    voiceHeldContexts.delete(affectedContext);
+    if (!released) voiceReleasePendingContexts.add(affectedContext);
+    else voiceReleasePendingContexts.delete(affectedContext);
+  }
+  if (!released) {
+    if (options.markFailure !== false) {
+      for (const affectedContext of affectedContexts) {
+        // Keep the error visible while release is unresolved. A timed reset
+        // would hide an active pending-release gate and discard its task hint.
+        setVoiceVisualState(affectedContext, "error");
+      }
+    }
+    if (options.scheduleRetry !== false) {
+      scheduleVoiceReleaseRetry(commandContext, affectedContexts, options);
+    }
+    return false;
+  }
+
+  if (voiceReleasePendingContexts.size === 0) cancelVoiceReleaseRetry();
+
+  if (options.releaseMedia !== false) {
+    for (const affectedContext of affectedContexts) {
+      try {
+        void resumeMedia(affectedContext);
+      } catch {
+        // The serialized media lease keeps its state when a resume operation
+        // fails. Voice release itself is still confirmed and safe to continue.
+      }
+    }
+  }
+  return true;
+}
+
+function markVoiceReleasePendingWhileInFlight(releaseContexts, options = {}) {
+  const affectedContexts = [...new Set(releaseContexts)].filter(Boolean);
+  for (const affectedContext of affectedContexts) {
+    clearVoiceStartVerification(affectedContext);
+    voiceHeldContexts.delete(affectedContext);
+    voiceReleasePendingContexts.add(affectedContext);
+    if (options.markFailure !== false) setVoiceVisualState(affectedContext, "error");
+  }
+  return false;
+}
+
+function confirmVoiceReleaseSync(context, releaseContexts, options = {}) {
+  const affectedContexts = [...new Set(releaseContexts)].filter(Boolean);
+  if (affectedContexts.length === 0 && !options.force) return true;
+  // A scheduled native helper may be polling CoreAudio or have already pressed
+  // Stop. Never overlap it with another full release attempt from a key event.
+  if (voiceReleaseAttemptInFlight) {
+    return markVoiceReleasePendingWhileInFlight(affectedContexts, options);
+  }
+  const commandContext = context ?? affectedContexts.at(-1) ?? null;
+  const outcome = voiceReleaseOutcomeSync(commandContext, options);
+  return applyVoiceReleaseOutcome(commandContext, affectedContexts, outcome, options);
+}
+
+async function confirmVoiceReleaseAsync(context, releaseContexts, options = {}) {
+  const affectedContexts = [...new Set(releaseContexts)].filter(Boolean);
+  if (affectedContexts.length === 0 && !options.force) return true;
+  if (voiceReleaseAttemptInFlight) return false;
+  const commandContext = context ?? affectedContexts.at(-1) ?? null;
+  const attempt = { generation: voiceReleaseRetryGeneration };
+  voiceReleaseAttemptInFlight = attempt;
+  let outcome;
+  try {
+    outcome = await voiceReleaseOutcomeAsync(commandContext, options);
+  } finally {
+    if (voiceReleaseAttemptInFlight === attempt) voiceReleaseAttemptInFlight = null;
+  }
+  if (typeof options.isCurrent === "function" && !options.isCurrent()) return null;
+  return applyVoiceReleaseOutcome(commandContext, affectedContexts, outcome, options);
+}
+
+function verifyVoiceStarted(context, options = {}) {
   clearVoiceStartVerification(context);
-  if (!voiceHeldContexts.has(context) || codexAudioInputActiveSync()) return;
+  const audioInputState = options.audioInputState ?? codexAudioInputStateSync;
+  const reportError = options.reportError ?? ((message) => console.error(message));
+  if (!voiceHeldContexts.has(context)) return;
+  const inputState = parseAudioInputState(audioInputState());
+  if (inputState === "active") return;
+  if (inputState === "unknown") {
+    const unknownAttempt = options.unknownAttempt ?? 0;
+    const unknownRetryDelays = options.unknownRetryDelays
+      ?? VOICE_START_UNKNOWN_RETRY_DELAYS_MS;
+    if (unknownAttempt < unknownRetryDelays.length) {
+      const schedule = options.verificationSchedule ?? setTimeout;
+      const timer = schedule(() => verifyVoiceStarted(context, {
+        ...options,
+        unknownAttempt: unknownAttempt + 1
+      }), Math.max(0, unknownRetryDelays[unknownAttempt]));
+      voiceStartVerificationTimers.set(context, timer);
+      return;
+    }
+    // Unknown is not evidence that start failed. Keep the held recording and
+    // media lease intact; the real key-up will run the confirmed release gate.
+    reportError("Codex audio input state could not be verified; waiting for key release");
+    return;
+  }
 
   const failedContexts = [...voiceHeldContexts];
-  voiceHeldContexts.clear();
-  for (const failedContext of failedContexts) clearVoiceStartVerification(failedContext);
-  runKeyBridgeSync("voice-up", context);
-  resumeMediaAfterVoiceSync();
-  for (const failedContext of failedContexts) failVoiceTranscription(failedContext);
-  console.error("Codex audio input did not start after the push-to-talk shortcut");
-}
-
-function pauseMediaForVoiceSync(context = null) {
-  if (voiceSuspendedMediaPids.size > 0) return;
-  for (const { pid, bundleId } of runningMediaProcessesSync()) {
-    try {
-      process.kill(pid, "SIGSTOP");
-      voiceSuspendedMediaPids.add(pid);
-    } catch (error) {
-      console.error(`Could not pause media process ${bundleId} (${pid}): ${error?.message ?? "unknown error"}`);
+  const finalizeFailedStart = () => {
+    for (const failedContext of failedContexts) {
+      failVoiceTranscription(failedContext);
+      voiceSessionIdByContext.delete(failedContext);
     }
-  }
+  };
+  const released = confirmVoiceReleaseSync(context, failedContexts, {
+    bridge: options.bridge,
+    releaseVoice: options.releaseVoice,
+    audioInputState: options.audioInputState,
+    resumeMedia: options.resumeMedia,
+    retryDelays: options.retryDelays,
+    retrySchedule: options.retrySchedule,
+    retryClearSchedule: options.retryClearSchedule,
+    onRetrySuccess: finalizeFailedStart
+  });
+  if (released) finalizeFailedStart();
+  reportError(released
+    ? "Codex audio input did not start after the push-to-talk shortcut"
+    : inputState === "unknown"
+      ? "Codex audio input state stayed unknown and its release could not be confirmed"
+      : "Codex audio input start failed and its release could not be confirmed");
 }
 
-function resumeMediaAfterVoiceSync() {
-  for (const pid of voiceSuspendedMediaPids) {
+function addVoiceMediaPauseOwner(context) {
+  if (!context || voiceMediaPauseOwners.has(context)) return false;
+  voiceMediaPauseOwners.add(context);
+  voiceMediaOwnerGeneration += 1;
+  return true;
+}
+
+function removeVoiceMediaPauseOwner(context) {
+  if (!context || !voiceMediaPauseOwners.delete(context)) return false;
+  voiceMediaOwnerGeneration += 1;
+  return true;
+}
+
+function clearVoiceMediaPauseOwners() {
+  if (voiceMediaPauseOwners.size === 0) return false;
+  voiceMediaPauseOwners.clear();
+  voiceMediaOwnerGeneration += 1;
+  voiceMediaResumeReassertPending = false;
+  return true;
+}
+
+async function pauseMediaForVoice(context = null, options = {}) {
+  addVoiceMediaPauseOwner(context);
+  const bridge = options.bridge ?? runKeyBridgeAwaited;
+  const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const operation = voiceMediaTransitionTail.then(async () => {
+    // A key can be released while this operation is waiting behind an earlier
+    // transition. Do not pause media for a hold that no longer owns the lease.
+    if (context && !voiceMediaPauseOwners.has(context)) return voiceMediaPaused;
+    if (voiceMediaPaused) return true;
     try {
-      process.kill(pid, "SIGCONT");
-    } catch (error) {
-      if (error?.code !== "ESRCH") console.error(`Could not resume media process ${pid}: ${error?.message ?? "unknown error"}`);
+      const reassertingResumeRace = voiceMediaResumeReassertPending;
+      const attempts = reassertingResumeRace ? VOICE_MEDIA_REASSERT_ATTEMPTS : 1;
+      let paused = false;
+      for (let attempt = 0; attempt < attempts; attempt += 1) {
+        if (reassertingResumeRace) await sleep(VOICE_MEDIA_REASSERT_DELAY_MS);
+        if (context && !voiceMediaPauseOwners.has(context)) return voiceMediaPaused;
+        paused = Boolean(await bridge("media-pause-if-playing", null, { quiet: true }));
+        if (paused) break;
+      }
+      if (paused) {
+        voiceMediaPaused = true;
+        voiceMediaResumeReassertPending = false;
+      } else if (!reassertingResumeRace) {
+        removeVoiceMediaPauseOwner(context);
+      }
+      runtimeTrace("voice-media", {
+        phase: "pause",
+        result: paused ? "paused" : reassertingResumeRace ? "unconfirmed" : "idle",
+        mediaPaused: voiceMediaPaused
+      });
+      return paused;
+    } catch {
+      if (!voiceMediaResumeReassertPending) removeVoiceMediaPauseOwner(context);
+      runtimeTrace("voice-media", { phase: "pause", result: "failed", mediaPaused: voiceMediaPaused });
+      return false;
     }
-  }
-  voiceSuspendedMediaPids.clear();
+  });
+  voiceMediaTransitionTail = operation.catch(() => false);
+  return operation;
 }
 
-function supersedeHeldVoiceSync(context, bridge = runKeyBridgeSync) {
-  const previousContexts = [...voiceHeldContexts].filter((heldContext) => heldContext !== context);
-  if (previousContexts.length === 0) return false;
+async function resumeMediaAfterVoice(context = null, options = {}) {
+  if (context) removeVoiceMediaPauseOwner(context);
+  else clearVoiceMediaPauseOwners();
+  const requestedGeneration = voiceMediaOwnerGeneration;
+  const bridge = options.bridge ?? runKeyBridgeAwaited;
+  const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const debounceMs = options.debounceMs ?? VOICE_MEDIA_RESUME_DEBOUNCE_MS;
+  const operation = voiceMediaTransitionTail.then(async () => {
+    if (voiceMediaPauseOwners.size > 0
+        || voiceMediaOwnerGeneration !== requestedGeneration
+        || !voiceMediaPaused) return false;
+    if (debounceMs > 0) await sleep(debounceMs);
+    if (voiceMediaPauseOwners.size > 0
+        || voiceMediaOwnerGeneration !== requestedGeneration
+        || !voiceMediaPaused) {
+      runtimeTrace("voice-media", {
+        phase: "resume",
+        result: "coalesced",
+        mediaPaused: voiceMediaPaused
+      });
+      return false;
+    }
+    try {
+      const resumed = Boolean(await bridge("media-play-pause", null, { quiet: true }));
+      if (!resumed) {
+        // Keep ownership of the paused state so a later release or shutdown can
+        // retry instead of forgetting media that is still stopped.
+        runtimeTrace("voice-media", { phase: "resume", result: "failed", mediaPaused: true });
+        return false;
+      }
+      voiceMediaPaused = false;
+      if (voiceMediaPauseOwners.size > 0
+          || voiceMediaOwnerGeneration !== requestedGeneration) {
+        // The new owner's queued pause uses the state-aware native command.
+        // Never issue a blind second play/pause toggle here: that was the
+        // audible play-then-pause blip this debounce is designed to avoid.
+        voiceMediaResumeReassertPending = true;
+        runtimeTrace("voice-media", {
+          phase: "resume-race",
+          result: "pause-queued",
+          mediaPaused: false
+        });
+        return false;
+      }
+      runtimeTrace("voice-media", { phase: "resume", result: "resumed", mediaPaused: false });
+      return true;
+    } catch {
+      runtimeTrace("voice-media", { phase: "resume", result: "failed", mediaPaused: true });
+      return false;
+    }
+  });
+  voiceMediaTransitionTail = operation.catch(() => false);
+  return operation;
+}
+
+function supersedeHeldVoiceSync(context, options = {}) {
+  const previousContexts = [...new Set([
+    ...voiceHeldContexts,
+    ...voiceReleasePendingContexts
+  ])];
+  if (previousContexts.length === 0) return true;
 
   // The Codex push-to-talk shortcut and composer are global. A second key
   // cannot safely share the physical hold with the first key because either
-  // release order could then attribute the transcript to the wrong task.
-  voiceHeldContexts.clear();
-  for (const previousContext of previousContexts) clearVoiceStartVerification(previousContext);
-  bridge("voice-up", previousContexts.at(-1));
-  return true;
+  // release order could then attribute the transcript to the wrong task. Do
+  // not emit the next voice-down until native code has proved audio inactive.
+  const finalizeSupersededRelease = () => {
+    for (const previousContext of previousContexts) {
+      cancelVoiceTranscription(previousContext, true);
+      voiceSessionIdByContext.delete(previousContext);
+    }
+  };
+  return confirmVoiceReleaseSync(previousContexts.at(-1), previousContexts, {
+    bridge: options.bridge,
+    releaseVoice: options.releaseVoice,
+    audioInputState: options.audioInputState,
+    resumeMedia: options.resumeMedia,
+    retryDelays: options.retryDelays,
+    retrySchedule: options.retrySchedule,
+    retryClearSchedule: options.retryClearSchedule,
+    onRetrySuccess: finalizeSupersededRelease
+  });
 }
 
 function beginVoiceHoldSync(context, options = {}) {
   if (voiceHeldContexts.has(context)) return true;
   const bridge = options.bridge ?? runKeyBridgeSync;
   const stateReader = options.stateReader ?? textInputStateSync;
-  const pauseMedia = options.pauseMedia ?? pauseMediaForVoiceSync;
-  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoiceSync;
-  supersedeHeldVoiceSync(context, bridge);
+  const pauseMedia = options.pauseMedia ?? pauseMediaForVoice;
+  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoice;
+  if (!supersedeHeldVoiceSync(context, { ...options, resumeMedia })) {
+    // The previous recording is still possibly active. Leave its media owner
+    // intact and fail closed instead of layering another shortcut on top.
+    setVoiceVisualState(
+      context,
+      "error",
+      voiceReleasePendingContexts.has(context) ? null : VOICE_ERROR_DISPLAY_MS
+    );
+    return false;
+  }
+  void pauseMedia(context);
   cancelVoiceTranscription(context);
   voiceStateByContext.delete(context);
   const sessionId = claimVoiceSession(context);
@@ -1548,6 +2201,18 @@ function beginVoiceHoldSync(context, options = {}) {
     bridge("codex-focus-composer", null, { quiet: true });
     baseline = stateReader();
   }
+  const baselineRequired = options.requireBaseline ?? Boolean(options.autoSubmit);
+  runtimeTrace("voice-hold", {
+    phase: "baseline",
+    baselineReady: Boolean(baseline),
+    held: true
+  });
+  if (baselineRequired && !baseline) {
+    void resumeMedia(context);
+    failVoiceTranscription(context);
+    runtimeTrace("voice-hold", { phase: "start", result: "no-composer" });
+    return false;
+  }
   voiceTranscriptionByContext.set(context, {
     baseline,
     lastObserved: baseline,
@@ -1559,14 +2224,14 @@ function beginVoiceHoldSync(context, options = {}) {
     sessionId
   });
   if (voiceHeldContexts.size === 0) {
-    pauseMedia(context);
     if (!bridge("voice-down", context)) {
-      resumeMedia();
+      void resumeMedia(context);
       failVoiceTranscription(context);
       return false;
     }
   }
   voiceHeldContexts.add(context);
+  runtimeTrace("voice-hold", { phase: "recording", result: "started" });
   setVoiceVisualState(context, "recording");
   clearVoiceStartVerification(context);
   voiceStartVerificationTimers.set(
@@ -1576,23 +2241,18 @@ function beginVoiceHoldSync(context, options = {}) {
   return true;
 }
 
-function endVoiceHoldSync(context, trackTranscription = true, options = {}) {
-  const bridge = options.bridge ?? runKeyBridgeSync;
-  const stateReader = options.stateReader ?? textInputStateSync;
-  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoiceSync;
-  clearVoiceStartVerification(context);
-  if (!voiceHeldContexts.delete(context)) return;
-  if (voiceHeldContexts.size > 0) return;
-  const released = bridge("voice-up", context);
-  resumeMedia();
-  if (!trackTranscription) {
-    cancelVoiceTranscription(context, true);
-    return;
+function finalizeVoiceRelease(context, releaseContexts, trackTranscription, stateReader) {
+  // A delayed release probe can finish after Stream Deck has already removed
+  // the key context. Never let the older track=true continuation recreate a
+  // transcript/session for a disappeared key.
+  const shouldTrackTranscription = trackTranscription && contextSupportsVoice(context);
+  for (const releasedContext of releaseContexts) {
+    if (releasedContext !== context || !shouldTrackTranscription) {
+      cancelVoiceTranscription(releasedContext, true);
+      voiceSessionIdByContext.delete(releasedContext);
+    }
   }
-  if (!released) {
-    failVoiceTranscription(context);
-    return;
-  }
+  if (!shouldTrackTranscription) return true;
   const tracker = voiceTranscriptionByContext.get(context) ?? {
     baseline: stateReader(),
     lastObserved: null,
@@ -1611,15 +2271,79 @@ function endVoiceHoldSync(context, trackTranscription = true, options = {}) {
   tracker.releasedAtMs = Date.now();
   voiceTranscriptionByContext.set(context, tracker);
   setVoiceVisualState(context, "transcribing");
+  return true;
 }
 
-function releaseVoiceKeysSync() {
-  try {
-    execFileSync(KEY_BRIDGE, ["release"], { stdio: "ignore", timeout: 1000 });
-  } catch {
-    // Best-effort cleanup only; never keep Stream Deck from shutting down.
+function endVoiceHoldSync(context, trackTranscription = true, options = {}) {
+  const bridge = options.bridge ?? runKeyBridgeSync;
+  const stateReader = options.stateReader ?? textInputStateSync;
+  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoice;
+  clearVoiceStartVerification(context);
+  if (!voiceHeldContexts.has(context) && !voiceReleasePendingContexts.has(context)) return true;
+  const releaseContexts = [...new Set([
+    ...voiceHeldContexts,
+    ...voiceReleasePendingContexts
+  ])];
+  const finalizeRelease = () => finalizeVoiceRelease(
+    context,
+    releaseContexts,
+    trackTranscription,
+    stateReader
+  );
+  const released = confirmVoiceReleaseSync(context, releaseContexts, {
+    bridge: options.bridge,
+    releaseVoice: options.releaseVoice,
+    audioInputState: options.audioInputState,
+    resumeMedia,
+    retryDelays: options.retryDelays,
+    retrySchedule: options.retrySchedule,
+    retryClearSchedule: options.retryClearSchedule,
+    onRetrySuccess: finalizeRelease
+  });
+  if (!released) {
+    // Keep the original baseline and media-pause lease so a later key-up, new
+    // hold, or shutdown can retry the same confirmed release safely.
+    return false;
   }
-  voiceHeldContexts.clear();
+  return finalizeRelease();
+}
+
+function releaseVoiceKeysSync(rawOptions = {}) {
+  if (shutdownCleanupStarted) return shutdownCleanupResult;
+  shutdownCleanupStarted = true;
+  const options = rawOptions && typeof rawOptions === "object" ? rawOptions : {};
+  const bridge = options.bridge ?? runKeyBridgeSync;
+  cancelVoiceReleaseRetry();
+  const releaseContexts = [...new Set([
+    ...voiceHeldContexts,
+    ...voiceReleasePendingContexts,
+    ...voiceMediaPauseOwners
+  ])];
+  const needsVoiceRelease = releaseContexts.length > 0 || voiceMediaPaused;
+  const released = !needsVoiceRelease || confirmVoiceReleaseSync(
+    releaseContexts.at(-1) ?? null,
+    releaseContexts,
+    {
+      bridge: options.bridge,
+      releaseVoice: options.releaseVoice,
+      audioInputState: options.audioInputState,
+      force: true,
+      quiet: true,
+      markFailure: false,
+      releaseMedia: false,
+      scheduleRetry: false
+    }
+  );
+  if (!released) {
+    // voice-up already releases the physical keys first, but retain this
+    // best-effort fallback for shutdowns where the helper itself was replaced
+    // or could not finish. Never resume media without audio-stop confirmation.
+    try {
+      bridge("release", null, { quiet: true });
+    } catch {
+      // Process shutdown must continue; the fail-closed media state remains.
+    }
+  }
   voiceTranscriptionByContext.clear();
   voiceStateByContext.clear();
   voiceStateResetAtMs.clear();
@@ -1631,17 +2355,27 @@ function releaseVoiceKeysSync() {
     if (state.timer) clearTimeout(state.timer);
   }
   threadPressByContext.clear();
-  resumeMediaAfterVoiceSync();
+  if (released && voiceMediaPaused && bridge("media-play-pause", null, { quiet: true })) {
+    voiceMediaPaused = false;
+  }
+  if (released && !voiceMediaPaused) clearVoiceMediaPauseOwners();
+  voiceMediaTransitionTail = Promise.resolve();
+  activeRemoteNavigation?.controller.abort();
+  activeRemoteNavigation = null;
+  shutdownCleanupResult = released && !voiceMediaPaused;
+  return shutdownCleanupResult;
 }
 
-async function readCodexQueueWindows() {
+async function readCodexQueueWindows(options = {}) {
   try {
     const { stdout } = await execFileAsync(KEY_BRIDGE, ["codex-queue-state"], {
       timeout: 1800,
-      maxBuffer: 64 * 1024
+      maxBuffer: 64 * 1024,
+      signal: options.signal
     });
     return parseCodexQueueWindows(stdout);
-  } catch {
+  } catch (error) {
+    if (isAbortError(error)) throw error;
     return [];
   }
 }
@@ -1659,6 +2393,48 @@ function matchQueueWindowThread(window, threads) {
       ?? [...candidates].sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a))[0];
   }
   return null;
+}
+
+function focusedQueueThread(windows, threads) {
+  const focusedWindow = windows.find((window) => window.focused)
+    ?? (windows.length === 1 ? windows[0] : null);
+  return focusedWindow ? matchQueueWindowThread(focusedWindow, threads) : null;
+}
+
+function remoteThreadKeyBridgeCommand(thread, baseCommand) {
+  return thread?.titleAmbiguous ? `${baseCommand}-strict` : baseCommand;
+}
+
+async function remoteThreadIsFocused(thread, options = {}) {
+  const fingerprints = [...titleFingerprints(thread.title)];
+  const command = remoteThreadKeyBridgeCommand(thread, "codex-focused-thread");
+  const args = thread.titleAmbiguous ? [thread.id] : [thread.id, ...fingerprints];
+  const probe = options.probe
+    ?? ((probeCommand, probeArgs) => execFileAsync(KEY_BRIDGE, [probeCommand, ...probeArgs], {
+      timeout: 1000,
+      maxBuffer: 4096,
+      signal: options.signal
+    }));
+  try {
+    await probe(command, args);
+    return true;
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    return false;
+  }
+}
+
+async function waitForRemoteThreadFocused(thread, options = {}) {
+  const delays = options.delays ?? REMOTE_READY_POLL_DELAYS_MS;
+  for (const delayMs of delays) {
+    if (delayMs > 0) await sleepWithSignal(delayMs, options.signal);
+    if (await remoteThreadIsFocused(thread, {
+      ...options,
+      force: true,
+      nowMs: Date.now()
+    })) return true;
+  }
+  return false;
 }
 
 function applyQueueState(threads, windows, nowMs = Date.now()) {
@@ -2566,6 +3342,23 @@ function selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds) {
   return selectThreadRows(localRows, remoteRows, openSideChats, pinnedIds, THREAD_COUNT);
 }
 
+function annotateKnownTitleAmbiguity(selected, candidates) {
+  const ownersByFingerprint = new Map();
+  for (const candidate of candidates) {
+    if (!candidate?.id || !candidate?.title) continue;
+    for (const fingerprint of titleFingerprints(candidate.title)) {
+      const owners = ownersByFingerprint.get(fingerprint) ?? new Set();
+      owners.add(candidate.id);
+      ownersByFingerprint.set(fingerprint, owners);
+    }
+  }
+  return selected.map((thread) => ({
+    ...thread,
+    titleAmbiguous: [...titleFingerprints(thread.title)]
+      .some((fingerprint) => (ownersByFingerprint.get(fingerprint)?.size ?? 0) > 1)
+  }));
+}
+
 async function readTopThreads() {
   const queueWindowsPromise = readCodexQueueWindows();
   const globalStatePromise = readGlobalStateSnapshot();
@@ -2595,7 +3388,11 @@ async function readTopThreads() {
     if (sideChatLifecycles.get(thread.id)?.status === "closed") sideChatParentById.delete(thread.id);
   }
   const selection = selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds);
-  const { selected, byId } = selection;
+  const selected = annotateKnownTitleAmbiguity(
+    selection.selected,
+    [...localRows, ...remoteRows, ...openSideChats]
+  );
+  const { byId } = selection;
   mostRecentThreadId = selection.mostRecentId;
   const [queueWindows] = await Promise.all([
     queueWindowsPromise,
@@ -2934,6 +3731,145 @@ async function refreshThreads(feedbackContext, options = {}) {
   return activeThreadRefresh;
 }
 
+async function performRemoteNavigation(thread, slot, options = {}) {
+  const signal = options.signal ?? null;
+  const startedAtMs = Date.now();
+  const fingerprints = [...titleFingerprints(thread.title)];
+  const directCommand = remoteThreadKeyBridgeCommand(thread, "codex-open-thread");
+  const searchCommand = remoteThreadKeyBridgeCommand(thread, "codex-search-thread");
+  const directArgs = thread.titleAmbiguous ? [thread.id] : [thread.id, ...fingerprints];
+  const openApp = options.openApp
+    ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
+      timeout: 5000,
+      signal
+    }));
+  const directOpen = options.directOpen
+    ?? (() => execFileAsync(KEY_BRIDGE, [directCommand, ...directArgs], {
+      timeout: 4000,
+      maxBuffer: 64 * 1024,
+      signal
+    }));
+  const searchOpen = options.searchOpen
+    ?? (() => runKeyBridgeWithInput(
+      searchCommand,
+      directArgs,
+      thread.title,
+      { timeoutMs: 6000, signal }
+    ));
+  const waitFrontmost = options.waitFrontmost
+    ?? (() => execFileAsync(KEY_BRIDGE, ["codex-wait-frontmost"], {
+      timeout: 3000,
+      maxBuffer: 4096,
+      signal
+    }));
+  const sleep = options.sleep ?? sleepWithSignal;
+  const waitFocused = options.waitFocused
+    ?? ((focusedOptions = {}) => waitForRemoteThreadFocused(thread, focusedOptions));
+
+  runtimeTrace("remote-navigation", { slot: slot + 1, remote: true, phase: "start" });
+  await openApp();
+  // `open -b` returns when LaunchServices has accepted the request, not when
+  // Codex is actually frontmost. Wait on observable app state once so a cold
+  // launch cannot burn both sidebar attempts and the search fallback before
+  // the window is ready. AbortSignal still terminates the native poll when a
+  // newer task selection supersedes this one.
+  await waitFrontmost();
+
+  let lastError = null;
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    if (attempt > 0) await sleep(REMOTE_APP_ACTIVATION_RETRY_MS, signal);
+    try {
+      const directResult = await directOpen();
+      const directOutput = String(directResult?.stdout ?? "");
+      const directIdentity = directOutput.includes("strategy=uuid")
+        ? "uuid"
+        : directOutput.includes("strategy=title")
+          ? "title"
+          : "unknown";
+      const ready = await waitFocused({
+        signal,
+        delays: REMOTE_DIRECT_READY_POLL_DELAYS_MS
+      });
+      if (ready) {
+        runtimeTrace("remote-navigation", {
+          slot: slot + 1,
+          remote: true,
+          strategy: thread.titleAmbiguous ? "sidebar-strict" : "sidebar",
+          result: "ready",
+          reason: directIdentity,
+          elapsedMs: Date.now() - startedAtMs
+        });
+        return true;
+      }
+      lastError = new Error("remote thread did not become focused after sidebar activation");
+      break;
+    } catch (error) {
+      if (isAbortError(error)) throw error;
+      if (keyBridgeExitCode(error) === 3) throw error;
+      lastError = error;
+    }
+  }
+
+  runtimeTrace("remote-navigation", {
+    slot: slot + 1,
+    remote: true,
+    strategy: thread.titleAmbiguous ? "search-strict" : "search",
+    phase: "start"
+  });
+  try {
+    await searchOpen();
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    lastError = error;
+    throw lastError;
+  }
+  if (!await waitFocused({ signal, delays: REMOTE_READY_POLL_DELAYS_MS })) {
+    throw new Error("remote thread search closed before the target became focused", { cause: lastError });
+  }
+  runtimeTrace("remote-navigation", {
+    slot: slot + 1,
+    remote: true,
+    strategy: thread.titleAmbiguous ? "search-strict" : "search",
+    result: "ready",
+    elapsedMs: Date.now() - startedAtMs
+  });
+  return true;
+}
+
+function navigateRemoteThread(thread, slot, options = {}) {
+  if (activeRemoteNavigation?.threadId === thread.id) {
+    runtimeTrace("remote-navigation", {
+      slot: slot + 1,
+      remote: true,
+      phase: "coalesce",
+      coalesced: true
+    });
+    return activeRemoteNavigation.promise;
+  }
+  if (activeRemoteNavigation) {
+    activeRemoteNavigation.controller.abort();
+    runtimeTrace("remote-navigation", {
+      slot: slot + 1,
+      remote: true,
+      phase: "supersede"
+    });
+  }
+  const controller = new AbortController();
+  const navigation = {
+    threadId: thread.id,
+    controller,
+    promise: null
+  };
+  navigation.promise = performRemoteNavigation(thread, slot, {
+    ...options,
+    signal: controller.signal
+  }).finally(() => {
+    if (activeRemoteNavigation === navigation) activeRemoteNavigation = null;
+  });
+  activeRemoteNavigation = navigation;
+  return navigation.promise;
+}
+
 async function openThread(context, slot) {
   const thread = threadSlots[slot];
   if (!thread?.id) {
@@ -2948,72 +3884,35 @@ async function openThread(context, slot) {
     return false;
   }
   pendingSideChatTarget = null;
-  lastOpenedThreadId = thread.id;
-  lastOpenedThreadAtMs = Date.now();
   showFeedback(context, "loading", "여는 중");
   try {
     if (thread.remote) {
-      await execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 });
-      await new Promise((resolve) => setTimeout(resolve, REMOTE_APP_ACTIVATION_SETTLE_MS));
-      let opened = false;
-      let lastError = null;
-      let sawAmbiguousTitle = false;
-      for (let attempt = 0; attempt < 2 && !opened && !sawAmbiguousTitle; attempt += 1) {
-        if (attempt > 0) {
-          await new Promise((resolve) => setTimeout(resolve, REMOTE_APP_ACTIVATION_RETRY_MS));
-        }
-        for (const fingerprint of titleFingerprints(thread.title)) {
-          try {
-            await execFileAsync(KEY_BRIDGE, ["codex-open-thread", thread.id, fingerprint], {
-              timeout: 4000,
-              maxBuffer: 64 * 1024
-            });
-            opened = true;
-            break;
-          } catch (error) {
-            if (keyBridgeExitCode(error) === 3) sawAmbiguousTitle = true;
-            lastError = error;
-          }
-        }
-      }
-      // Remote rows outside the currently expanded sidebar are not mounted in
-      // Chromium's accessibility tree. Codex's unified task search includes
-      // every connected host, and pressing its exact result runs Codex's own
-      // host activation before navigation.
-      if (!opened) {
-        for (const title of titleVariants(thread.title)) {
-          try {
-            await runKeyBridgeWithInput(
-              "codex-search-thread",
-              [thread.id, stringFingerprint(title)],
-              title
-            );
-            opened = true;
-            break;
-          } catch (error) {
-            if (keyBridgeExitCode(error) === 3) sawAmbiguousTitle = true;
-            lastError = error;
-          }
-        }
-      }
-      if (!opened && sawAmbiguousTitle && keyBridgeExitCode(lastError) !== 3) {
-        const ambiguousError = new Error("remote thread title is ambiguous");
-        ambiguousError.exitCode = 3;
-        lastError = ambiguousError;
-      }
-      if (!opened) throw lastError ?? new Error("remote thread row unavailable");
+      await navigateRemoteThread(thread, slot);
+      lastOpenedThreadId = thread.id;
+      lastOpenedThreadAtMs = Date.now();
       showFeedback(context, "success", "원격 전환");
       setTimeout(() => void refreshThreads(), 1000);
       return true;
     }
     await execFileAsync("/usr/bin/open", [`codex://threads/${thread.id}`], { timeout: 5000 });
+    lastOpenedThreadId = thread.id;
+    lastOpenedThreadAtMs = Date.now();
     showFeedback(context, "success", "전환 완료");
     setTimeout(() => void refreshThreads(), 1000);
     return true;
   } catch (error) {
+    if (isAbortError(error)) {
+      clearFeedback(context);
+      runtimeTrace("remote-navigation", {
+        slot: slot + 1,
+        remote: Boolean(thread.remote),
+        result: "cancelled"
+      });
+      return false;
+    }
     const exitCode = keyBridgeExitCode(error);
     const label = thread.remote
-      ? exitCode === 3 ? "제목 중복" : "원격 확인"
+      ? exitCode === 3 || thread.titleAmbiguous ? "제목 중복" : "원격 확인"
       : "열기 실패";
     showFeedback(context, "error", label, thread.remote ? 1800 : undefined);
     console.error(`Could not open Codex ${thread.remote ? "remote " : ""}thread: ${error?.message ?? "unknown error"}`);
@@ -3107,6 +4006,9 @@ function registerPlugin() {
 
   socket.addEventListener("open", () => {
     send({ event: registerEvent, uuid: pluginUUID });
+    // Prime the only synchronous permission check before the first hardware
+    // press. This keeps first-use remote switching and push-to-talk responsive.
+    primeAccessibilityTrust();
     // CodexBar takes several seconds on a cold request. Prime the cache while
     // the current Stream Deck page is rendering so the usage page can appear
     // with a value immediately.
@@ -3151,8 +4053,15 @@ function registerPlugin() {
         if (svg) setImage(message.context, svg);
       }
     } else if (message.event === "willDisappear") {
-      endVoiceHoldSync(message.context, false);
-      cancelThreadPress(message.context, false);
+      // A task-key hold owns both the voice release and its media lease. Let
+      // that press state perform one gated teardown; calling the generic media
+      // cleanup afterwards could otherwise bypass a failed voice-up.
+      if (threadPressByContext.get(message.context)?.voiceStarted) {
+        cancelThreadPress(message.context, true);
+      } else {
+        endVoiceHoldSync(message.context, false);
+        cancelThreadPress(message.context, false);
+      }
       cancelVoiceTranscription(message.context);
       cancelSendPress(message.context);
       voiceStateByContext.delete(message.context);
@@ -3242,6 +4151,7 @@ function resetDemoEffects() {
   completionPulseStartedAt.clear();
   completionPulseReasonByThreadId.clear();
   voiceHeldContexts.clear();
+  voiceReleasePendingContexts.clear();
   voiceStateByContext.clear();
   voiceTargetThreadByContext.clear();
   voiceSessionIdByContext.clear();
@@ -3448,7 +4358,11 @@ function taskHoldGestureFrame(nowMs, elapsedMs) {
   let activeStage = 0;
   let accent = THEME.text;
   let result = "TAP = OPEN · 짧게 = 작업 열기";
-  if (elapsedMs >= 1_400 && elapsedMs < 2_650) {
+  if (elapsedMs >= 650 && elapsedMs < 1_400) {
+    state = "preparing";
+    accent = THEME.blue;
+    result = "TARGET READYING · 전환 준비";
+  } else if (elapsedMs >= 1_400 && elapsedMs < 2_650) {
     state = "recording";
     activeStage = 1;
     accent = THEME.amber;
@@ -3980,6 +4894,39 @@ async function verifyVoiceSubmissionPolicy() {
   voiceSessionIdByContext.clear();
   contexts.set(context, ACTIONS.thread1);
 
+  const sameTitlePeerId = "00000000-0000-4000-8000-000000000022";
+  const sameTitle = "동일 제목 음성 대상";
+  const [sameTitleTarget, sameTitlePeer] = annotateKnownTitleAmbiguity([
+    { id: targetThreadId, title: sameTitle, remote: true },
+    { id: sameTitlePeerId, title: sameTitle, remote: true }
+  ], [
+    { id: targetThreadId, title: sameTitle, remote: true },
+    { id: sameTitlePeerId, title: sameTitle, remote: true }
+  ]);
+  threadSlots = [sameTitleTarget, sameTitlePeer, ...Array(THREAD_COUNT - 2).fill(null)];
+  const identityProbeCalls = [];
+  const identityProbe = async (command, args) => {
+    identityProbeCalls.push({ command, args: [...args] });
+    if (command === "codex-focused-thread-strict"
+        && args.length === 1 && args[0] === targetThreadId) return { stdout: "match=uuid" };
+    const error = new Error("simulated different focused UUID");
+    error.exitCode = 1;
+    throw error;
+  };
+  const sameTitleTargetFocused = await voiceTargetIsFocused(targetThreadId, {
+    probe: identityProbe
+  });
+  const sameTitlePeerRejected = !(await voiceTargetIsFocused(sameTitlePeerId, {
+    probe: identityProbe
+  }));
+  const sameTitleVoiceGuardUsesUuid = sameTitleTargetFocused
+    && sameTitlePeerRejected
+    && identityProbeCalls.length === 2
+    && identityProbeCalls.every(({ command, args }) => command === "codex-focused-thread-strict"
+      && args.length === 1)
+    && identityProbeCalls[0].args[0] === targetThreadId
+    && identityProbeCalls[1].args[0] === sameTitlePeerId;
+
   const sessionId = ++nextVoiceSessionId;
   voiceSessionIdByContext.set(context, sessionId);
 
@@ -4041,6 +4988,7 @@ async function verifyVoiceSubmissionPolicy() {
   }, {
     openApp: async () => {},
     sleep: async () => {},
+    targetFocused: async () => true,
     bridge(command) {
       commands.push(command);
       return true;
@@ -4056,6 +5004,32 @@ async function verifyVoiceSubmissionPolicy() {
   const successRequiresConfirmation = verificationAttempts === 2
     && voiceStateByContext.get(context) === "sent";
 
+  voiceStateByContext.set(context, "submitting");
+  voiceTargetThreadByContext.set(context, targetThreadId);
+  voiceSessionIdByContext.set(context, sessionId);
+  let fallbackFocusChecks = 0;
+  const fallbackGuardCommands = [];
+  await submitCompletedVoiceTranscription(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript
+  }, {
+    openApp: async () => {},
+    sleep: async () => {},
+    targetFocused: async () => {
+      fallbackFocusChecks += 1;
+      return fallbackFocusChecks === 1;
+    },
+    bridge(command) {
+      fallbackGuardCommands.push(command);
+      return true;
+    },
+    waitForDraftReset: async () => false,
+    scheduleRefresh: () => {}
+  });
+  const fallbackRechecksTarget = fallbackFocusChecks === 2
+    && fallbackGuardCommands.join(",") === "codex-submit-composer"
+    && voiceStateByContext.get(context) === "error";
+
   const staleCommands = [];
   voiceStateByContext.set(context, "submitting");
   voiceSessionIdByContext.set(context, ++nextVoiceSessionId);
@@ -4065,6 +5039,7 @@ async function verifyVoiceSubmissionPolicy() {
   }, {
     openApp: async () => {},
     sleep: async () => {},
+    targetFocused: async () => true,
     bridge(command) {
       staleCommands.push(command);
       return true;
@@ -4095,6 +5070,7 @@ async function verifyVoiceSubmissionPolicy() {
       claimVoiceSession(otherContext);
     },
     sleep: async () => {},
+    targetFocused: async () => true,
     bridge(command) {
       crossContextCommands.push(command);
       return true;
@@ -4111,6 +5087,7 @@ async function verifyVoiceSubmissionPolicy() {
   const otherTargetThreadId = "00000000-0000-4000-8000-000000000021";
   function verifyOverlappingHoldReleaseOrder(releaseOrder) {
     voiceHeldContexts.clear();
+    voiceReleasePendingContexts.clear();
     voiceTranscriptionByContext.clear();
     voiceStateByContext.clear();
     voiceStateResetAtMs.clear();
@@ -4157,7 +5134,7 @@ async function verifyVoiceSubmissionPolicy() {
       && Number.isFinite(ownerTracker?.releasedAtMs)
       && voiceSessionIdByContext.size === 1
       && voiceSessionIdByContext.get(otherContext) === ownerTracker?.sessionId
-      && resumeCount === 1;
+      && resumeCount === 2;
     for (const heldContext of voiceStartVerificationTimers.keys()) {
       clearVoiceStartVerification(heldContext);
     }
@@ -4172,6 +5149,461 @@ async function verifyVoiceSubmissionPolicy() {
     context
   ]);
 
+  const clearVoiceGateTestState = () => {
+    cancelVoiceReleaseRetry();
+    for (const heldContext of voiceStartVerificationTimers.keys()) {
+      clearVoiceStartVerification(heldContext);
+    }
+    voiceHeldContexts.clear();
+    voiceReleasePendingContexts.clear();
+    voiceTranscriptionByContext.clear();
+    voiceStateByContext.clear();
+    voiceStateResetAtMs.clear();
+    voiceTargetThreadByContext.clear();
+    voiceSessionIdByContext.clear();
+    voiceMediaPauseOwners.clear();
+    voiceMediaPaused = true;
+    voiceReleaseProbeOnly = false;
+  };
+  const makeQueuedScheduler = (queue) => (callback) => {
+    const token = { callback, cancelled: false };
+    queue.push(token);
+    return token;
+  };
+  const clearQueuedSchedule = (token) => { token.cancelled = true; };
+
+  const failedReleaseContext = "voice-release-failure-context";
+  contexts.set(failedReleaseContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(failedReleaseContext);
+  voiceMediaPauseOwners.add(failedReleaseContext);
+  voiceTranscriptionByContext.set(failedReleaseContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  const failedReleaseCommands = [];
+  const failedReleaseSchedules = [];
+  let failedReleaseAttempts = 0;
+  let failedReleaseResumeCount = 0;
+  const failedReleaseOptions = {
+    releaseVoice: () => {
+      failedReleaseCommands.push("voice-up");
+      failedReleaseAttempts += 1;
+      return failedReleaseAttempts > 1 ? "inactive" : "unconfirmed-no-action";
+    },
+    stateReader: () => baseline,
+    resumeMedia: (releasedContext) => {
+      failedReleaseResumeCount += 1;
+      voiceMediaPauseOwners.delete(releasedContext);
+      if (voiceMediaPauseOwners.size === 0) voiceMediaPaused = false;
+    },
+    retryDelays: [0, 0],
+    retrySchedule: makeQueuedScheduler(failedReleaseSchedules),
+    retryClearSchedule: clearQueuedSchedule
+  };
+  const firstReleaseFailed = !endVoiceHoldSync(
+    failedReleaseContext,
+    true,
+    failedReleaseOptions
+  );
+  let lifecycleBypassResumeCount = 0;
+  const lifecyclePressState = {
+    mediaPauseStarted: true,
+    mediaPauseReleased: false,
+    resumeMedia: () => { lifecycleBypassResumeCount += 1; }
+  };
+  releaseThreadMediaPause(lifecyclePressState, failedReleaseContext);
+  const failedReleaseRetainsMedia = failedReleaseResumeCount === 0
+    && firstReleaseFailed
+    && failedReleaseSchedules.length === 1
+    && voiceReleasePendingContexts.has(failedReleaseContext)
+    && voiceMediaPauseOwners.has(failedReleaseContext)
+    && voiceMediaPaused
+    && !voiceHeldContexts.has(failedReleaseContext)
+    && voiceTranscriptionByContext.has(failedReleaseContext)
+    && voiceStateByContext.get(failedReleaseContext) === "error";
+  const willDisappearCannotBypassReleaseGate = lifecycleBypassResumeCount === 0
+    && !lifecyclePressState.mediaPauseReleased
+    && voiceMediaPauseOwners.has(failedReleaseContext);
+  const releaseRetrySucceeded = endVoiceHoldSync(
+    failedReleaseContext,
+    true,
+    failedReleaseOptions
+  );
+  const retriedTracker = voiceTranscriptionByContext.get(failedReleaseContext);
+  const failedReleaseCanBeRetried = releaseRetrySucceeded
+    && failedReleaseCommands.join(",") === "voice-up,voice-up"
+    && failedReleaseResumeCount === 1
+    && !voiceReleasePendingContexts.has(failedReleaseContext)
+    && !voiceMediaPauseOwners.has(failedReleaseContext)
+    && !voiceMediaPaused
+    && Number.isFinite(retriedTracker?.releasedAtMs)
+    && voiceStateByContext.get(failedReleaseContext) === "transcribing";
+  await failedReleaseSchedules[0].callback();
+  const staleAutomaticRetryCancelled = failedReleaseSchedules[0].cancelled
+    && failedReleaseCommands.length === 2;
+  contexts.delete(failedReleaseContext);
+
+  const automaticContext = "voice-auto-release-context";
+  contexts.set(automaticContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(automaticContext);
+  voiceMediaPauseOwners.add(automaticContext);
+  voiceTranscriptionByContext.set(automaticContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  const automaticSchedules = [];
+  const automaticProbeOnly = [];
+  let automaticResumeCount = 0;
+  const automaticReleaseStarted = !endVoiceHoldSync(automaticContext, true, {
+    releaseVoice: (_releaseContext, { probeOnly }) => {
+      automaticProbeOnly.push(probeOnly);
+      return probeOnly ? "inactive" : "unconfirmed-after-stop-action";
+    },
+    stateReader: () => baseline,
+    resumeMedia: (releasedContext) => {
+      automaticResumeCount += 1;
+      voiceMediaPauseOwners.delete(releasedContext);
+      voiceMediaPaused = voiceMediaPauseOwners.size > 0;
+    },
+    retryDelays: [0, 0],
+    retrySchedule: makeQueuedScheduler(automaticSchedules),
+    retryClearSchedule: clearQueuedSchedule
+  });
+  await automaticSchedules[0]?.callback();
+  const automaticTracker = voiceTranscriptionByContext.get(automaticContext);
+  const automaticReleaseRetryCompletes = automaticReleaseStarted
+    && automaticProbeOnly.join(",") === "false,true"
+    && automaticResumeCount === 1
+    && !voiceReleasePendingContexts.has(automaticContext)
+    && Number.isFinite(automaticTracker?.releasedAtMs)
+    && voiceStateByContext.get(automaticContext) === "transcribing";
+  const stopActionRetryUsesProbeOnly = automaticProbeOnly.length === 2
+    && automaticProbeOnly[0] === false
+    && automaticProbeOnly[1] === true;
+  contexts.delete(automaticContext);
+
+  const deferredDisappearContext = "voice-deferred-disappear-context";
+  contexts.set(deferredDisappearContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(deferredDisappearContext);
+  voiceMediaPauseOwners.add(deferredDisappearContext);
+  voiceTranscriptionByContext.set(deferredDisappearContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  voiceSessionIdByContext.set(
+    deferredDisappearContext,
+    voiceTranscriptionByContext.get(deferredDisappearContext).sessionId
+  );
+  voiceTargetThreadByContext.set(deferredDisappearContext, targetThreadId);
+  voiceStateByContext.set(deferredDisappearContext, "recording");
+  const deferredDisappearSchedules = [];
+  const deferredDisappearProbeOnly = [];
+  let signalDeferredRetryStarted;
+  const deferredRetryStarted = new Promise((resolve) => {
+    signalDeferredRetryStarted = resolve;
+  });
+  let resolveDeferredRetryOutcome;
+  const deferredRetryOutcome = new Promise((resolve) => {
+    resolveDeferredRetryOutcome = resolve;
+  });
+  let deferredDisappearResumeCount = 0;
+  const deferredDisappearOptions = {
+    releaseVoice: (_releaseContext, { probeOnly }) => {
+      deferredDisappearProbeOnly.push(probeOnly);
+      if (!probeOnly) return "unconfirmed-after-stop-action";
+      signalDeferredRetryStarted();
+      return deferredRetryOutcome;
+    },
+    stateReader: () => baseline,
+    resumeMedia: (releasedContext) => {
+      deferredDisappearResumeCount += 1;
+      voiceMediaPauseOwners.delete(releasedContext);
+      voiceMediaPaused = voiceMediaPauseOwners.size > 0;
+    },
+    retryDelays: [0],
+    retrySchedule: makeQueuedScheduler(deferredDisappearSchedules),
+    retryClearSchedule: clearQueuedSchedule
+  };
+  const deferredInitialReleaseFailed = !endVoiceHoldSync(
+    deferredDisappearContext,
+    true,
+    deferredDisappearOptions
+  );
+  const deferredRetryRun = deferredDisappearSchedules[0]?.callback();
+  await deferredRetryStarted;
+  const callsBeforeOverlappingRelease = deferredDisappearProbeOnly.length;
+  const overlappingReleaseStayedSingleFlight = !endVoiceHoldSync(
+    deferredDisappearContext,
+    false,
+    deferredDisappearOptions
+  ) && deferredDisappearProbeOnly.length === callsBeforeOverlappingRelease;
+  // Mirror willDisappear cleanup while the native probe is still unresolved.
+  cancelVoiceTranscription(deferredDisappearContext);
+  voiceStateByContext.delete(deferredDisappearContext);
+  voiceSessionIdByContext.delete(deferredDisappearContext);
+  contexts.delete(deferredDisappearContext);
+  resolveDeferredRetryOutcome("inactive");
+  await deferredRetryRun;
+  const asyncReleaseRetryIsSingleFlight = deferredInitialReleaseFailed
+    && overlappingReleaseStayedSingleFlight
+    && deferredDisappearProbeOnly.join(",") === "false,true"
+    && voiceReleaseAttemptInFlight === null;
+  const disappearedContextIsNotRecreated = deferredDisappearResumeCount === 1
+    && !voiceHeldContexts.has(deferredDisappearContext)
+    && !voiceReleasePendingContexts.has(deferredDisappearContext)
+    && !voiceMediaPauseOwners.has(deferredDisappearContext)
+    && !voiceMediaPaused
+    && !voiceTranscriptionByContext.has(deferredDisappearContext)
+    && !voiceStateByContext.has(deferredDisappearContext)
+    && !voiceStateResetAtMs.has(deferredDisappearContext)
+    && !voiceTargetThreadByContext.has(deferredDisappearContext)
+    && !voiceSessionIdByContext.has(deferredDisappearContext);
+
+  const uncertainReleaseContext = "voice-uncertain-release-context";
+  contexts.set(uncertainReleaseContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(uncertainReleaseContext);
+  voiceMediaPauseOwners.add(uncertainReleaseContext);
+  voiceTranscriptionByContext.set(uncertainReleaseContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  const uncertainReleaseSchedules = [];
+  const uncertainReleaseProbeOnly = [];
+  endVoiceHoldSync(uncertainReleaseContext, false, {
+    releaseVoice: (_releaseContext, { probeOnly }) => {
+      uncertainReleaseProbeOnly.push(probeOnly);
+      return probeOnly ? "inactive" : "unknown-possible-action";
+    },
+    resumeMedia: (releasedContext) => {
+      voiceMediaPauseOwners.delete(releasedContext);
+      voiceMediaPaused = voiceMediaPauseOwners.size > 0;
+    },
+    retryDelays: [0],
+    retrySchedule: makeQueuedScheduler(uncertainReleaseSchedules),
+    retryClearSchedule: clearQueuedSchedule
+  });
+  await uncertainReleaseSchedules[0]?.callback();
+  const uncertainReleaseRetryUsesProbeOnly = uncertainReleaseProbeOnly.join(",") === "false,true"
+    && !voiceReleasePendingContexts.has(uncertainReleaseContext)
+    && !voiceMediaPauseOwners.has(uncertainReleaseContext)
+    && !voiceMediaPaused;
+  contexts.delete(uncertainReleaseContext);
+
+  const reportedUnknownContext = "voice-reported-unknown-context";
+  contexts.set(reportedUnknownContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(reportedUnknownContext);
+  voiceMediaPauseOwners.add(reportedUnknownContext);
+  voiceTranscriptionByContext.set(reportedUnknownContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  const reportedUnknownSchedules = [];
+  const reportedUnknownProbeOnly = [];
+  endVoiceHoldSync(reportedUnknownContext, false, {
+    releaseVoice: (_releaseContext, { probeOnly }) => {
+      reportedUnknownProbeOnly.push(probeOnly);
+      return reportedUnknownProbeOnly.length === 1 ? "unknown" : "inactive";
+    },
+    resumeMedia: (releasedContext) => {
+      voiceMediaPauseOwners.delete(releasedContext);
+      voiceMediaPaused = voiceMediaPauseOwners.size > 0;
+    },
+    retryDelays: [0],
+    retrySchedule: makeQueuedScheduler(reportedUnknownSchedules),
+    retryClearSchedule: clearQueuedSchedule
+  });
+  await reportedUnknownSchedules[0]?.callback();
+  const reportedUnknownCanRetryVoiceUp = reportedUnknownProbeOnly.join(",") === "false,false"
+    && !voiceReleasePendingContexts.has(reportedUnknownContext)
+    && !voiceMediaPauseOwners.has(reportedUnknownContext)
+    && !voiceMediaPaused;
+  contexts.delete(reportedUnknownContext);
+
+  const boundedContext = "voice-bounded-release-context";
+  contexts.set(boundedContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(boundedContext);
+  voiceMediaPauseOwners.add(boundedContext);
+  voiceTranscriptionByContext.set(boundedContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  const boundedSchedules = [];
+  let boundedReleaseAttempts = 0;
+  endVoiceHoldSync(boundedContext, true, {
+    releaseVoice: () => {
+      boundedReleaseAttempts += 1;
+      return "unconfirmed-no-action";
+    },
+    stateReader: () => baseline,
+    resumeMedia: () => {},
+    retryDelays: [0, 0],
+    retrySchedule: makeQueuedScheduler(boundedSchedules),
+    retryClearSchedule: clearQueuedSchedule
+  });
+  for (let index = 0; index < boundedSchedules.length; index += 1) {
+    await boundedSchedules[index].callback();
+  }
+  const automaticReleaseRetryIsBounded = boundedReleaseAttempts === 3
+    && boundedSchedules.length === 2
+    && voiceReleaseRetryState === null
+    && voiceReleasePendingContexts.has(boundedContext)
+    && voiceMediaPauseOwners.has(boundedContext);
+  contexts.delete(boundedContext);
+
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(context);
+  voiceMediaPauseOwners.add(context);
+  const failedSupersedeSessionId = ++nextVoiceSessionId;
+  voiceTranscriptionByContext.set(context, {
+    ...tracker,
+    sessionId: failedSupersedeSessionId
+  });
+  voiceSessionIdByContext.set(context, failedSupersedeSessionId);
+  const failedSupersedeCommands = [];
+  const failedSupersedeOptions = {
+    autoSubmit: true,
+    composerAlreadyFocused: true,
+    bridge(command) {
+      if (command !== "voice-up") failedSupersedeCommands.push(command);
+      return true;
+    },
+    releaseVoice: () => {
+      failedSupersedeCommands.push("voice-up");
+      return "unconfirmed-no-action";
+    },
+    stateReader: () => baseline,
+    pauseMedia: (pauseContext) => { voiceMediaPauseOwners.add(pauseContext); },
+    resumeMedia: (resumeContext) => { voiceMediaPauseOwners.delete(resumeContext); },
+    retryDelays: []
+  };
+  const blockedNewHold = !beginVoiceHoldSync(otherContext, {
+    ...failedSupersedeOptions,
+    targetThreadId: otherTargetThreadId
+  });
+  const failedSupersedeBlocksNewVoice = blockedNewHold
+    && failedSupersedeCommands.join(",") === "voice-up"
+    && voiceReleasePendingContexts.has(context)
+    && voiceMediaPauseOwners.has(context)
+    && !voiceMediaPauseOwners.has(otherContext)
+    && voiceSessionIdByContext.has(context)
+    && !voiceSessionIdByContext.has(otherContext);
+
+  const unknownStartContext = "voice-start-unknown-context";
+  contexts.set(unknownStartContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(unknownStartContext);
+  voiceMediaPauseOwners.add(unknownStartContext);
+  voiceTranscriptionByContext.set(unknownStartContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  const unknownVerificationSchedules = [];
+  let unknownStartReleaseCalls = 0;
+  verifyVoiceStarted(unknownStartContext, {
+    audioInputState: () => "unknown",
+    releaseVoice: () => {
+      unknownStartReleaseCalls += 1;
+      return "inactive";
+    },
+    unknownRetryDelays: [0],
+    verificationSchedule: makeQueuedScheduler(unknownVerificationSchedules),
+    reportError: () => {}
+  });
+  await unknownVerificationSchedules[0]?.callback();
+  const persistentUnknownStartKeepsHold = unknownVerificationSchedules.length === 1
+    && unknownStartReleaseCalls === 0
+    && voiceHeldContexts.has(unknownStartContext)
+    && !voiceReleasePendingContexts.has(unknownStartContext)
+    && voiceMediaPauseOwners.has(unknownStartContext)
+    && voiceTranscriptionByContext.has(unknownStartContext);
+  contexts.delete(unknownStartContext);
+
+  const startFailureContext = "voice-start-failure-context";
+  contexts.set(startFailureContext, ACTIONS.voice);
+  clearVoiceGateTestState();
+  voiceHeldContexts.add(startFailureContext);
+  voiceMediaPauseOwners.add(startFailureContext);
+  voiceTranscriptionByContext.set(startFailureContext, {
+    ...tracker,
+    sessionId: ++nextVoiceSessionId
+  });
+  let startFailureResumeCount = 0;
+  verifyVoiceStarted(startFailureContext, {
+    audioInputState: () => "inactive",
+    releaseVoice: () => "unconfirmed-no-action",
+    resumeMedia: () => { startFailureResumeCount += 1; },
+    retryDelays: [],
+    reportError: () => {}
+  });
+  const failedStartReleaseRetainsMedia = startFailureResumeCount === 0
+    && voiceReleasePendingContexts.has(startFailureContext)
+    && voiceMediaPauseOwners.has(startFailureContext)
+    && voiceMediaPaused
+    && !voiceHeldContexts.has(startFailureContext)
+    && voiceStateByContext.get(startFailureContext) === "error";
+  contexts.delete(startFailureContext);
+
+  const shutdownContext = "voice-shutdown-context";
+  clearVoiceGateTestState();
+  voiceReleasePendingContexts.add(shutdownContext);
+  voiceMediaPauseOwners.add(shutdownContext);
+  shutdownCleanupStarted = false;
+  shutdownCleanupResult = true;
+  let shutdownReleaseCalls = 0;
+  const failedShutdownCommands = [];
+  const shutdownFailure = !releaseVoiceKeysSync({
+    releaseVoice: () => {
+      shutdownReleaseCalls += 1;
+      return "unconfirmed-no-action";
+    },
+    bridge(command) {
+      failedShutdownCommands.push(command);
+      return true;
+    }
+  });
+  const secondShutdownResult = releaseVoiceKeysSync({
+    releaseVoice: () => {
+      shutdownReleaseCalls += 1;
+      return "inactive";
+    },
+    bridge(command) {
+      failedShutdownCommands.push(`second-${command}`);
+      return true;
+    }
+  });
+  const shutdownFailureKeepsMediaPaused = shutdownFailure
+    && !secondShutdownResult
+    && shutdownReleaseCalls === 1
+    && failedShutdownCommands.join(",") === "release"
+    && voiceReleasePendingContexts.has(shutdownContext)
+    && voiceMediaPauseOwners.has(shutdownContext)
+    && voiceMediaPaused;
+  const shutdownCleanupIsIdempotent = shutdownReleaseCalls === 1
+    && !failedShutdownCommands.some((command) => command.startsWith("second-"));
+
+  shutdownCleanupStarted = false;
+  shutdownCleanupResult = true;
+  voiceReleaseProbeOnly = false;
+  const successfulShutdownCommands = [];
+  const shutdownSucceeded = releaseVoiceKeysSync({
+    releaseVoice: () => "inactive",
+    bridge(command) {
+      successfulShutdownCommands.push(command);
+      return true;
+    }
+  });
+  const shutdownSuccessRestoresMedia = shutdownSucceeded
+    && successfulShutdownCommands.join(",") === "media-play-pause"
+    && !voiceReleasePendingContexts.has(shutdownContext)
+    && voiceMediaPauseOwners.size === 0
+    && !voiceMediaPaused;
+
   const passed = Boolean(baseline && transcript && buttonFocusFallback)
     && ignoredFocusTypeChange
     && detectedStableTranscript
@@ -4179,10 +5611,29 @@ async function verifyVoiceSubmissionPolicy() {
     && acceptedStableReset
     && retriedUnconfirmedSubmit
     && successRequiresConfirmation
+    && fallbackRechecksTarget
+    && sameTitleVoiceGuardUsesUuid
     && staleSubmissionIgnored
     && crossContextSubmissionIgnored
     && overlappingOldThenNewRelease
-    && overlappingNewThenOldRelease;
+    && overlappingNewThenOldRelease
+    && failedReleaseRetainsMedia
+    && willDisappearCannotBypassReleaseGate
+    && failedReleaseCanBeRetried
+    && staleAutomaticRetryCancelled
+    && automaticReleaseRetryCompletes
+    && automaticReleaseRetryIsBounded
+    && stopActionRetryUsesProbeOnly
+    && asyncReleaseRetryIsSingleFlight
+    && disappearedContextIsNotRecreated
+    && uncertainReleaseRetryUsesProbeOnly
+    && reportedUnknownCanRetryVoiceUp
+    && failedSupersedeBlocksNewVoice
+    && persistentUnknownStartKeepsHold
+    && failedStartReleaseRetainsMedia
+    && shutdownFailureKeepsMediaPaused
+    && shutdownCleanupIsIdempotent
+    && shutdownSuccessRestoresMedia;
   console.log(JSON.stringify({
     passed,
     ignoredFocusTypeChange,
@@ -4191,18 +5642,470 @@ async function verifyVoiceSubmissionPolicy() {
     acceptedStableReset,
     retriedUnconfirmedSubmit,
     successRequiresConfirmation,
+    fallbackRechecksTarget,
+    sameTitleVoiceGuardUsesUuid,
     staleSubmissionIgnored,
     crossContextSubmissionIgnored,
     overlappingOldThenNewRelease,
-    overlappingNewThenOldRelease
+    overlappingNewThenOldRelease,
+    failedReleaseRetainsMedia,
+    willDisappearCannotBypassReleaseGate,
+    failedReleaseCanBeRetried,
+    staleAutomaticRetryCancelled,
+    automaticReleaseRetryCompletes,
+    automaticReleaseRetryIsBounded,
+    stopActionRetryUsesProbeOnly,
+    asyncReleaseRetryIsSingleFlight,
+    disappearedContextIsNotRecreated,
+    uncertainReleaseRetryUsesProbeOnly,
+    reportedUnknownCanRetryVoiceUp,
+    failedSupersedeBlocksNewVoice,
+    persistentUnknownStartKeepsHold,
+    failedStartReleaseRetainsMedia,
+    shutdownFailureKeepsMediaPaused,
+    shutdownCleanupIsIdempotent,
+    shutdownSuccessRestoresMedia
   }));
   if (!passed) process.exitCode = 1;
   voiceHeldContexts.clear();
+  voiceReleasePendingContexts.clear();
   voiceTranscriptionByContext.clear();
   voiceStateByContext.clear();
   voiceStateResetAtMs.clear();
   voiceTargetThreadByContext.clear();
   voiceSessionIdByContext.clear();
+  threadSlots = Array(THREAD_COUNT).fill(null);
+  socket = null;
+}
+
+async function verifyInteractionPolicy() {
+  const fastStatuses = ["working", "completed", "stopped", "idle", "error"];
+  const activity = { kind: "think", label: "생각 중" };
+  const fastBadgeAllStates = fastStatuses.every((status) => threadHeader(
+    THEME.green,
+    status,
+    status === "completed" ? "완료" : "대기",
+    activity,
+    status === "working",
+    "xhigh",
+    "priority",
+    status === "completed" ? { strength: 0 } : null
+  ).includes('data-mode="fast"'));
+  const standardHasNoFastBadge = fastStatuses.every((status) => !threadHeader(
+    THEME.green,
+    status,
+    status === "completed" ? "완료" : "대기",
+    activity,
+    status === "working",
+    "xhigh",
+    "default",
+    status === "completed" ? { strength: 0 } : null
+  ).includes('data-mode="fast"'));
+
+  const remoteThread = {
+    id: "00000000-0000-4000-8000-000000000030",
+    title: "원격 전환 확인",
+    remote: true,
+    status: "working"
+  };
+  const sameTitleRemotePeer = {
+    id: "00000000-0000-4000-8000-000000000031",
+    title: remoteThread.title,
+    remote: true,
+    status: "working"
+  };
+  const [ambiguousRemote, ambiguousRemotePeer] = annotateKnownTitleAmbiguity([
+    remoteThread,
+    sameTitleRemotePeer
+  ], [
+    remoteThread,
+    sameTitleRemotePeer
+  ]);
+  const [uniqueRemote] = annotateKnownTitleAmbiguity([remoteThread], [remoteThread]);
+  const knownTitleAmbiguityDetected = ambiguousRemote.titleAmbiguous === true
+    && uniqueRemote.titleAmbiguous === false;
+  const ambiguousTitleUsesStrictIdentity = remoteThreadKeyBridgeCommand(
+    ambiguousRemote,
+    "codex-open-thread"
+  ) === "codex-open-thread-strict"
+    && remoteThreadKeyBridgeCommand(uniqueRemote, "codex-open-thread") === "codex-open-thread";
+  threadSlots = [ambiguousRemote, ambiguousRemotePeer, ...Array(THREAD_COUNT - 2).fill(null)];
+  const focusedIdentityCalls = [];
+  const focusedIdentityProbe = async (command, args) => {
+    focusedIdentityCalls.push({ command, args: [...args] });
+    if (command === "codex-focused-thread-strict"
+        && args.length === 1 && args[0] === ambiguousRemote.id) return { stdout: "match=uuid" };
+    const error = new Error("simulated different focused UUID");
+    error.exitCode = 1;
+    throw error;
+  };
+  const ambiguousVoiceTargetFocused = await voiceTargetIsFocused(ambiguousRemote.id, {
+    probe: focusedIdentityProbe
+  });
+  const ambiguousVoicePeerRejected = !(await voiceTargetIsFocused(ambiguousRemotePeer.id, {
+    probe: focusedIdentityProbe
+  }));
+  const sameTitleVoiceTargetIsIdentitySafe = ambiguousVoiceTargetFocused
+    && ambiguousVoicePeerRejected
+    && focusedIdentityCalls.length === 2
+    && focusedIdentityCalls.every(({ command, args }) => command === "codex-focused-thread-strict"
+      && args.length === 1)
+    && focusedIdentityCalls[0].args[0] === ambiguousRemote.id
+    && focusedIdentityCalls[1].args[0] === ambiguousRemotePeer.id;
+  let directAttempts = 0;
+  let searchAttempts = 0;
+  const activationOrder = [];
+  await performRemoteNavigation(remoteThread, 2, {
+    openApp: async () => { activationOrder.push("open"); },
+    waitFrontmost: async () => { activationOrder.push("frontmost"); },
+    sleep: async () => {},
+    focused: async () => false,
+    directOpen: async () => {
+      activationOrder.push("direct");
+      directAttempts += 1;
+      const error = new Error("simulated sidebar miss");
+      error.exitCode = 1;
+      throw error;
+    },
+    searchOpen: async () => {
+      activationOrder.push("search");
+      searchAttempts += 1;
+    },
+    waitFocused: async () => true
+  });
+  const fallbackSearchRunsOnce = directAttempts === 2 && searchAttempts === 1;
+  const activationWaitRunsOnceBeforeNavigation = activationOrder.join(",")
+    === "open,frontmost,direct,direct,search";
+
+  activeRemoteNavigation = null;
+  let resolveOpenApp;
+  const openAppGate = new Promise((resolve) => { resolveOpenApp = resolve; });
+  let openAppAttempts = 0;
+  const coalesceOptions = {
+    openApp: async () => {
+      openAppAttempts += 1;
+      await openAppGate;
+    },
+    waitFrontmost: async () => {},
+    sleep: async () => {},
+    directOpen: async () => {},
+    waitFocused: async () => true
+  };
+  const firstNavigation = navigateRemoteThread(remoteThread, 2, coalesceOptions);
+  const secondNavigation = navigateRemoteThread(remoteThread, 2, coalesceOptions);
+  const sameTargetSharesNavigation = firstNavigation === secondNavigation && openAppAttempts === 1;
+  resolveOpenApp();
+  await Promise.all([firstNavigation, secondNavigation]);
+  const navigationLeaseCleared = activeRemoteNavigation === null;
+
+  socket = { readyState: WebSocket.OPEN, send() {} };
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  contextFeedback.clear();
+  threadPressByContext.clear();
+  voiceHeldContexts.clear();
+  voiceReleasePendingContexts.clear();
+  voiceTranscriptionByContext.clear();
+  voiceStateByContext.clear();
+  voiceStateResetAtMs.clear();
+  voiceTargetThreadByContext.clear();
+  voiceSessionIdByContext.clear();
+  const pressContext = "interaction-remote-hold";
+  contexts.set(pressContext, ACTIONS.thread1);
+  threadSlots = [remoteThread, ...Array(THREAD_COUNT - 1).fill(null)];
+  let resolveFirstOpen;
+  const firstOpenGate = new Promise((resolve) => { resolveFirstOpen = resolve; });
+  let firstHoldCallback = null;
+  let voiceStarts = 0;
+  let mediaResumes = 0;
+  beginThreadPress(pressContext, 0, {
+    openThread: () => firstOpenGate,
+    schedule: (callback) => {
+      firstHoldCallback = callback;
+      return null;
+    },
+    sleep: async () => {},
+    focusComposer: async () => true,
+    pauseMedia: async () => true,
+    resumeMedia: async () => {
+      mediaResumes += 1;
+      return true;
+    },
+    beginVoice: () => {
+      voiceStarts += 1;
+      return true;
+    }
+  });
+  const firstHoldRun = firstHoldCallback();
+  await Promise.resolve();
+  endThreadPress(pressContext);
+  beginThreadPress(pressContext, 0, {
+    openThread: async () => true,
+    schedule: () => null,
+    sleep: async () => {},
+    focusComposer: async () => true,
+    pauseMedia: async () => true,
+    resumeMedia: async () => true,
+    beginVoice: () => true
+  });
+  const replacementPress = threadPressByContext.get(pressContext);
+  resolveFirstOpen(true);
+  await firstHoldRun;
+  await Promise.resolve();
+  const staleHoldCannotDeleteNextPress = replacementPress != null
+    && threadPressByContext.get(pressContext) === replacementPress
+    && voiceStarts === 0
+    && mediaResumes === 1;
+  cancelThreadPress(pressContext, false);
+
+  const baselineContext = "interaction-missing-composer";
+  contexts.set(baselineContext, ACTIONS.voice);
+  const baselineCommands = [];
+  let baselineMediaResumes = 0;
+  const missingBaselineRejected = !beginVoiceHoldSync(baselineContext, {
+    targetThreadId: remoteThread.id,
+    autoSubmit: true,
+    requireBaseline: true,
+    composerAlreadyFocused: true,
+    stateReader: () => null,
+    bridge(command) {
+      baselineCommands.push(command);
+      return true;
+    },
+    pauseMedia: () => {},
+    resumeMedia: () => { baselineMediaResumes += 1; }
+  })
+    && !baselineCommands.includes("voice-down")
+    && baselineMediaResumes === 1
+    && !voiceHeldContexts.has(baselineContext);
+
+  voiceMediaPauseOwners.clear();
+  voiceMediaPaused = false;
+  voiceMediaTransitionTail = Promise.resolve();
+  voiceMediaResumeReassertPending = false;
+  const mediaCommands = [];
+  const mediaBridge = async (command) => {
+    mediaCommands.push(command);
+    return true;
+  };
+  await pauseMediaForVoice("media-owner-a", { bridge: mediaBridge });
+  await pauseMediaForVoice("media-owner-b", { bridge: mediaBridge });
+  const immediateResumeOptions = {
+    bridge: mediaBridge,
+    sleep: async () => {},
+    debounceMs: 0
+  };
+  const firstOwnerKeptPaused = !(await resumeMediaAfterVoice(
+    "media-owner-a",
+    immediateResumeOptions
+  ));
+  const finalOwnerResumed = await resumeMediaAfterVoice("media-owner-b", immediateResumeOptions);
+  const mediaPauseLeaseIsBalanced = firstOwnerKeptPaused
+    && finalOwnerResumed
+    && mediaCommands.join(",") === "media-pause-if-playing,media-play-pause"
+    && voiceMediaPauseOwners.size === 0
+    && !voiceMediaPaused;
+
+  voiceMediaPaused = true;
+  addVoiceMediaPauseOwner("coalesced-owner-a");
+  addVoiceMediaPauseOwner("coalesced-owner-b");
+  let coalescedResumeSleeps = 0;
+  const coalescedResumeCommands = [];
+  const coalescedResumeOptions = {
+    bridge: async (command) => {
+      coalescedResumeCommands.push(command);
+      return true;
+    },
+    sleep: async () => { coalescedResumeSleeps += 1; },
+    debounceMs: 120
+  };
+  const firstCoalescedResume = resumeMediaAfterVoice(
+    "coalesced-owner-a",
+    coalescedResumeOptions
+  );
+  const secondCoalescedResume = resumeMediaAfterVoice(
+    "coalesced-owner-b",
+    coalescedResumeOptions
+  );
+  await Promise.all([firstCoalescedResume, secondCoalescedResume]);
+  const multiOwnerResumeDebouncesOnce = coalescedResumeSleeps === 1
+    && coalescedResumeCommands.join(",") === "media-play-pause"
+    && !voiceMediaPaused;
+
+  voiceMediaPaused = true;
+  voiceMediaPauseOwners.add("failed-resume-owner");
+  const failedResume = await resumeMediaAfterVoice("failed-resume-owner", {
+    bridge: async () => false,
+    sleep: async () => {},
+    debounceMs: 0
+  });
+  const failedResumeRetainsState = !failedResume && voiceMediaPaused;
+  await resumeMediaAfterVoice(null, {
+    bridge: async () => true,
+    sleep: async () => {},
+    debounceMs: 0
+  });
+
+  voiceMediaPaused = true;
+  addVoiceMediaPauseOwner("race-owner-a");
+  const mediaRaceCommands = [];
+  let resolveResumeDebounce;
+  let signalResumeDebounce;
+  const resumeDebounceGate = new Promise((resolve) => { resolveResumeDebounce = resolve; });
+  const resumeDebounceStarted = new Promise((resolve) => { signalResumeDebounce = resolve; });
+  const mediaRaceBridge = async (command) => {
+    mediaRaceCommands.push(command);
+    return true;
+  };
+  const racingResume = resumeMediaAfterVoice("race-owner-a", {
+    bridge: mediaRaceBridge,
+    debounceMs: 120,
+    sleep: async () => {
+      signalResumeDebounce();
+      await resumeDebounceGate;
+    }
+  });
+  await resumeDebounceStarted;
+  const racingPause = pauseMediaForVoice("race-owner-b", {
+    bridge: mediaRaceBridge,
+    sleep: async () => {}
+  });
+  resolveResumeDebounce();
+  await Promise.all([racingResume, racingPause]);
+  const concurrentResumeBeforeDispatchIsCoalesced = voiceMediaPaused
+    && voiceMediaPauseOwners.has("race-owner-b")
+    && mediaRaceCommands.length === 0;
+  await resumeMediaAfterVoice("race-owner-b", {
+    bridge: mediaRaceBridge,
+    sleep: async () => {},
+    debounceMs: 0
+  });
+
+  voiceMediaPaused = true;
+  addVoiceMediaPauseOwner("post-dispatch-owner-a");
+  const postDispatchCommands = [];
+  let signalResumeDispatched;
+  let resolveResumeDispatched;
+  const resumeWasDispatched = new Promise((resolve) => { signalResumeDispatched = resolve; });
+  const resumeDispatchGate = new Promise((resolve) => { resolveResumeDispatched = resolve; });
+  let reassertAttempts = 0;
+  const postDispatchBridge = async (command) => {
+    postDispatchCommands.push(command);
+    if (command === "media-play-pause") {
+      signalResumeDispatched();
+      await resumeDispatchGate;
+      return true;
+    }
+    reassertAttempts += 1;
+    return reassertAttempts >= 2;
+  };
+  const postDispatchResume = resumeMediaAfterVoice("post-dispatch-owner-a", {
+    bridge: postDispatchBridge,
+    sleep: async () => {},
+    debounceMs: 0
+  });
+  await resumeWasDispatched;
+  const postDispatchPause = pauseMediaForVoice("post-dispatch-owner-b", {
+    bridge: postDispatchBridge,
+    sleep: async () => {}
+  });
+  resolveResumeDispatched();
+  await Promise.all([postDispatchResume, postDispatchPause]);
+  const postDispatchResumeRaceReassertsPause = voiceMediaPaused
+    && voiceMediaPauseOwners.has("post-dispatch-owner-b")
+    && !voiceMediaResumeReassertPending
+    && postDispatchCommands.join(",") === [
+      "media-play-pause",
+      "media-pause-if-playing",
+      "media-pause-if-playing"
+    ].join(",");
+  await resumeMediaAfterVoice("post-dispatch-owner-b", {
+    bridge: async () => true,
+    sleep: async () => {},
+    debounceMs: 0
+  });
+
+  const guardContext = "interaction-target-guard";
+  const guardSessionId = ++nextVoiceSessionId;
+  contexts.set(guardContext, ACTIONS.thread1);
+  voiceStateByContext.set(guardContext, "submitting");
+  voiceTargetThreadByContext.set(guardContext, remoteThread.id);
+  voiceSessionIdByContext.set(guardContext, guardSessionId);
+  const guardedCommands = [];
+  await submitCompletedVoiceTranscription(guardContext, remoteThread.id, {
+    baseline: parseTextInputState("focused-text-state", "0\t0000000000000000"),
+    lastObserved: parseTextInputState("focused-text-state", "9\t1111111111111111"),
+    sessionId: guardSessionId
+  }, {
+    openApp: async () => {},
+    sleep: async () => {},
+    targetFocused: async () => false,
+    bridge(command) {
+      guardedCommands.push(command);
+      return true;
+    }
+  });
+  const wrongTargetCannotSubmit = guardedCommands.length === 0
+    && voiceStateByContext.get(guardContext) === "error";
+
+  const passed = fastBadgeAllStates
+    && standardHasNoFastBadge
+    && knownTitleAmbiguityDetected
+    && ambiguousTitleUsesStrictIdentity
+    && sameTitleVoiceTargetIsIdentitySafe
+    && fallbackSearchRunsOnce
+    && activationWaitRunsOnceBeforeNavigation
+    && sameTargetSharesNavigation
+    && navigationLeaseCleared
+    && staleHoldCannotDeleteNextPress
+    && missingBaselineRejected
+    && mediaPauseLeaseIsBalanced
+    && multiOwnerResumeDebouncesOnce
+    && failedResumeRetainsState
+    && concurrentResumeBeforeDispatchIsCoalesced
+    && postDispatchResumeRaceReassertsPause
+    && wrongTargetCannotSubmit;
+  console.log(JSON.stringify({
+    passed,
+    fastBadgeAllStates,
+    standardHasNoFastBadge,
+    knownTitleAmbiguityDetected,
+    ambiguousTitleUsesStrictIdentity,
+    sameTitleVoiceTargetIsIdentitySafe,
+    fallbackSearchRunsOnce,
+    activationWaitRunsOnceBeforeNavigation,
+    sameTargetSharesNavigation,
+    navigationLeaseCleared,
+    staleHoldCannotDeleteNextPress,
+    missingBaselineRejected,
+    mediaPauseLeaseIsBalanced,
+    multiOwnerResumeDebouncesOnce,
+    failedResumeRetainsState,
+    concurrentResumeBeforeDispatchIsCoalesced,
+    postDispatchResumeRaceReassertsPause,
+    wrongTargetCannotSubmit
+  }));
+  if (!passed) process.exitCode = 1;
+
+  activeRemoteNavigation?.controller.abort();
+  activeRemoteNavigation = null;
+  threadPressByContext.clear();
+  voiceHeldContexts.clear();
+  voiceReleasePendingContexts.clear();
+  voiceTranscriptionByContext.clear();
+  voiceStateByContext.clear();
+  voiceStateResetAtMs.clear();
+  voiceTargetThreadByContext.clear();
+  voiceSessionIdByContext.clear();
+  voiceMediaPauseOwners.clear();
+  voiceMediaPaused = false;
+  voiceMediaTransitionTail = Promise.resolve();
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  contextFeedback.clear();
+  threadSlots = Array(THREAD_COUNT).fill(null);
   socket = null;
 }
 
@@ -4233,6 +6136,11 @@ function runSelectedMode() {
     });
   } else if (voiceSubmitContractMode) {
     verifyVoiceSubmissionPolicy().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  } else if (interactionContractMode) {
+    verifyInteractionPolicy().catch((error) => {
       console.error(error);
       process.exitCode = 1;
     });

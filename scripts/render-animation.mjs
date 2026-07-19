@@ -4,6 +4,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { rasterizeSvg } from "./rasterize.mjs";
+
 const root = path.resolve(import.meta.dirname, "..");
 const overviewOutputPath = path.resolve(
   process.argv[2] || path.join(root, "docs", "media", "threaddeck-demo.gif")
@@ -14,22 +16,11 @@ const overviewSvgDirectory = path.join(temporaryDirectory, "overview-svg");
 const overviewPngDirectory = path.join(temporaryDirectory, "overview-png");
 const gestureSvgDirectory = path.join(temporaryDirectory, "gesture-svg");
 const gesturePngDirectory = path.join(temporaryDirectory, "gesture-png");
-
-function rasterize(source, destination, width, height) {
-  try {
-    execFileSync("/usr/bin/sips", [
-      "-s", "format", "png",
-      "-z", String(height), String(width),
-      source,
-      "--out", destination
-    ], { stdio: "ignore" });
-  } catch (error) {
-    throw new Error(`Could not rasterize ${path.basename(source)}: ${error?.message ?? "unknown error"}`);
-  }
-}
+const swiftModuleCacheDirectory = path.join(temporaryDirectory, "swift-module-cache");
 
 function encodeGif(pngDirectory, outputPath, framesPerSecond) {
   fs.mkdirSync(path.dirname(outputPath), { recursive: true });
+  fs.mkdirSync(swiftModuleCacheDirectory, { recursive: true });
   const temporaryOutput = path.join(
     path.dirname(outputPath),
     `.${path.basename(outputPath)}.${process.pid}-${randomUUID()}.tmp.gif`
@@ -41,14 +32,22 @@ function encodeGif(pngDirectory, outputPath, framesPerSecond) {
       pngDirectory,
       temporaryOutput,
       String(1 / framesPerSecond)
-    ], { cwd: root, stdio: "inherit" });
+    ], {
+      cwd: root,
+      env: {
+        ...process.env,
+        CLANG_MODULE_CACHE_PATH: swiftModuleCacheDirectory,
+        SWIFT_MODULECACHE_PATH: swiftModuleCacheDirectory
+      },
+      stdio: "inherit"
+    });
     fs.renameSync(temporaryOutput, outputPath);
   } finally {
     fs.rmSync(temporaryOutput, { force: true });
   }
 }
 
-function renderGif(svgDirectory, pngDirectory, outputPath, { width, height, framesPerSecond }) {
+async function renderGif(svgDirectory, pngDirectory, outputPath, { width, height, framesPerSecond }) {
   fs.mkdirSync(pngDirectory, { recursive: true });
   const frames = fs.readdirSync(svgDirectory)
     .filter((name) => name.endsWith(".svg"))
@@ -56,12 +55,16 @@ function renderGif(svgDirectory, pngDirectory, outputPath, { width, height, fram
   if (frames.length === 0) throw new Error(`The plugin renderer produced no frames in ${svgDirectory}.`);
 
   for (const frame of frames) {
-    rasterize(
-      path.join(svgDirectory, frame),
-      path.join(pngDirectory, frame.replace(/\.svg$/, ".png")),
-      width,
-      height
-    );
+    try {
+      await rasterizeSvg(
+        path.join(svgDirectory, frame),
+        path.join(pngDirectory, frame.replace(/\.svg$/, ".png")),
+        width,
+        height
+      );
+    } catch (error) {
+      throw new Error(`Could not rasterize ${frame}: ${error?.message ?? "unknown error"}`);
+    }
   }
   encodeGif(pngDirectory, outputPath, framesPerSecond);
   console.log(`Rendered ${frames.length} frames to ${outputPath}`);
@@ -83,7 +86,7 @@ try {
     gestureSvgDirectory
   ], { cwd: root, stdio: "inherit" });
 
-  renderGif(overviewSvgDirectory, overviewPngDirectory, overviewOutputPath, {
+  await renderGif(overviewSvgDirectory, overviewPngDirectory, overviewOutputPath, {
     width: 960,
     height: 507,
     framesPerSecond: 12
@@ -96,7 +99,7 @@ try {
     ["app-launcher-long-press", "app-launcher-long-press.gif"]
   ];
   for (const [scenario, fileName] of gestures) {
-    renderGif(
+    await renderGif(
       path.join(gestureSvgDirectory, scenario),
       path.join(gesturePngDirectory, scenario),
       path.join(mediaDirectory, fileName),

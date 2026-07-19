@@ -25,7 +25,7 @@ This usually means Stream Deck does not have Accessibility permission. Remove an
 A task key has two paths:
 
 - release before **0.55 seconds** to open the task only;
-- keep holding past **0.55 seconds** until the card shows the speaking state, speak while held, then release to transcribe and auto-submit.
+- keep holding past **0.55 seconds**; a slow remote switch may first show `전환 준비` (preparing), so continue holding until the card shows the speaking state, speak while held, then release to transcribe and auto-submit.
 
 If the card shows an error, confirm Codex is available, its composer is visible, microphone permission is granted, and Start dictation is `Control+Shift+D`. ThreadDeck detects when Codex audio input never starts instead of leaving a false recording state.
 
@@ -35,7 +35,7 @@ The keyboard layout can stay Korean or another non-Latin input source. ThreadDec
 
 That is the intended behavior. The microphone is a review-first push-to-talk key: press to record immediately, hold while speaking, and release to leave the transcript in the Codex composer. Use the Send key afterward, or hold a task key when you want automatic submission.
 
-Supported audio-producing media processes are paused during the hold and resumed on release. Browser audio is handled at the process level, so more than one tab can be affected.
+If a supported media app is actively producing audio, ThreadDeck sends the normal macOS play/pause command asynchronously and sends the matching resume only after the final held voice key is released. It no longer freezes media processes. A browser's currently active media session can still represent more than one tab.
 
 ## The Send key uses the wrong shortcut
 
@@ -67,6 +67,8 @@ Unpinning it removes it from the hardware list. Internal helper and review tasks
 ## A remote task does not open
 
 Remote selection requires Stream Deck Accessibility permission. ThreadDeck activates the exact Codex sidebar or unified-search result from the keyboard; it does not use screen coordinates.
+
+Repeated presses for the same task share one in-flight switch. ThreadDeck prefers an exact task UUID exposed by Codex, tries the accessible sidebar control first, and only if it is unavailable opens unified search once. A lightweight focused-header probe waits adaptively for the verified result. A newer press for a different task cancels the stale switch; known duplicate titles are never opened through title-only fallback.
 
 - **Accessibility** — permission is missing.
 - **Duplicate title** — more than one remote result has the exact title. Rename or unpin one.
@@ -112,4 +114,4 @@ Set `CODEX_HOME`, or override individual paths with `THREADDECK_STATE_DB`, `THRE
 
 ## Reporting a problem safely
 
-Include macOS, Codex Desktop, Stream Deck, ThreadDeck, and device model versions plus the exact key and gesture used. Do not attach raw Codex Desktop logs, session files, database files, real task titles, remote host names, or device identifiers. See [Security and privacy](../SECURITY.md).
+Include macOS, Codex Desktop, Stream Deck, ThreadDeck, and device model versions plus the exact key and gesture used. The privacy-safe ThreadDeck trace is `~/Library/Logs/ThreadDeck/runtime.jsonl`; it contains no task titles or IDs and is capped at 256 KiB. Do not attach raw Codex Desktop logs, session files, database files, real task titles, remote host names, or device identifiers. See [Security and privacy](../SECURITY.md).

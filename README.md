@@ -94,13 +94,13 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 
 ![Task key hold-to-talk sequence: hold, speak, release, transcribe, submit, and verify](docs/media/task-hold-to-talk.gif)
 
-Tap a task key to open it. Hold for at least **0.55 seconds** and wait for `말하는 중` (speaking) before talking. Releasing stops dictation; ThreadDeck waits for a stable transcript, activates Codex's visible Send control, and only shows `전송 완료` after the composer reset is confirmed. Supported audio-producing media processes pause during the hold and resume on release. The selected task card shows every stage. A task switch and composer activation use accessibility focus plus keyboard activation, so the pointer does not move.
+Tap a task key to open it. Hold for at least **0.55 seconds** and wait for `말하는 중` (speaking) before talking; a slow remote switch first shows `전환 준비` while the exact task and composer are verified. Releasing stops dictation; ThreadDeck waits for a stable transcript, activates Codex's visible Send control, and only shows `전송 완료` after the composer reset is confirmed. Supported active media is paused and resumed with the normal macOS media command. The selected task card shows every stage. A task switch and composer activation use accessibility focus plus keyboard activation, so the pointer does not move.
 
 ### Dedicated microphone: dictate a draft, do not send it
 
 ![Dedicated microphone push-to-talk sequence ending with a draft ready in the composer](docs/media/voice-hold-to-dictate.gif)
 
-The microphone starts recording as soon as it is pressed. Keep holding while you speak, then release. ThreadDeck stops dictation, resumes any supported media process it paused, and leaves the transcript in the Codex composer for review. It **does not submit the message**. If a visible target task is known, that task card can mirror the recording state.
+The microphone starts recording as soon as it is pressed. Keep holding while you speak, then release. ThreadDeck stops dictation, resumes supported media only when it issued the pause, and leaves the transcript in the Codex composer for review. It **does not submit the message**. If a visible target task is known, that task card can mirror the recording state.
 
 ### Send key: Return or Command+Return
 
@@ -119,7 +119,7 @@ The Media page includes Stream Deck, Music, Chrome, and Codex launchers built wi
 | Example | Meaning |
 |---|---|
 | <img src="docs/media/working-task-key.png" width="104" alt="Working task key"> | The header shows the current phase. The pin precedes the title, the timer updates every second, the track reflects trustworthy reasoning intensity, and the lightning cue marks fast service. An amber `+N` is the observed queued-follow-up count. |
-| <img src="docs/media/completed-task-key.png" width="104" alt="Completed task key"> | The check and frozen timer mean the latest observed turn completed. The final duration is never rewritten by a later resume observation. |
+| <img src="docs/media/completed-task-key.png" width="104" alt="Completed task key"> | The check and frozen timer mean the latest observed turn completed. A lightning cue remains visible when that turn used fast service. The final duration is never rewritten by a later resume observation. |
 | <img src="docs/media/quota-key.png" width="104" alt="Weekly quota key"> | Optional remaining weekly capacity from CodexBar. The last good value appears immediately during page changes and survives a transient refresh failure. |
 | <img src="docs/media/side-chat-key.png" width="104" alt="Side Chat key"> | A workflow action using the same light/dark visual system as task cards. |
 
@@ -137,7 +137,7 @@ ThreadDeck fills up to eight slots with user-facing tasks only:
 
 Unpinned remote history does not consume hardware slots. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
 
-To put a remote task on the deck, open its computer in Codex once so its summary is cached, then pin only the task you want. Pressing the key activates the exact title-matched Codex sidebar or unified-search result from the keyboard, which switches both the computer and task. If multiple remote results have the same title, ThreadDeck reports a duplicate instead of guessing; rename or unpin one of them.
+To put a remote task on the deck, open its computer in Codex once so its summary is cached, then pin only the task you want. Pressing the key prefers the exact task UUID exposed by Codex, then activates the verified sidebar or single unified-search result from the keyboard, which switches both the computer and task. Known duplicate titles require strict UUID identity; if Codex does not expose enough identity, ThreadDeck reports a duplicate instead of guessing.
 
 <details>
 <summary><strong>How remote status, timing, and reasoning stay conservative</strong></summary>
@@ -216,7 +216,7 @@ pnpm run render-docs
 pnpm run render-animation
 ```
 
-The GIF pipeline uses only Node.js plus macOS `sips`, Swift, and ImageIO. No third-party GIF encoder or copied product UI is bundled.
+The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG rasterization, then the repository's Swift/ImageIO helper for encoding. Sharp is not bundled in the runtime plugin, and no copied product UI is included.
 
 ## Current limits
 
@@ -224,7 +224,7 @@ The GIF pipeline uses only Node.js plus macOS `sips`, Swift, and ImageIO. No thi
 - Task and Side Chat detection depend on private Codex file and log formats and can lag behind a Codex release.
 - Queue counts are observed from the currently open task; Korean and English accessibility labels are recognized.
 - Shortcut actions currently assume the Codex bindings listed above.
-- Supported media apps are paused at the process level during push-to-talk; a browser process with audio can pause more than one tab.
+- Supported active media is paused with the normal macOS media command during push-to-talk and resumed only after the final held voice key is released. A browser's media session can still affect more than one tab.
 - Configurable shortcuts and additional Stream Deck models are planned for later betas.
 
 ## Project documents

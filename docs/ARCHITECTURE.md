@@ -30,9 +30,10 @@ It:
 - animates active reasoning cues, queue-advance acknowledgements, and completion pulses;
 - invokes CodexBar for the optional weekly quota value;
 - delegates keyboard, media, and push-to-talk operations to `keybridge`;
+- serializes push-to-talk media transitions behind an owner lease, so overlapping voice holds share one pause and only the final owner can resume playback;
 - lets a held task key open that task, dictate a follow-up, detect transcription completion using text fingerprints, and submit it on release;
 - gives each recording attempt a monotonically increasing session token, makes a new hold on any task key supersede the previous global composer session, and requires asynchronous transcription and submission callbacks to match that token before they can update the current session;
-- opens remote tasks through Codex's own visible sidebar result when available, then falls back to the unified task search so Codex activates the result's host before navigation.
+- routes remote opens through a target-scoped single flight: repeated presses for one task coalesce, a newer different target cancels stale work, accessible controls prefer exact UUID identity, unified search opens at most once, and a lightweight focused-header probe verifies that Codex activated the right task and host.
 
 No Codex file is opened for writing.
 
@@ -64,9 +65,9 @@ It:
 - holds and releases push-to-talk modifiers across Stream Deck key-down/key-up events;
 - attaches an explicit Latin `D` to push-to-talk events while retaining the physical key code, making the shortcut independent of the active keyboard input source;
 - sends app-switch and media-key events;
-- finds processes currently producing Core Audio output;
-- suspends those process IDs during dictation and resumes the same IDs on release.
-- traverses the visible Codex accessibility tree to fingerprint task titles, select one unambiguous remote task result, and count localized queue-action buttons without returning message text.
+- checks whether a supported media app or browser helper is actively producing Core Audio output;
+- sends the normal macOS play/pause media command when active supported output should pause, without signaling processes or retaining process IDs;
+- traverses the visible Codex accessibility tree once for the target UUID and normalized title fingerprints, activates only identity-safe pressable results, rejects title-only ambiguity in strict mode, verifies the focused task from its header, and counts localized queue-action buttons without returning message text.
 
 The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input.
 
@@ -95,11 +96,11 @@ The plugin caches the last image for each context and avoids sending unchanged f
 
 `scripts/build.sh` mirrors every top-level JavaScript source module into the plugin's `bin/` directory without transforming it and removes stale bundled JavaScript modules. `scripts/verify.sh` syntax-checks both copies and compares each pair byte-for-byte.
 
-`pnpm run test` runs the I/O-free module contracts under `test/` with Node's built-in `node:test` runner. The runtime entry point retains small inline contract modes for behavior that depends on its coordinated context and caches: completion fan-out, refresh resilience, usage caching, and voice submission. The full `pnpm run check` path runs both groups along with native-helper, manifest, documentation, and release checks.
+`pnpm run test` runs the I/O-free module contracts under `test/` with Node's built-in `node:test` runner. The runtime entry point retains small inline contract modes for behavior that depends on its coordinated context and caches: completion fan-out, refresh resilience, usage caching, voice submission, fast-mode rendering, remote-switch single-flight/search limits, stale-hold guards, and serialized media ownership. The full `pnpm run check` path runs both groups along with native-helper, manifest, documentation, and release checks.
 
 ## Documentation renderer
 
-`scripts/render-docs.mjs` runs the same key-rendering functions in sanitized demo mode. It exports dark and light 4 × 2 feature overviews and exact individual-key PNGs. `scripts/render-animation.mjs` renders a deterministic 72-frame overview plus focused task hold-to-talk, dedicated-microphone, Send long-press, and app-launcher guide sequences. It rasterizes SVGs with macOS `sips` and encodes GIFs with the open-source Swift/ImageIO helper. ThreadDeck key states remain production renderer output with bilingual timelines around them. The Elgato-owned app-launcher behavior is represented by an explicitly neutral guide key rather than copied native artwork.
+`scripts/render-docs.mjs` runs the same key-rendering functions in sanitized demo mode. It exports dark and light 4 × 2 feature overviews and exact individual-key PNGs. `scripts/render-animation.mjs` renders a deterministic 72-frame overview plus focused task hold-to-talk, dedicated-microphone, Send long-press, and app-launcher guide sequences. The shared `scripts/rasterize.mjs` helper uses the development-only Sharp dependency to rasterize SVGs deterministically; the repository-owned Swift/ImageIO helper encodes GIFs. ThreadDeck key states remain production renderer output with bilingual timelines around them. The Elgato-owned app-launcher behavior is represented by an explicitly neutral guide key rather than copied native artwork. Neither Sharp nor the documentation encoder is included in the runtime plugin.
 
 ## Stability boundary
 

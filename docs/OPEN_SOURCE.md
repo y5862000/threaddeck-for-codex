@@ -22,6 +22,7 @@ Generated `bin/`, profile archives, and release installers are ignored by Git be
 
 - The runtime Node.js plugin uses only built-in Node modules.
 - `@elgato/cli` is a development dependency used to validate and pack the plugin. It is MIT licensed and not bundled as application logic.
+- `sharp` is a development-only dependency used by `scripts/rasterize.mjs` to turn repository-owned SVGs into plugin and documentation PNGs. It and its platform packages are build tools and are not bundled in the runtime plugin. The exact Darwin `@img/sharp-libvips-*` 1.2.4 build packages carry `LGPL-3.0-or-later`; the license audit scopes its exception to those package names and that version while Sharp remains a development dependency, rather than allowing LGPL dependencies generally.
 - [CodexBar](https://github.com/steipete/CodexBar) is an optional, separately installed MIT-licensed executable used only for quota data.
 - Xcode Command Line Tools and macOS system frameworks compile and run the native helper.
 
