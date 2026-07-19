@@ -4,7 +4,7 @@
 
 ## Unreleased
 
-- Merged local and cached remote Codex tasks into one pinned/recent list and made remote task keys activate the correct computer through Codex's own sidebar or unified search.
+- Kept pinned/recent local tasks in the automatic list, included only explicitly pinned remote tasks, and made those remote keys activate the correct computer through Codex's own sidebar or unified search.
 - Guaranteed the first completion pulse frame reaches every visible ThreadDeck-owned key, then reduced grouped animation traffic for reliable Neo updates.
 - Made push-to-talk independent of the active keyboard input source, ended current app-scoped dictation through Codex's visible stop control on release, and detected failed audio starts.
 - Retried transient task-list read failures and kept the last good list so a one-off error card cannot flash across the keys.

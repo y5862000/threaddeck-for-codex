@@ -38,7 +38,7 @@ Codex can keep several long-running tasks moving at once, but the desktop app is
 
 - Which task is working, waiting, completed, queued, or in error?
 - How long has it been running, and how long did it take?
-- Which pinned or recent local or remote task do I want to open next?
+- Which pinned or recent local task, or explicitly pinned remote task, do I want to open next?
 - How much weekly capacity is left?
 - Can I start a task, open Side Chat, dictate, send, or switch apps without hunting for a shortcut?
 - Can I hold the task I am watching, speak a follow-up, and have it submitted to that task when I release the key?

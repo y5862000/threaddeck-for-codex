@@ -206,6 +206,7 @@ const registerEvent = argument("-registerEvent");
 const snapshotMode = process.argv.includes("--snapshot");
 const completionContractMode = process.argv.includes("--verify-completion");
 const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
+const threadSelectionContractMode = process.argv.includes("--verify-thread-selection");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
@@ -255,6 +256,8 @@ let pendingSideChatTarget = null;
 let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
 let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
 let accessibilityTrustCache = { checkedAtMs: 0, trusted: null };
+let pinnedIdsCache = [];
+let remoteThreadRowsCache = [];
 let sideChatSessionStartMs = null;
 const sideChatParentById = new Map();
 const sideChatLifecycleCache = new Map();
@@ -1823,9 +1826,13 @@ async function readPinnedIds() {
   try {
     const state = JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
     const ids = Array.isArray(state?.["pinned-thread-ids"]) ? state["pinned-thread-ids"] : [];
-    return [...new Set(ids.filter((id) => UUID_PATTERN.test(id)))];
+    pinnedIdsCache = [...new Set(ids.filter((id) => UUID_PATTERN.test(id)))];
+    return [...pinnedIdsCache];
   } catch {
-    return [];
+    // Codex can rewrite the JSON state while this poll is reading it. Keep the
+    // previous explicit pin set so pinned remote tasks do not disappear for a
+    // single frame.
+    return [...pinnedIdsCache];
   }
 }
 
@@ -2248,9 +2255,12 @@ async function readRemoteThreadRows() {
         });
       }
     }
-    return [...byId.values()].sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+    remoteThreadRowsCache = [...byId.values()].sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+    return [...remoteThreadRowsCache];
   } catch {
-    return [];
+    // Preserve pinned remote candidates through one partially written Codex
+    // state snapshot. A later valid empty snapshot still clears the cache.
+    return [...remoteThreadRowsCache];
   }
 }
 
@@ -2521,36 +2531,16 @@ async function statusForThread(thread, activeThreadIds) {
   }
 }
 
-async function readTopThreads() {
-  const queueWindowsPromise = readCodexQueueWindows();
-  const [rows, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
-    readThreadRows(),
-    readRemoteThreadRows(),
-    readPinnedIds(),
-    readActiveThreadIds(),
-    readSidebarThreadNames()
-  ]);
-  const localRows = rows
-    .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
-    .filter((row) => !isInternalAmbientTitle(row.title));
+function selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds) {
   const localIds = new Set(localRows.map((row) => row.id));
-  const visibleRows = [
-    ...localRows,
-    ...remoteRows.filter((row) => !localIds.has(row.id) && !isInternalAmbientTitle(row.title))
-  ];
-  const sideChats = await readEphemeralSideChats(visibleRows, visibleRows[0]?.id ?? null);
-  const sideChatLifecycles = await readSideChatLifecycles(sideChats);
-  const openSideChats = sideChats.filter((thread) => !closedSideChatAtMs.has(thread.id)
-    && sideChatLifecycles.get(thread.id)?.status !== "closed");
-  await resolvePendingSideChatTarget(openSideChats);
-  knownSideChatIds = new Set(sideChats.map((thread) => thread.id));
-  for (const thread of sideChats) {
-    if (sideChatLifecycles.get(thread.id)?.status === "closed") sideChatParentById.delete(thread.id);
-  }
-  const recentRows = [...visibleRows, ...openSideChats]
+  const pinnedIdSet = new Set(pinnedIds);
+  const pinnedRemoteRows = remoteRows.filter((row) => !localIds.has(row.id)
+    && pinnedIdSet.has(row.id)
+    && !isInternalAmbientTitle(row.title));
+  const selectablePersistentRows = [...localRows, ...pinnedRemoteRows];
+  const recentRows = [...localRows, ...openSideChats]
     .sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
-  mostRecentThreadId = recentRows[0]?.id ?? null;
-  const byId = new Map(visibleRows.map((row) => [row.id, row]));
+  const byId = new Map(selectablePersistentRows.map((row) => [row.id, row]));
   const selected = [];
   const selectedIds = new Set();
 
@@ -2568,6 +2558,38 @@ async function readTopThreads() {
     selected.push({ ...row, pinned: false });
     selectedIds.add(row.id);
   }
+
+  return {
+    selected,
+    byId,
+    mostRecentId: recentRows[0]?.id ?? null
+  };
+}
+
+async function readTopThreads() {
+  const queueWindowsPromise = readCodexQueueWindows();
+  const [rows, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
+    readThreadRows(),
+    readRemoteThreadRows(),
+    readPinnedIds(),
+    readActiveThreadIds(),
+    readSidebarThreadNames()
+  ]);
+  const localRows = rows
+    .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
+    .filter((row) => !isInternalAmbientTitle(row.title));
+  const sideChats = await readEphemeralSideChats(localRows, localRows[0]?.id ?? null);
+  const sideChatLifecycles = await readSideChatLifecycles(sideChats);
+  const openSideChats = sideChats.filter((thread) => !closedSideChatAtMs.has(thread.id)
+    && sideChatLifecycles.get(thread.id)?.status !== "closed");
+  await resolvePendingSideChatTarget(openSideChats);
+  knownSideChatIds = new Set(sideChats.map((thread) => thread.id));
+  for (const thread of sideChats) {
+    if (sideChatLifecycles.get(thread.id)?.status === "closed") sideChatParentById.delete(thread.id);
+  }
+  const selection = selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds);
+  const { selected, byId } = selection;
+  mostRecentThreadId = selection.mostRecentId;
 
   const persistentThreads = selected.filter((thread) => !thread.ephemeral);
   const persistentLifecycles = await Promise.all(
@@ -3484,6 +3506,86 @@ async function verifyThreadRefreshResilience() {
   socket = null;
 }
 
+function verifyThreadSelectionPolicy() {
+  const localRecent = {
+    id: "00000000-0000-4000-8000-000000000010",
+    title: "로컬 최근 작업",
+    recency_at: 400
+  };
+  const localPinned = {
+    id: "00000000-0000-4000-8000-000000000011",
+    title: "로컬 고정 작업",
+    recency_at: 300
+  };
+  const pinnedRemote = {
+    id: "00000000-0000-4000-8000-000000000012",
+    title: "원격 고정 작업",
+    recency_at: 500,
+    remote: true
+  };
+  const unpinnedRemote = {
+    id: "00000000-0000-4000-8000-000000000013",
+    title: "원격 최근 작업",
+    recency_at: 600,
+    remote: true
+  };
+  const sideChat = {
+    id: "00000000-0000-4000-8000-000000000014",
+    title: "로컬 사이드챗",
+    recency_at: 450,
+    ephemeral: true
+  };
+  const pinnedIds = [pinnedRemote.id, localPinned.id];
+  const selected = selectTopThreadRows(
+    [localRecent, localPinned],
+    [unpinnedRemote, pinnedRemote],
+    [sideChat],
+    pinnedIds
+  );
+  const selectedIds = selected.selected.map((thread) => thread.id);
+  const onlyPinnedRemoteIncluded = selectedIds.includes(pinnedRemote.id)
+    && !selectedIds.includes(unpinnedRemote.id)
+    && selected.selected.filter((thread) => thread.remote).every((thread) => thread.pinned);
+  const localRecentsFillRemainingSlots = selectedIds.join(",") === [
+    pinnedRemote.id,
+    localPinned.id,
+    sideChat.id,
+    localRecent.id
+  ].join(",");
+  const dedicatedVoiceTargetsLocalRecency = selected.mostRecentId === sideChat.id;
+
+  const afterRemoteUnpin = selectTopThreadRows(
+    [localRecent, localPinned],
+    [unpinnedRemote, pinnedRemote],
+    [sideChat],
+    [localPinned.id]
+  );
+  const unpinnedRemoteRemoved = afterRemoteUnpin.selected.every((thread) => !thread.remote);
+
+  const localWinsDuplicate = selectTopThreadRows(
+    [localRecent],
+    [{ ...pinnedRemote, id: localRecent.id }],
+    [],
+    [localRecent.id]
+  ).selected[0];
+  const localRecordWins = localWinsDuplicate?.id === localRecent.id
+    && !localWinsDuplicate.remote
+    && localWinsDuplicate.pinned;
+  const passed = onlyPinnedRemoteIncluded
+    && localRecentsFillRemainingSlots
+    && dedicatedVoiceTargetsLocalRecency
+    && unpinnedRemoteRemoved
+    && localRecordWins;
+  console.log(JSON.stringify({
+    passed,
+    onlyPinnedRemoteIncluded,
+    localRecentsFillRemainingSlots,
+    unpinnedRemoteRemoved,
+    localRecordWins
+  }));
+  if (!passed) process.exitCode = 1;
+}
+
 process.once("SIGTERM", () => {
   releaseVoiceKeysSync();
   process.exit(0);
@@ -3501,6 +3603,8 @@ if (completionContractMode) {
     console.error(error);
     process.exitCode = 1;
   });
+} else if (threadSelectionContractMode) {
+  verifyThreadSelectionPolicy();
 } else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
   if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
   else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");

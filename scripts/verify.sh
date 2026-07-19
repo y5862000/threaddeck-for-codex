@@ -9,6 +9,7 @@ node --check "$ROOT_DIR/src/plugin.js"
 node --check "$PLUGIN_DIR/bin/plugin.js"
 node "$ROOT_DIR/src/plugin.js" --verify-completion
 node "$ROOT_DIR/src/plugin.js" --verify-refresh-resilience
+node "$ROOT_DIR/src/plugin.js" --verify-thread-selection
 node "$ROOT_DIR/scripts/verify-docs.mjs"
 jq -e . "$PLUGIN_DIR/manifest.json" >/dev/null
 

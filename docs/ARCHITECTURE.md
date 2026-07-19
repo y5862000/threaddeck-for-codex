@@ -20,7 +20,7 @@ ThreadDeck is intentionally small. A dependency-free Node.js process owns local 
 It:
 
 - connects to Stream Deck through the localhost plugin WebSocket;
-- merges pinned and recent local SQLite tasks with cached remote task summaries from Codex JSON state, deduplicating by conversation ID;
+- merges pinned and recent local SQLite tasks with only explicitly pinned cached remote summaries from Codex JSON state, deduplicating by conversation ID;
 - normalizes working, completed, queued, error, and idle states;
 - tracks start/end timestamps and freezes completed durations;
 - tracks the active Desktop session so closed temporary Side Chats do not reappear as ordinary tasks;
@@ -58,7 +58,7 @@ ThreadDeck owns the bundled previous-page actions and exposes a next-page action
 ## Data refresh and rendering
 
 - Task metadata refreshes every 3 seconds while a task action is visible.
-- Local and cached remote summaries share one recency-sorted task list; a local record wins if the same conversation ID appears in both sources.
+- Pinned local tasks and explicitly pinned remote summaries are placed first; only local tasks and Side Chats fill the remaining recent slots. A local record wins if the same conversation ID appears in both sources.
 - The same refresh observes the open Codex task's queue count. Cached counts follow that task key and decrement when a queued turn starts.
 - Active task timers and animation frames render at device-appropriate intervals.
 - Weekly usage refreshes every 60 seconds while the quota action is visible.
