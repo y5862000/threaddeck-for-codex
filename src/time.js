@@ -2,6 +2,8 @@
 
 // Thread identity, recency, and elapsed-time helpers with no runtime state.
 
+const { goalElapsedMs } = require("./goal-state");
+
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 function uuidV7TimestampMs(id) {
@@ -31,6 +33,10 @@ function formatDuration(durationMs) {
 }
 
 function timingLabel(thread, nowMs) {
+  if (thread?.goal) {
+    const goalDurationMs = goalElapsedMs(thread.goal, nowMs);
+    return Number.isFinite(goalDurationMs) ? formatDuration(goalDurationMs) : "--:--";
+  }
   if (!Number.isFinite(thread?.startedAtMs)) {
     if (["working", "completed", "stopped"].includes(thread?.status)) return "--:--";
     return "열기";

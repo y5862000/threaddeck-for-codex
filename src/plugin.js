@@ -28,13 +28,25 @@ const {
   uuidV7TimestampMs
 } = require("./time");
 const {
+  applyGoalTerminalCutoff,
+  freezeGoal,
+  goalElapsedMs,
+  goalIdentity,
+  goalIsUnfinished,
+  normalizeGoalRecord,
+  normalizeGoalStatus,
+  parseCodexGoalState,
+  unfreezeGoal
+} = require("./goal-state");
+const {
   applyRemoteActivityLogLine: applyRemoteActivityLogLineToStore,
   applyRemoteLifecycleLogLine: applyRemoteLifecycleLogLineToStore,
+  composerStateForRemoteThread,
   deriveRemoteStatus,
   normalizedReasoningEffort,
   observeRemoteRuntimeEnd: observeRemoteRuntimeEndInStore,
-  parseCodexReasoningState,
-  reasoningEffortForRemoteThread: reasoningEffortForRemoteThreadInStore,
+  parseCodexComposerState,
+  recordRemoteComposerStateObservation,
 } = require("./remote-state");
 const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
 const { isInternalThreadRecord } = require("./thread-privacy");
@@ -57,6 +69,7 @@ const {
   APP_SERVER_START_TOLERANCE_MS,
   COMPLETION_OBSERVATION_OVERLAP_MS,
   COMPLETION_STARTUP_GRACE_MS,
+  CURRENT_THREAD_SLOT,
   DEFAULT_PROFILE_PAGE_COUNT,
   DESKTOP_LOG_PATH_CACHE_MS,
   DISTRIBUTED_PROFILE_NAME,
@@ -71,7 +84,6 @@ const {
   SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS,
   SIDE_CHAT_TARGET_LOG_TAIL_BYTES,
   SIDE_CHAT_TARGET_REFRESH_DELAYS_MS,
-  THREAD_ACTIONS,
   THREAD_COMPLETION_PULSE_DURATION_MS,
   THREAD_COUNT,
   THREAD_REFRESH_ERROR_STATE,
@@ -103,6 +115,11 @@ const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, ".codex"));
 const STATE_DB = path.resolve(process.env.THREADDECK_STATE_DB || path.join(CODEX_HOME, "state_5.sqlite"));
+const GOALS_DB = path.resolve(process.env.THREADDECK_GOALS_DB || path.join(CODEX_HOME, "goals_1.sqlite"));
+const REMOTE_GOAL_CACHE_PATH = path.resolve(
+  process.env.THREADDECK_REMOTE_GOAL_CACHE
+    || path.join(USER_HOME, "Library", "Application Support", "ThreadDeck", "remote-goals-v1.json")
+);
 const GLOBAL_STATE = path.resolve(process.env.THREADDECK_GLOBAL_STATE || path.join(CODEX_HOME, ".codex-global-state.json"));
 const SESSION_INDEX = path.resolve(process.env.THREADDECK_SESSION_INDEX || path.join(CODEX_HOME, "session_index.jsonl"));
 const PROCESS_REGISTRY = path.resolve(
@@ -155,7 +172,6 @@ const REMOTE_APP_ACTIVATION_RETRY_MS = 180;
 const REMOTE_DIRECT_READY_POLL_DELAYS_MS = [0, 70, 120, 200, 320];
 const REMOTE_READY_POLL_DELAYS_MS = [0, 90, 160, 260, 420, 680];
 const REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES = 32 * 1024 * 1024;
-const REMOTE_REASONING_PROBE_CACHE_MS = 5_000;
 // Use fonts already supplied by macOS. The public plugin intentionally does
 // not redistribute proprietary font files.
 const FONT_STACK = "'.AppleSystemUIFont', 'SF Pro Display', 'SF Pro Text', 'Apple SD Gothic Neo', 'Helvetica Neue', Helvetica, Arial, sans-serif";
@@ -231,7 +247,9 @@ const demoLightOutput = argument("--render-demo-light");
 const completedKeyOutput = argument("--render-completed-key");
 const demoAnimationDirectory = argument("--render-demo-animation");
 const gestureAnimationDirectory = argument("--render-gesture-animations");
-const FAST_MODE_REFRESH_INTERVAL_MS = 5_000;
+const GOAL_PROBE_CACHE_MS = 2_000;
+const GOAL_NONE_CONFIRMATIONS = 2;
+const REMOTE_GOAL_CACHE_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const pluginStartedAtMs = Date.now();
 const runtimeTraceEnabled = !snapshotMode
   && !completionContractMode
@@ -251,8 +269,9 @@ const contextSentImages = new Map();
 const contextFeedback = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
-const completionPulseReasonByThreadId = new Map();
 const observedCompletionEndMs = new Map();
+const completionQueueBarrierMsByThreadId = new Map();
+const pendingCompletionByThreadId = new Map();
 const voiceHeldContexts = new Set();
 const voiceReleasePendingContexts = new Set();
 const voiceMediaPauseOwners = new Set();
@@ -270,6 +289,9 @@ let socket = null;
 let activeUsageRefresh = null;
 let activeThreadRefresh = null;
 let activeAppearanceRefresh = null;
+// Ranked slots always preserve the user-visible Top Task 1-8 ordering. The
+// independently selectable Current / Last action resolves through
+// `primaryThreadRow`, so switching tasks never silently renumbers the list.
 let threadSlots = Array(THREAD_COUNT).fill(null);
 let primaryThreadId = null;
 let primaryThreadRow = null;
@@ -308,6 +330,37 @@ let activeComposerCreation = null;
 let activeFastModeRefresh = null;
 let activeFastModeUpdate = null;
 let fastModeRevision = 0;
+
+function currentThreadForDisplay(rankedThreads = threadSlots, currentRow = primaryThreadRow) {
+  if (primaryThreadId) {
+    const fresh = rankedThreads.find((thread) => thread?.id === primaryThreadId);
+    if (fresh) return fresh;
+    if (currentRow?.id === primaryThreadId) return currentRow;
+  }
+  return currentRow?.id ? currentRow : rankedThreads.find(Boolean) ?? null;
+}
+
+function threadForSlot(slot) {
+  return slot === CURRENT_THREAD_SLOT
+    ? currentThreadForDisplay()
+    : threadSlots[slot] ?? null;
+}
+
+function threadForAction(action) {
+  const slot = THREAD_SLOT_BY_ACTION.get(action);
+  return slot === undefined ? null : threadForSlot(slot);
+}
+
+function combinedVisibleThreads(currentThread = currentThreadForDisplay(), rankedThreads = threadSlots) {
+  const seen = new Set();
+  const rows = [];
+  for (const thread of [currentThread, ...rankedThreads]) {
+    if (!thread?.id || seen.has(thread.id)) continue;
+    seen.add(thread.id);
+    rows.push(thread);
+  }
+  return rows;
+}
 let fastModeState = {
   threadId: null,
   enabled: null,
@@ -355,11 +408,20 @@ const closedSideChatAtMs = new Map();
 const sideChatCloseLogOffsets = new Map();
 const remoteLifecycleCache = new Map();
 const remoteLifecycleLogCursors = new Map();
-const remoteReasoningEffortByThreadId = new Map();
+const remoteComposerStateByThreadId = new Map();
 const remoteRuntimeObservationByThreadId = new Map();
 const remoteActivityByThreadId = new Map();
 const queueStateByThreadId = new Map();
-let remoteReasoningProbe = { threadId: null, checkedAtMs: 0 };
+let goalRowsCache = new Map();
+const observedGoalByThreadId = new Map();
+const displayedGoalByThreadId = new Map();
+const goalTerminalCutoffByThreadId = new Map();
+const confirmedGoalAbsentByThreadId = new Map();
+let remoteGoalCacheLoaded = false;
+let remoteGoalCacheLoadPromise = null;
+let remoteGoalCacheWriteTail = Promise.resolve();
+let remoteComposerProbe = { threadId: null, turnKey: null };
+let goalProbe = { threadId: null, checkedAtMs: 0, absentCount: 0 };
 
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) {
@@ -625,9 +687,7 @@ function completionPulseState(threadId, nowMs = renderTimeMs()) {
 }
 
 function visibleCompletionPulseState(thread, nowMs = renderTimeMs()) {
-  if (!thread?.id) return null;
-  const reason = completionPulseReasonByThreadId.get(thread.id);
-  if (thread.status !== "completed" && reason !== "queue-advance") return null;
+  if (!thread?.id || thread.status !== "completed") return null;
   return completionPulseState(thread.id, nowMs);
 }
 
@@ -659,8 +719,7 @@ function globalCompletionChrome(effect) {
 }
 
 function contextThreadId(context) {
-  const slot = THREAD_SLOT_BY_ACTION.get(contexts.get(context));
-  return slot === undefined ? null : threadSlots[slot]?.id ?? null;
+  return threadForAction(contexts.get(context))?.id ?? null;
 }
 
 function applyGlobalCompletion(svg, effect) {
@@ -967,7 +1026,7 @@ function cancelThreadPress(context, releaseVoice = true) {
 
 function beginThreadPress(context, slot, options = {}) {
   if (threadPressByContext.has(context)) return;
-  const thread = threadSlots[slot];
+  const thread = options.thread ?? threadForSlot(slot);
   if (!thread?.id) {
     showFeedback(context, "error", "작업 없음");
     return;
@@ -997,7 +1056,7 @@ function beginThreadPress(context, slot, options = {}) {
   };
   threadPressByContext.set(context, state);
   const open = options.openThread ?? openThread;
-  state.openPromise = Promise.resolve(open(context, slot));
+  state.openPromise = Promise.resolve(open(context, slot, { thread }));
   state.focusPromise = state.openPromise.then(async (opened) => {
     if (!opened || threadPressByContext.get(context) !== state || !state.held) return false;
     // Prepare focus close to the hold threshold instead of blocking the key-up
@@ -1175,7 +1234,7 @@ function currentActionSvg(action, context = null) {
 
 function displayedThreadSlot(slot) {
   if (threadRefreshUnavailable && !hasLoadedThreadState) return THREAD_REFRESH_ERROR_STATE;
-  return threadSlots[slot];
+  return threadForSlot(slot);
 }
 
 function runKeyBridge(command, context = null) {
@@ -1485,7 +1544,7 @@ function resolveVoiceTargetThreadId(nowMs = Date.now()) {
     if (nowMs - pendingSideChatTarget.requestedAtMs < SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS) return null;
     pendingSideChatTarget = null;
   }
-  const visibleIds = new Set(threadSlots.filter(Boolean).map((thread) => thread.id));
+  const visibleIds = new Set(combinedVisibleThreads().map((thread) => thread.id));
   if (lastOpenedThreadId && Number.isFinite(lastOpenedThreadAtMs)
       && nowMs - lastOpenedThreadAtMs <= VOICE_TARGET_OPEN_HINT_MS
       && visibleIds.has(lastOpenedThreadId)) {
@@ -1503,7 +1562,7 @@ function voiceSubmissionStillCurrent(context, targetThreadId, sessionId) {
 }
 
 async function voiceTargetIsFocused(targetThreadId, options = {}) {
-  const thread = threadSlots.find((candidate) => candidate?.id === targetThreadId);
+  const thread = combinedVisibleThreads().find((candidate) => candidate?.id === targetThreadId);
   if (!thread) return false;
   // Submission safety needs the same identity-aware focused-header probe used
   // after remote navigation. In particular, a title-only queue match cannot
@@ -2520,17 +2579,31 @@ function parseFastModeState(output) {
   const text = String(output ?? "");
   const state = text.match(/(?:^|\s)state=(on|off|unknown)(?:\s|$)/i)?.[1]?.toLowerCase() ?? null;
   const available = text.match(/(?:^|\s)available=([01])(?:\s|$)/i)?.[1] ?? null;
-  if (!state || available === null) return null;
+  const composerState = parseCodexComposerState(text);
+  const enabled = state === "on"
+    ? true
+    : state === "off"
+      ? false
+      : composerState.serviceTier === "priority"
+        ? true
+        : composerState.serviceTier === "default"
+          ? false
+          : null;
+  const speedAvailable = available === null
+    ? composerState.serviceTierAvailable
+    : available === "1";
+  if (typeof enabled !== "boolean" && !state) return null;
   return {
-    enabled: state === "on" ? true : state === "off" ? false : null,
-    available: available === "1"
+    enabled,
+    available: Boolean(speedAvailable),
+    reasoningEffort: composerState.reasoningEffort
   };
 }
 
 async function queryFastModeState(options = {}) {
   const probe = options.stateProbe
-    ?? (() => execFileAsync(KEY_BRIDGE, ["fast-mode-state"], {
-      timeout: 1500,
+    ?? (() => execFileAsync(KEY_BRIDGE, ["codex-composer-state"], {
+      timeout: 2200,
       maxBuffer: 4096
     }));
   let stdout = "";
@@ -2580,6 +2653,17 @@ function refreshFastMode(options = {}) {
       const pendingNavigation = currentNavigationPromise();
       if (pendingNavigation) await pendingNavigation;
       if (primaryThreadId !== threadId || fastModeRevision !== revision) return false;
+      const thread = combinedVisibleThreads().find((candidate) => candidate.id === threadId)
+        ?? (primaryThreadRow?.id === threadId ? primaryThreadRow : null);
+      // The native speed control is scoped to the focused composer and carries
+      // no task id of its own. Never bind another window's mode to the cached
+      // Current / Last task. Contract tests inject a state probe and exercise
+      // the cache logic independently of the native identity guard.
+      if (!options.stateProbe) {
+        if (!thread || !await threadIsFocused(thread)) {
+          throw new Error("Codex current task was not focused");
+        }
+      }
       const state = await queryFastModeState(options);
       if (primaryThreadId !== threadId || fastModeRevision !== revision) return false;
       if (options.preserveConfirmedOnUnavailable
@@ -2587,6 +2671,7 @@ function refreshFastMode(options = {}) {
           && fastModeState.threadId === threadId
           && typeof fastModeState.enabled === "boolean") return false;
       fastModeState = { threadId, ...state, failed: false };
+      applyFocusedRemoteComposerState(thread, state);
       renderFastModeContexts();
       return typeof state.enabled === "boolean";
     } catch (error) {
@@ -2659,7 +2744,7 @@ function toggleFastMode(context, options = {}) {
       }
     }
     const threadId = primaryThreadId;
-    const thread = threadSlots.find((candidate) => candidate?.id === threadId)
+    const thread = combinedVisibleThreads().find((candidate) => candidate?.id === threadId)
       ?? (primaryThreadRow?.id === threadId ? primaryThreadRow : null);
     if (!thread || !await threadIsFocused(thread, { probe: options.focusProbe })) {
       feedback(context, "error", "작업 확인", 1600);
@@ -2713,6 +2798,7 @@ function toggleFastMode(context, options = {}) {
         throw new Error("Codex fast mode target was not confirmed");
       }
       fastModeState = { threadId, ...confirmed, failed: false };
+      applyFocusedRemoteComposerState(thread, confirmed);
       renderFastModeContexts();
       feedback(context, "success", targetEnabled ? "FAST 켬" : "FAST 끔");
       return true;
@@ -2817,6 +2903,48 @@ function queueBadgeSvg(thread) {
     <text x="103.5" y="122.5" fill="${THEME.amber}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" font-variant-numeric="tabular-nums" text-anchor="middle">${label}</text>`;
 }
 
+function goalBadgeSvg(thread) {
+  if (!goalIsUnfinished(thread?.goal)) return "";
+  const colors = {
+    active: THEME.blue,
+    paused: THEME.amber,
+    blocked: THEME.red,
+    usageLimited: THEME.amber,
+    budgetLimited: THEME.amber
+  };
+  const color = colors[thread.goal.status] ?? THEME.textSecondary;
+  return `
+    <g data-goal="${escapeXml(thread.goal.status)}" transform="translate(14.6 109.2) scale(.69)" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M12 13V2l8 4-8 4"/>
+      <path d="M20.561 10.222a9 9 0 1 1-12.55-5.29"/>
+      <path d="M8.002 9.997a5 5 0 1 0 8.9 2.02"/>
+    </g>`;
+}
+
+function threadTimingBarSvg(thread, completionEffect = null) {
+  const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
+  const hasGoalBadge = goalIsUnfinished(thread?.goal);
+  const elapsedLabel = timingLabel(thread);
+  const timingX = hasGoalBadge
+    ? queueCount > 0 ? 58 : 81
+    : queueCount > 0 ? 53 : 72;
+  const timingFontSize = hasGoalBadge && queueCount > 0
+    ? elapsedLabel.length >= 7 ? 13.5 : 16.5
+    : hasGoalBadge && elapsedLabel.length >= 8 ? 18 : 21;
+  const completionStrength = completionEffect?.strength ?? 0;
+  const completionChrome = completionEffect ? `
+    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.green}" fill-opacity="${(0.32 * completionStrength).toFixed(3)}" stroke="${THEME.green}" stroke-opacity="${(0.78 * completionStrength).toFixed(3)}" stroke-width="${(1 + completionStrength * 1.2).toFixed(2)}"/>` : "";
+  const completionText = completionEffect ? `
+    <text x="${timingX}" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>` : "";
+  return `
+    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
+    ${completionChrome}
+    ${goalBadgeSvg(thread)}
+    <text x="${timingX}" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
+    ${queueBadgeSvg(thread)}
+    ${completionText}`;
+}
+
 function ephemeralThreadSvg(thread) {
   const styles = {
     working: { accent: THEME.blue, label: "작업중" },
@@ -2827,12 +2955,6 @@ function ephemeralThreadSvg(thread) {
   };
   const style = styles[thread.status] ?? styles.idle;
   const completionEffect = visibleCompletionPulseState(thread);
-  const completionStrength = completionEffect?.strength ?? 0;
-  const completionTimeChrome = completionEffect ? `
-    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.green}" fill-opacity="${(0.32 * completionStrength).toFixed(3)}" stroke="${THEME.green}" stroke-opacity="${(0.78 * completionStrength).toFixed(3)}" stroke-width="${(1 + completionStrength * 1.2).toFixed(2)}"/>` : "";
-  const timingX = thread.queueCount > 0 ? 53 : 72;
-  const completionTimeText = completionEffect ? `
-    <text x="${timingX}" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="21" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>` : "";
   const titleFontSize = 20.5;
   const titleX = 79;
   const [line1, line2] = wrapTitle(thread.title, 5.05);
@@ -2848,11 +2970,7 @@ function ephemeralThreadSvg(thread) {
     <path d="M22 ${55.5 + iconYOffset}V62M18.8 ${58.8 + iconYOffset}H25.2" stroke="${THEME.textSecondary}" stroke-width="1.7" stroke-linecap="round"/>
     <text x="${titleX}" y="${titleLine1Y}" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line1)}</text>
     ${hasSecondTitleLine ? `<text x="${titleX}" y="89" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line2)}</text>` : ""}
-    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
-    ${completionTimeChrome}
-    <text x="${timingX}" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="21" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>
-    ${queueBadgeSvg(thread)}
-    ${completionTimeText}`,
+    ${threadTimingBarSvg(thread, completionEffect)}`,
     threadHeader(style.accent, thread.status, style.label, activity, thread.status === "working", thread.reasoningEffort, thread.serviceTier, completionEffect),
     completionPulseChrome(completionEffect));
   return applyVoiceTargetOverlay(rendered, thread.id);
@@ -2877,19 +2995,12 @@ function threadSvg(thread, slot) {
   };
   const style = styles[thread.status] ?? styles.idle;
   const completionEffect = visibleCompletionPulseState(thread);
-  const completionStrength = completionEffect?.strength ?? 0;
-  const completionTimeChrome = completionEffect ? `
-    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.green}" fill-opacity="${(0.32 * completionStrength).toFixed(3)}" stroke="${THEME.green}" stroke-opacity="${(0.78 * completionStrength).toFixed(3)}" stroke-width="${(1 + completionStrength * 1.2).toFixed(2)}"/>` : "";
-  const timingX = thread.queueCount > 0 ? 53 : 72;
-  const completionTimeText = completionEffect ? `
-    <text x="${timingX}" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="21" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(timingLabel(thread))}</text>` : "";
   const titleFontSize = 20.5;
   const titleX = thread.pinned ? 78 : 72;
   const [line1, line2] = wrapTitle(thread.title, thread.pinned ? 4.9 : 5.75);
   const hasSecondTitleLine = Boolean(line2);
   const titleLine1Y = hasSecondTitleLine ? 65 : 79;
   const pinYOffset = hasSecondTitleLine ? 0 : 13;
-  const elapsedLabel = timingLabel(thread);
   const activity = thread.activity ?? {
     kind: thread.status === "completed" ? "complete" : thread.status === "stopped" ? "stopped" : thread.status === "error" ? "error" : thread.status === "working" ? "think" : "idle",
     label: thread.status === "completed" ? "작업 종료" : thread.status === "stopped" ? "마지막 활동" : thread.status === "error" ? "상태 확인" : thread.status === "working" ? "생각 중" : "다시 열기"
@@ -2903,11 +3014,7 @@ function threadSvg(thread, slot) {
     ${pinIcon}
     <text x="${titleX}" y="${titleLine1Y}" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line1)}</text>
     ${hasSecondTitleLine ? `<text x="72" y="89" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${titleFontSize}" font-weight="600" text-anchor="middle">${escapeXml(line2)}</text>` : ""}
-    <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
-    ${completionTimeChrome}
-    <text x="${timingX}" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="21" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
-    ${queueBadgeSvg(thread)}
-    ${completionTimeText}`,
+    ${threadTimingBarSvg(thread, completionEffect)}`,
     threadHeader(style.accent, thread.status, style.label, activity, thread.status === "working", thread.reasoningEffort, thread.serviceTier, completionEffect),
     completionPulseChrome(completionEffect));
   return applyVoiceTargetOverlay(rendered, thread.id);
@@ -3196,7 +3303,12 @@ async function refreshRemoteLifecyclesFromLogs(nowMs = Date.now()) {
   return remoteLifecycleCache;
 }
 
-async function refreshVisibleRemoteReasoningEffort(threads, queueWindows, nowMs = Date.now()) {
+function shouldProbeRemoteComposerState(cachedState, alreadyProbed = false) {
+  if (alreadyProbed) return false;
+  return !cachedState?.reasoningEffort || !cachedState?.serviceTier;
+}
+
+async function refreshVisibleRemoteComposerState(threads, queueWindows, nowMs = Date.now()) {
   const focusedWindow = queueWindows.find((window) => window.focused)
     ?? (queueWindows.length === 1 ? queueWindows[0] : null);
   const focusedThread = focusedWindow ? matchQueueWindowThread(focusedWindow, threads) : null;
@@ -3205,36 +3317,263 @@ async function refreshVisibleRemoteReasoningEffort(threads, queueWindows, nowMs 
   // leaving a local composer's controls on screen.
   const thread = focusedThread?.remote ? focusedThread : null;
   if (!thread?.id) return null;
-  if (remoteReasoningProbe.threadId === thread.id
-      && nowMs - remoteReasoningProbe.checkedAtMs < REMOTE_REASONING_PROBE_CACHE_MS) {
-    return remoteReasoningEffortByThreadId.get(thread.id)?.effort ?? null;
-  }
-  remoteReasoningProbe = { threadId: thread.id, checkedAtMs: nowMs };
+  const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
+  const turnKey = lifecycle?.latestTurnId
+    ?? (Number.isFinite(lifecycle?.startedAtMs) ? String(lifecycle.startedAtMs) : null);
+  if (!turnKey) return null;
+  const cachedState = composerStateForRemoteThread(
+    thread,
+    lifecycle,
+    remoteComposerStateByThreadId
+  );
+  const alreadyProbed = remoteComposerProbe.threadId === thread.id
+    && remoteComposerProbe.turnKey === turnKey;
+  if (!shouldProbeRemoteComposerState(cachedState, alreadyProbed)) return cachedState;
+  // The fallback must briefly open Codex's model popover because the closed
+  // trigger hides the speed marker from Accessibility. Probe only once per
+  // exact remote turn; task switches and explicit Fast presses do their own
+  // verified read and update this same turn-scoped cache.
+  remoteComposerProbe = { threadId: thread.id, turnKey };
   try {
-    const { stdout } = await execFileAsync(KEY_BRIDGE, ["codex-reasoning-state"], {
+    const { stdout } = await execFileAsync(KEY_BRIDGE, ["codex-composer-state"], {
       timeout: 1800,
       maxBuffer: 4096
     });
-    const effort = parseCodexReasoningState(stdout);
-    if (!effort) return null;
-    const lifecycle = remoteLifecycleCache.get(thread.id);
-    remoteReasoningEffortByThreadId.set(thread.id, {
-      effort,
-      observedAtMs: nowMs,
-      turnStartedAtMs: Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null
-    });
-    return effort;
+    const state = parseCodexComposerState(stdout);
+    if (!recordRemoteComposerStateObservation(
+      thread,
+      lifecycle,
+      state,
+      nowMs,
+      remoteComposerStateByThreadId
+    )) return null;
+    return composerStateForRemoteThread(thread, lifecycle, remoteComposerStateByThreadId);
   } catch {
-    return remoteReasoningEffortByThreadId.get(thread.id)?.effort ?? null;
+    return composerStateForRemoteThread(
+      thread,
+      remoteLifecycleCache.get(thread.id) ?? null,
+      remoteComposerStateByThreadId
+    );
   }
 }
 
-function reasoningEffortForRemoteThread(thread, lifecycle) {
-  return reasoningEffortForRemoteThreadInStore(
-    thread,
-    lifecycle,
-    remoteReasoningEffortByThreadId
-  );
+function serializableRemoteGoal(goal) {
+  if (!goal?.threadId || !UUID_PATTERN.test(goal.threadId)) return null;
+  const status = normalizeGoalStatus(goal.status);
+  const timeUsedSeconds = Number.isFinite(goal.timeUsedSeconds)
+    ? Math.max(0, goal.timeUsedSeconds)
+    : null;
+  if (!status || !Number.isFinite(goal.updatedAtMs)) return null;
+  return {
+    threadId: goal.threadId,
+    goalId: goal.goalId ?? null,
+    status,
+    timeUsedSeconds,
+    createdAtMs: Number.isFinite(goal.createdAtMs) ? goal.createdAtMs : null,
+    updatedAtMs: goal.updatedAtMs
+  };
+}
+
+function pruneExpiredRemoteGoals(nowMs = Date.now()) {
+  for (const [threadId, goal] of observedGoalByThreadId) {
+    if (!Number.isFinite(goal?.updatedAtMs)
+        || nowMs - goal.updatedAtMs <= REMOTE_GOAL_CACHE_MAX_AGE_MS) continue;
+    observedGoalByThreadId.delete(threadId);
+    displayedGoalByThreadId.delete(threadId);
+    goalTerminalCutoffByThreadId.delete(threadId);
+    confirmedGoalAbsentByThreadId.set(threadId, nowMs);
+  }
+}
+
+async function loadRemoteGoalCache(nowMs = Date.now()) {
+  if (remoteGoalCacheLoaded) return;
+  if (remoteGoalCacheLoadPromise) return remoteGoalCacheLoadPromise;
+  remoteGoalCacheLoadPromise = (async () => {
+    try {
+      const parsed = JSON.parse(await fs.readFile(REMOTE_GOAL_CACHE_PATH, "utf8"));
+      if (parsed?.version !== 1 || !Array.isArray(parsed.goals)) return;
+      for (const row of parsed.goals) {
+        const goal = serializableRemoteGoal(row);
+        if (!goal || nowMs - goal.updatedAtMs > REMOTE_GOAL_CACHE_MAX_AGE_MS) continue;
+        const cachedGoal = {
+          ...goal,
+          source: "accessibility-cache"
+        };
+        if (cachedGoal.status === "active" && Number.isFinite(cachedGoal.timeUsedSeconds)) {
+          // A persisted active snapshot cannot prove the goal kept running
+          // while the plugin was offline. Resume only after a fresh focused
+          // Accessibility observation of the same task.
+          cachedGoal.freezeAtMs = cachedGoal.updatedAtMs;
+          cachedGoal.frozenElapsedMs = cachedGoal.timeUsedSeconds * 1000;
+          cachedGoal.resumeRequiresObservation = true;
+        }
+        observedGoalByThreadId.set(goal.threadId, cachedGoal);
+      }
+    } catch {
+      // The cache is optional; focused Accessibility and lifecycle data remain
+      // authoritative when it is missing, old, or partially written.
+    } finally {
+      remoteGoalCacheLoaded = true;
+      remoteGoalCacheLoadPromise = null;
+    }
+  })();
+  return remoteGoalCacheLoadPromise;
+}
+
+function persistRemoteGoalCache() {
+  if (!runtimeTraceEnabled) return;
+  pruneExpiredRemoteGoals();
+  const goals = [...observedGoalByThreadId.values()]
+    .map(serializableRemoteGoal)
+    .filter(Boolean);
+  const snapshot = `${JSON.stringify({ version: 1, goals })}\n`;
+  remoteGoalCacheWriteTail = remoteGoalCacheWriteTail.then(async () => {
+    const temporaryPath = `${REMOTE_GOAL_CACHE_PATH}.tmp-${process.pid}`;
+    await fs.mkdir(path.dirname(REMOTE_GOAL_CACHE_PATH), { recursive: true });
+    try {
+      await fs.writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
+      await fs.rename(temporaryPath, REMOTE_GOAL_CACHE_PATH);
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  }).catch(() => {
+    // Cache persistence must never delay task refresh or button input.
+  });
+}
+
+function mergeObservedGoal(previous, observed, nowMs) {
+  if (!observed?.timeUnknown || !previous) return observed;
+  // A completed goal cannot become active again. An unknown-duration state
+  // seen after completion therefore belongs to a new goal and must not inherit
+  // the previous goal's final accumulated time.
+  if (previous.status === "complete") return observed;
+  const elapsedMs = goalElapsedMs(previous, nowMs);
+  if (observed.status !== "active") {
+    return {
+      ...freezeGoal(previous, nowMs, observed.status, elapsedMs),
+      threadId: observed.threadId,
+      source: observed.source,
+      timeUnknown: true
+    };
+  }
+  return unfreezeGoal({
+    ...previous,
+    ...observed,
+    goalId: previous.goalId ?? observed.goalId,
+    createdAtMs: previous.createdAtMs ?? observed.createdAtMs,
+    timeUsedSeconds: Number.isFinite(elapsedMs) ? elapsedMs / 1000 : null,
+    updatedAtMs: nowMs
+  });
+}
+
+async function refreshFocusedGoalState(thread, nowMs = Date.now(), options = {}) {
+  if (!thread?.id || !UUID_PATTERN.test(thread.id)) return null;
+  if (goalProbe.threadId === thread.id
+      && nowMs - goalProbe.checkedAtMs < GOAL_PROBE_CACHE_MS) {
+    return observedGoalByThreadId.get(thread.id) ?? null;
+  }
+  const priorAbsentCount = goalProbe.threadId === thread.id ? goalProbe.absentCount : 0;
+  const probe = options.probe
+    ?? (() => execFileAsync(KEY_BRIDGE, ["codex-goal-state"], {
+      timeout: 1800,
+      maxBuffer: 4096
+    }));
+  let output = "";
+  let exitCode = 0;
+  try {
+    const result = await probe();
+    output = String(result?.stdout ?? result ?? "");
+  } catch (error) {
+    output = String(error?.stdout ?? "");
+    exitCode = keyBridgeExitCode(error) ?? 1;
+  }
+
+  const observed = parseCodexGoalState(output, nowMs);
+  if (observed) {
+    const goal = mergeObservedGoal(
+      observedGoalByThreadId.get(thread.id) ?? null,
+      { ...observed, threadId: thread.id },
+      nowMs
+    );
+    observedGoalByThreadId.set(thread.id, goal);
+    confirmedGoalAbsentByThreadId.delete(thread.id);
+    goalProbe = { threadId: thread.id, checkedAtMs: nowMs, absentCount: 0 };
+    persistRemoteGoalCache();
+    return goal;
+  }
+
+  const explicitNone = exitCode === 2
+    && /(?:^|\s)state=none(?:\s|$)/i.test(output);
+  if (!explicitNone) {
+    // Accessibility timeout, hidden window, or an older helper: retain the
+    // last valid goal rather than flashing the badge and timer off.
+    goalProbe = {
+      threadId: thread.id,
+      checkedAtMs: nowMs,
+      absentCount: priorAbsentCount
+    };
+    return observedGoalByThreadId.get(thread.id) ?? null;
+  }
+
+  const absentCount = priorAbsentCount + 1;
+  goalProbe = { threadId: thread.id, checkedAtMs: nowMs, absentCount };
+  if (absentCount >= GOAL_NONE_CONFIRMATIONS) {
+    observedGoalByThreadId.delete(thread.id);
+    confirmedGoalAbsentByThreadId.set(thread.id, nowMs);
+    persistRemoteGoalCache();
+  }
+  return observedGoalByThreadId.get(thread.id) ?? null;
+}
+
+function goalPredatesWorkingTurn(goal, thread) {
+  return goal?.status === "complete"
+    && thread?.status === "working"
+    && (!Number.isFinite(thread.startedAtMs)
+      || !Number.isFinite(goal.updatedAtMs)
+      || thread.startedAtMs > goal.updatedAtMs + 1_000);
+}
+
+function attachGoalsToThreads(threads, goalSnapshot, nowMs = Date.now()) {
+  pruneExpiredRemoteGoals(nowMs);
+  return threads.map((thread) => {
+    const databaseGoal = goalSnapshot.goals.get(thread.id) ?? null;
+    const observedGoal = observedGoalByThreadId.get(thread.id) ?? null;
+    const priorGoal = displayedGoalByThreadId.get(thread.id) ?? null;
+    let goal = databaseGoal ?? observedGoal;
+
+    if (goalPredatesWorkingTurn(goal, thread)) {
+      // Keep a final whole-goal total on the turn that achieved it, but do not
+      // let a cleared/completed goal replace the timer of a later normal turn.
+      goal = null;
+    }
+
+    if (!goal) {
+      const databaseConfirmedAbsent = goalSnapshot.fresh && !thread.remote;
+      const remoteAbsentAtMs = confirmedGoalAbsentByThreadId.get(thread.id);
+      const absenceConfirmed = databaseConfirmedAbsent || Number.isFinite(remoteAbsentAtMs);
+      goal = absenceConfirmed ? null : priorGoal;
+      if (goalPredatesWorkingTurn(goal, thread)) goal = null;
+    }
+
+    if (!goal) {
+      displayedGoalByThreadId.delete(thread.id);
+      goalTerminalCutoffByThreadId.delete(thread.id);
+      return { ...thread, goal: null };
+    }
+
+    const cutoffResult = applyGoalTerminalCutoff(
+      goal,
+      thread,
+      goalTerminalCutoffByThreadId.get(thread.id) ?? null,
+      nowMs
+    );
+    goal = cutoffResult.goal;
+    if (cutoffResult.cutoff) goalTerminalCutoffByThreadId.set(thread.id, cutoffResult.cutoff);
+    else goalTerminalCutoffByThreadId.delete(thread.id);
+    displayedGoalByThreadId.set(thread.id, goal);
+    return { ...thread, goal };
+  });
 }
 
 function observeRemoteRuntimeEnd(
@@ -3256,10 +3595,61 @@ function remoteStatusForThread(
   return deriveRemoteStatus(thread, {
     nowMs,
     lifecycle,
-    reasoningEfforts: remoteReasoningEffortByThreadId,
+    composerStates: remoteComposerStateByThreadId,
     runtimeObservations,
     activities: remoteActivities
   });
+}
+
+function applyFocusedRemoteComposerState(thread, state, nowMs = Date.now()) {
+  if (!thread?.remote) return false;
+  const serviceTier = state?.available && typeof state.enabled === "boolean"
+    ? state.enabled ? "priority" : "default"
+    : null;
+  const reasoningEffort = normalizedReasoningEffort(state?.reasoningEffort);
+  if (!serviceTier && !reasoningEffort) return false;
+  const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
+  const recorded = recordRemoteComposerStateObservation(
+    thread,
+    lifecycle,
+    {
+      reasoningEffort,
+      serviceTier
+    },
+    nowMs,
+    remoteComposerStateByThreadId
+  );
+  if (!recorded) return false;
+
+  let changed = false;
+  const refreshedThread = (candidate) => {
+    const base = {
+      ...candidate,
+      reasoningEffort: Object.hasOwn(candidate, "_remoteSummaryReasoningEffort")
+        ? candidate._remoteSummaryReasoningEffort
+        : candidate.reasoningEffort,
+      serviceTier: Object.hasOwn(candidate, "_remoteSummaryServiceTier")
+        ? candidate._remoteSummaryServiceTier
+        : candidate.serviceTier
+    };
+    return {
+      ...base,
+      ...remoteStatusForThread(base, nowMs),
+      _remoteSummaryReasoningEffort: base.reasoningEffort ?? null,
+      _remoteSummaryServiceTier: base.serviceTier ?? null
+    };
+  };
+  threadSlots = threadSlots.map((candidate) => {
+    if (candidate?.id !== thread.id) return candidate;
+    changed = true;
+    return refreshedThread(candidate);
+  });
+  if (primaryThreadRow?.id === thread.id) {
+    primaryThreadRow = refreshedThread(primaryThreadRow);
+    changed = true;
+  }
+  if (changed) renderThreadContexts();
+  return true;
 }
 
 async function refreshClosedSideChatsFromLogs(threads) {
@@ -3490,6 +3880,29 @@ async function readThreadRows() {
   return Array.isArray(rows) ? rows : [];
 }
 
+async function readGoalRows() {
+  const query = `SELECT thread_id, goal_id, status, time_used_seconds, created_at_ms, updated_at_ms FROM thread_goals;`;
+  try {
+    const { stdout } = await execFileAsync(SQLITE, ["-readonly", "-json", GOALS_DB, query], {
+      timeout: 2500,
+      maxBuffer: 2 * 1024 * 1024
+    });
+    const rows = stdout.trim() ? JSON.parse(stdout) : [];
+    const next = new Map();
+    for (const row of Array.isArray(rows) ? rows : []) {
+      const goal = normalizeGoalRecord(row, { source: "database" });
+      if (!goal?.threadId || !UUID_PATTERN.test(goal.threadId)) continue;
+      next.set(goal.threadId, goal);
+    }
+    // A valid empty query is meaningful: Codex has cleared every goal. Only
+    // query failures retain the previous snapshot to avoid transient flicker.
+    goalRowsCache = next;
+    return { goals: new Map(next), fresh: true };
+  } catch {
+    return { goals: new Map(goalRowsCache), fresh: false };
+  }
+}
+
 async function readPersistentThreadIds() {
   const query = "SELECT id FROM threads;";
   const { stdout } = await execFileAsync(SQLITE, ["-readonly", "-json", STATE_DB, query], {
@@ -3600,7 +4013,14 @@ async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
 }
 
 async function statusForThread(thread, activeThreadIds) {
-  if (thread.remote) return remoteStatusForThread(thread);
+  if (thread.remote) return {
+    ...remoteStatusForThread(thread),
+    // Keep the source summary separate from the turn-scoped composer overlay.
+    // Otherwise a previously rendered Fast/effort value looks like explicit
+    // metadata on the next in-memory reconciliation and cannot be cleared.
+    _remoteSummaryReasoningEffort: thread.reasoningEffort ?? null,
+    _remoteSummaryServiceTier: thread.serviceTier ?? null
+  };
   const isActive = activeThreadIds.has(thread.id);
   if (!thread.rollout_path) return {
     status: isActive ? "working" : "idle",
@@ -3685,7 +4105,7 @@ function rememberVerifiedThread(thread, options = {}) {
   primaryThreadId = thread.id;
   lastOpenedThreadId = thread.id;
   lastOpenedThreadAtMs = options.nowMs ?? Date.now();
-  const currentRow = threadSlots.find((row) => row?.id === thread.id);
+  const currentRow = combinedVisibleThreads().find((row) => row?.id === thread.id);
   primaryThreadRow = {
     ...(primaryThreadRow?.id === thread.id ? primaryThreadRow : {}),
     ...(currentRow ?? {}),
@@ -3701,7 +4121,6 @@ function rememberVerifiedThread(thread, options = {}) {
     };
   }
   if (options.promote !== false) {
-    threadSlots = primaryFirstThreadRows(threadSlots, [primaryThreadRow, ...threadSlots]);
     renderThreadContexts();
     renderStaticContexts();
   }
@@ -3729,13 +4148,15 @@ function annotateKnownTitleAmbiguity(selected, candidates) {
 async function readTopThreads() {
   const queueWindowsPromise = readCodexQueueWindows();
   const globalStatePromise = readGlobalStateSnapshot();
-  const [rows, persistentIds, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
+  const [rows, persistentIds, remoteRows, pinnedIds, activeThreadIds, sidebarNames, goalSnapshot] = await Promise.all([
     readThreadRows(),
     readPersistentThreadIds(),
     readRemoteThreadRows(globalStatePromise),
     readPinnedIds(globalStatePromise),
     readActiveThreadIds(),
-    readSidebarThreadNames()
+    readSidebarThreadNames(),
+    readGoalRows(),
+    loadRemoteGoalCache()
   ]);
   const localRows = rows
     .filter((row) => !isInternalThreadRecord(row))
@@ -3798,11 +4219,18 @@ async function readTopThreads() {
       promote: false
     });
   }
+  const rankedThreadIds = selection.selected.map((thread) => thread.id);
   const selected = annotateKnownTitleAmbiguity(
-    primaryFirstThreadRows(selection.selected, currentCandidates),
+    // Hydrate all eight ranked rows plus an independently tracked current row.
+    // The old current-first slice displaced Top Task 8 and made Top Task 1 a
+    // duplicate of Current / Last whenever the focused task was not rank 1.
+    primaryFirstThreadRows(selection.selected, currentCandidates, THREAD_COUNT + 1),
     identityCandidates
   );
-  await refreshVisibleRemoteReasoningEffort(selected, queueWindows);
+  await Promise.all([
+    refreshVisibleRemoteComposerState(selected, queueWindows),
+    refreshFocusedGoalState(focusedThread?.remote ? focusedThread : null)
+  ]);
 
   const persistentThreads = selected.filter((thread) => !thread.ephemeral);
   const persistentLifecycles = await Promise.all(
@@ -3839,10 +4267,16 @@ async function readTopThreads() {
         : parentLifecycle?.serviceTier ?? "default"
     };
   });
-  return primaryFirstThreadRows(
-    applyQueueState(hydratedThreads, queueWindows),
-    hydratedThreads
-  );
+  const queuedThreads = applyQueueState(hydratedThreads, queueWindows);
+  const goalThreads = attachGoalsToThreads(queuedThreads, goalSnapshot);
+  // Refresh the cached current row from the same lifecycle/queue/goal snapshot
+  // while returning the ranked list without promotion.
+  primaryFirstThreadRows(goalThreads, goalThreads, THREAD_COUNT + 1);
+  const goalById = new Map(goalThreads.map((thread) => [thread.id, thread]));
+  return {
+    threads: rankedThreadIds.map((id) => goalById.get(id)).filter(Boolean),
+    currentThread: primaryThreadId ? goalById.get(primaryThreadId) ?? null : null
+  };
 }
 
 async function readSystemAppearance() {
@@ -3892,9 +4326,8 @@ function renderStaticContexts() {
   }
 }
 
-function startCompletionEffects(threadId, nowMs = Date.now(), reason = "completion") {
+function startCompletionEffects(threadId, nowMs = Date.now()) {
   completionPulseStartedAt.set(threadId, nowMs);
-  completionPulseReasonByThreadId.set(threadId, reason);
   globalCompletionStartedAtMs = nowMs;
   globalCompletionThreadId = threadId;
   globalCompletionWasRendered = false;
@@ -3904,7 +4337,17 @@ function startCompletionEffects(threadId, nowMs = Date.now(), reason = "completi
 
 function clearCompletionEffect(threadId) {
   completionPulseStartedAt.delete(threadId);
-  completionPulseReasonByThreadId.delete(threadId);
+}
+
+function cancelCompletionEffects(threadId) {
+  clearCompletionEffect(threadId);
+  if (globalCompletionThreadId !== threadId) return;
+  globalCompletionStartedAtMs = null;
+  globalCompletionThreadId = null;
+  globalCompletionRenderGroup = 0;
+  globalCompletionInitialFanoutPending = false;
+  // Keep globalCompletionWasRendered intact so the animation timer sends one
+  // clean, overlay-free frame if a pulse had already reached the device.
 }
 
 function renderGlobalCompletionContexts(nowMs = Date.now()) {
@@ -3992,8 +4435,9 @@ function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now()) {
   if (!targetThreadId) return;
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
-    if (slot === undefined || threadSlots[slot]?.id !== targetThreadId) continue;
-    const svg = threadSvg(threadSlots[slot], slot);
+    const thread = slot === undefined ? null : threadForSlot(slot);
+    if (thread?.id !== targetThreadId) continue;
+    const svg = threadSvg(thread, slot);
     contextImages.set(context, svg);
     sendImage(context, composedContextSvg(context, svg, nowMs));
   }
@@ -4002,7 +4446,7 @@ function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now()) {
 function renderAnimatedThreadContexts(nowMs = Date.now()) {
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
-    const thread = slot === undefined ? null : threadSlots[slot];
+    const thread = slot === undefined ? null : threadForSlot(slot);
     const completionStartedAtMs = thread?.id ? completionPulseStartedAt.get(thread.id) : null;
     const completionAnimating = Number.isFinite(completionStartedAtMs)
       && nowMs - completionStartedAtMs < THREAD_COMPLETION_PULSE_DURATION_MS;
@@ -4010,10 +4454,10 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
       (thread?.status === "working" && String(thread.reasoningEffort ?? "").toLowerCase() === "ultra")
       || completionAnimating
     ) {
-      setImage(context, threadSvg(threadSlots[slot], slot));
+      setImage(context, threadSvg(thread, slot));
     } else if (Number.isFinite(completionStartedAtMs)) {
       clearCompletionEffect(thread.id);
-      setImage(context, threadSvg(threadSlots[slot], slot));
+      setImage(context, threadSvg(thread, slot));
     }
   }
 }
@@ -4022,10 +4466,23 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
   const previousById = new Map(previousThreads.filter(Boolean).map((thread) => [thread.id, thread]));
   if (!hasLoadedThreadState) {
     for (const thread of nextThreads) {
+      const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
+      if (thread?.id && queueCount > 0) completionQueueBarrierMsByThreadId.set(thread.id, nowMs);
       if (thread?.status === "completed" && Number.isFinite(thread.endedAtMs)) {
         const completedDuringStartup = thread.endedAtMs >= pluginStartedAtMs - COMPLETION_STARTUP_GRACE_MS
           && thread.endedAtMs <= nowMs + APP_SERVER_START_TOLERANCE_MS;
-        if (completedDuringStartup) startCompletionEffects(thread.id, nowMs, "completion");
+        const markerFollowsTurnStart = !Number.isFinite(thread.startedAtMs)
+          || thread.endedAtMs > thread.startedAtMs;
+        // A terminal row with queued follow-ups is an intermediate handoff, not
+        // a finished task. Remember its marker so it cannot pulse later when
+        // that queue is edited or dequeued.
+        if (completedDuringStartup && markerFollowsTurnStart && queueCount === 0) {
+          pendingCompletionByThreadId.set(thread.id, {
+            startedAtMs: Number.isFinite(thread.startedAtMs) ? thread.startedAtMs : null,
+            endedAtMs: thread.endedAtMs,
+            firstObservedAtMs: nowMs
+          });
+        }
         observedCompletionEndMs.set(thread.id, thread.endedAtMs);
       }
     }
@@ -4041,41 +4498,82 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
     const previous = previousById.get(thread.id);
     const previousQueueCount = Math.max(0, Number.parseInt(previous?.queueCount, 10) || 0);
     const nextQueueCount = Math.max(0, Number.parseInt(thread.queueCount, 10) || 0);
-    const queueAdvanced = Boolean(previous) && previousQueueCount > nextQueueCount;
-
-    if (thread.status === "working") {
-      if (queueAdvanced) {
-        startCompletionEffects(thread.id, nowMs, "queue-advance");
-      } else {
-        const startedAtMs = completionPulseStartedAt.get(thread.id);
-        const keepQueuePulse = completionPulseReasonByThreadId.get(thread.id) === "queue-advance"
-          && Number.isFinite(startedAtMs)
-          && nowMs - startedAtMs < THREAD_COMPLETION_PULSE_DURATION_MS;
-        if (!keepQueuePulse) clearCompletionEffect(thread.id);
-      }
-      continue;
+    const queueChanged = Boolean(previous) && previousQueueCount !== nextQueueCount;
+    if (queueChanged || nextQueueCount > 0) {
+      completionQueueBarrierMsByThreadId.set(thread.id, nowMs);
+      pendingCompletionByThreadId.delete(thread.id);
+      cancelCompletionEffects(thread.id);
     }
+
     if (thread.status !== "completed") {
-      if (queueAdvanced) startCompletionEffects(thread.id, nowMs, "queue-advance");
+      pendingCompletionByThreadId.delete(thread.id);
+      cancelCompletionEffects(thread.id);
       continue;
     }
 
     const knownEndMs = observedCompletionEndMs.get(thread.id);
-    const hasNewEndMarker = Number.isFinite(thread.endedAtMs)
+    const queueBarrierMs = completionQueueBarrierMsByThreadId.get(thread.id);
+    const pendingCompletion = pendingCompletionByThreadId.get(thread.id);
+    const normalizedStartedAtMs = Number.isFinite(thread.startedAtMs) ? thread.startedAtMs : null;
+    const markerFollowsTurnStart = Number.isFinite(thread.endedAtMs)
+      && (!Number.isFinite(thread.startedAtMs) || thread.endedAtMs > thread.startedAtMs);
+    const samePendingCompletion = pendingCompletion
+      && pendingCompletion.endedAtMs === thread.endedAtMs
+      && pendingCompletion.startedAtMs === normalizedStartedAtMs
+      && nowMs > pendingCompletion.firstObservedAtMs;
+    const queueIsSettledAndEmpty = nextQueueCount === 0
+      && (!previous || previousQueueCount === 0)
+      && !queueChanged;
+    if (samePendingCompletion && queueIsSettledAndEmpty) {
+      pendingCompletionByThreadId.delete(thread.id);
+      startCompletionEffects(thread.id, nowMs);
+      continue;
+    }
+    if (pendingCompletion) pendingCompletionByThreadId.delete(thread.id);
+
+    const turnAdvanced = Boolean(previous)
+      && Number.isFinite(thread.startedAtMs)
       && (
-        (Number.isFinite(knownEndMs) && thread.endedAtMs !== knownEndMs)
-        || (!Number.isFinite(knownEndMs)
-          && thread.endedAtMs >= unseenCompletionFloorMs
-          && thread.endedAtMs <= nowMs + APP_SERVER_START_TOLERANCE_MS)
+        !Number.isFinite(previous.startedAtMs)
+        || thread.startedAtMs > previous.startedAtMs
       );
-    const justTransitioned = previous && previous.status !== "completed";
-    if (justTransitioned || hasNewEndMarker) startCompletionEffects(thread.id, nowMs, "completion");
-    else if (queueAdvanced) startCompletionEffects(thread.id, nowMs, "queue-advance");
-    if (Number.isFinite(thread.endedAtMs)) observedCompletionEndMs.set(thread.id, thread.endedAtMs);
+    const markerClearsQueueBarrier = !Number.isFinite(queueBarrierMs)
+      || thread.endedAtMs > queueBarrierMs
+      // A whole final queued turn can start and finish between refreshes. Its
+      // advanced start identifies it as newer than the queue handoff even
+      // though the end timestamp necessarily precedes this observation.
+      || (queueChanged && turnAdvanced);
+    const hasNewEndMarker = markerFollowsTurnStart
+      && thread.endedAtMs >= unseenCompletionFloorMs
+      && thread.endedAtMs <= nowMs + APP_SERVER_START_TOLERANCE_MS
+      && (!Number.isFinite(knownEndMs) || thread.endedAtMs > knownEndMs)
+      && markerClearsQueueBarrier;
+    const queueCanStageCompletion = nextQueueCount === 0
+      && (!queueChanged || turnAdvanced);
+    // Queue count is presentation state only. Editing, deleting, or consuming
+    // a queued prompt must never become completion evidence. A fresh terminal
+    // marker is staged for one coherent refresh before any green frame is sent;
+    // a queued continuation therefore has time to replace the stale old-turn
+    // terminal row, while a collapsed final queued turn is retained by its
+    // advanced start timestamp.
+    if (hasNewEndMarker && queueCanStageCompletion) {
+      pendingCompletionByThreadId.set(thread.id, {
+        startedAtMs: normalizedStartedAtMs,
+        endedAtMs: thread.endedAtMs,
+        firstObservedAtMs: nowMs
+      });
+    }
+    if (Number.isFinite(thread.endedAtMs)
+        && (!Number.isFinite(knownEndMs) || thread.endedAtMs > knownEndMs)) {
+      observedCompletionEndMs.set(thread.id, thread.endedAtMs);
+    }
   }
 
   for (const threadId of completionPulseStartedAt.keys()) {
     if (!visibleIds.has(threadId)) clearCompletionEffect(threadId);
+  }
+  for (const threadId of pendingCompletionByThreadId.keys()) {
+    if (!visibleIds.has(threadId)) pendingCompletionByThreadId.delete(threadId);
   }
   lastThreadTransitionScanAtMs = nowMs;
 }
@@ -4104,13 +4602,28 @@ async function refreshThreads(feedbackContext, options = {}) {
         const retryDelays = Array.isArray(options.retryDelays)
           ? options.retryDelays
           : THREAD_REFRESH_RETRY_DELAYS_MS;
-        const threads = await readTopThreadsWithRetries(reader, retryDelays);
+        const snapshot = await readTopThreadsWithRetries(reader, retryDelays);
+        const threads = Array.isArray(snapshot) ? snapshot : snapshot?.threads;
+        if (!Array.isArray(threads)) throw new Error("Codex task snapshot was malformed");
         consecutiveThreadRefreshFailures = 0;
         threadRefreshUnavailable = false;
         pulse = !pulse;
-        const arrangedThreads = primaryFirstThreadRows(threads, threads);
-        const nextThreadSlots = THREAD_ACTIONS.map((_, index) => arrangedThreads[index] ?? null);
-        trackCompletionTransitions(threadSlots, nextThreadSlots);
+        const previousVisibleThreads = combinedVisibleThreads();
+        const nextThreadSlots = Array.from(
+          { length: THREAD_COUNT },
+          (_, index) => threads[index] ?? null
+        );
+        if (!Array.isArray(snapshot) && snapshot?.currentThread?.id) {
+          primaryThreadRow = {
+            ...(primaryThreadRow?.id === snapshot.currentThread.id ? primaryThreadRow : {}),
+            ...snapshot.currentThread
+          };
+        }
+        const nextCurrentThread = currentThreadForDisplay(nextThreadSlots, primaryThreadRow);
+        trackCompletionTransitions(
+          previousVisibleThreads,
+          combinedVisibleThreads(nextCurrentThread, nextThreadSlots)
+        );
         threadSlots = nextThreadSlots;
         renderThreadContexts();
         if (fastModeState.threadId !== primaryThreadId) {
@@ -4407,7 +4920,7 @@ function navigateRemoteThread(thread, slot, options = {}) {
 }
 
 async function openThread(context, slot, options = {}) {
-  const thread = threadSlots[slot];
+  const thread = options.thread ?? threadForSlot(slot);
   const feedback = options.feedback ?? showFeedback;
   if (!thread?.id) {
     feedback(context, "error", "작업 없음");
@@ -4755,15 +5268,6 @@ function registerPlugin() {
   }, 2000);
 
   setInterval(() => {
-    if ([...contexts.values()].some((action) => action === ACTIONS.fastMode)) {
-      void refreshFastMode({
-        quiet: true,
-        preserveConfirmedOnUnavailable: true
-      });
-    }
-  }, FAST_MODE_REFRESH_INTERVAL_MS);
-
-  setInterval(() => {
     if (voiceTranscriptionByContext.size > 0 || voiceStateResetAtMs.size > 0) {
       updateVoiceTranscriptionStates();
     }
@@ -4776,7 +5280,8 @@ const DEMO_COMPLETED_ID = "00000000-0000-4000-8000-000000000002";
 
 function resetDemoEffects() {
   completionPulseStartedAt.clear();
-  completionPulseReasonByThreadId.clear();
+  completionQueueBarrierMsByThreadId.clear();
+  pendingCompletionByThreadId.clear();
   voiceHeldContexts.clear();
   voiceReleasePendingContexts.clear();
   voiceStateByContext.clear();
@@ -4824,7 +5329,6 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
 
   if (hasCompleted) {
     completionPulseStartedAt.set(DEMO_WORKING_ID, completionStartMs);
-    completionPulseReasonByThreadId.set(DEMO_WORKING_ID, "completion");
     globalCompletionStartedAtMs = completionStartMs;
     globalCompletionThreadId = DEMO_WORKING_ID;
   }
@@ -4843,7 +5347,24 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
         : { kind: "edit", label: "코드 수정" },
     reasoningEffort: "ultra",
     serviceTier: "priority",
-    queueCount: hasCompleted ? 0 : queueCount
+    queueCount: hasCompleted ? 0 : queueCount,
+    goal: hasCompleted
+      ? {
+        threadId: DEMO_WORKING_ID,
+        goalId: "demo-goal",
+        status: "complete",
+        timeUsedSeconds: 37 * 60 + 15,
+        updatedAtMs: completionStartMs,
+        source: "demo"
+      }
+      : {
+        threadId: DEMO_WORKING_ID,
+        goalId: "demo-goal",
+        status: "active",
+        timeUsedSeconds: 36 * 60 + 40,
+        updatedAtMs: DEMO_EPOCH_MS - 32_000,
+        source: "demo"
+      }
   };
   let workingThreadSvg = threadSvg(workingThread, 0);
   if (voiceState !== "idle") {
@@ -5217,12 +5738,229 @@ function renderGestureAnimations(outputDirectory, mode = "dark") {
   resetDemoEffects();
 }
 
+function verifyCompletionTransitionPolicy(nowMs) {
+  const threadId = "00000000-0000-4000-8000-000000000030";
+  const oldStartedAtMs = nowMs - 30_000;
+  const oldEndedAtMs = nowMs - 1_000;
+  const newStartedAtMs = nowMs + 100;
+  const thread = (status, queueCount, startedAtMs, endedAtMs = null) => ({
+    id: threadId,
+    title: "완료 판정 검증",
+    remote: true,
+    status,
+    startedAtMs,
+    endedAtMs,
+    queueCount
+  });
+  const resetTracker = (loaded = true) => {
+    resetDemoEffects();
+    observedCompletionEndMs.clear();
+    hasLoadedThreadState = loaded;
+    lastThreadTransitionScanAtMs = nowMs - 3_000;
+  };
+  const noCompletionEffect = () => !completionPulseStartedAt.has(threadId)
+    && globalCompletionStartedAtMs === null
+    && globalCompletionThreadId === null;
+
+  resetTracker();
+  trackCompletionTransitions(
+    [thread("working", 3, oldStartedAtMs)],
+    [thread("working", 2, oldStartedAtMs)],
+    nowMs
+  );
+  const queueEditIgnored = noCompletionEffect();
+
+  resetTracker();
+  const queuedWorking = thread("working", 1, oldStartedAtMs);
+  const oldTurnTerminalDuringDequeue = thread("completed", 0, oldStartedAtMs, oldEndedAtMs);
+  const queuedTurnWorking = thread("working", 0, newStartedAtMs);
+  trackCompletionTransitions([queuedWorking], [oldTurnTerminalDuringDequeue], nowMs);
+  const oldTerminalAtHandoffIgnored = noCompletionEffect();
+  trackCompletionTransitions(
+    [oldTurnTerminalDuringDequeue],
+    [queuedTurnWorking],
+    nowMs + 200
+  );
+  const remoteQueueHandoffIgnored = oldTerminalAtHandoffIgnored && noCompletionEffect();
+
+  resetTracker();
+  const unobservedQueueTerminal = thread("completed", 0, oldStartedAtMs, oldEndedAtMs);
+  trackCompletionTransitions(
+    [thread("working", 0, oldStartedAtMs)],
+    [unobservedQueueTerminal],
+    nowMs
+  );
+  const ambiguousTerminalWasOnlyStaged = noCompletionEffect()
+    && pendingCompletionByThreadId.get(threadId)?.endedAtMs === oldEndedAtMs;
+  trackCompletionTransitions(
+    [unobservedQueueTerminal],
+    [queuedTurnWorking],
+    nowMs + 200
+  );
+  const lateQueueHandoffNeverRendered = ambiguousTerminalWasOnlyStaged
+    && noCompletionEffect()
+    && !pendingCompletionByThreadId.has(threadId);
+
+  resetTracker();
+  const delayedTurnStartedAtMs = nowMs - 5_000;
+  const delayedOldEndedAtMs = nowMs - 1_000;
+  const delayedQueuedWorking = thread("working", 1, delayedTurnStartedAtMs);
+  const delayedDequeuedWorking = thread("working", 0, delayedTurnStartedAtMs);
+  trackCompletionTransitions(
+    [delayedQueuedWorking],
+    [delayedDequeuedWorking],
+    nowMs
+  );
+  const delayedOldTerminal = thread("completed", 0, delayedTurnStartedAtMs, delayedOldEndedAtMs);
+  trackCompletionTransitions(
+    [delayedDequeuedWorking],
+    [delayedOldTerminal],
+    nowMs + 3_000
+  );
+  const delayedOldMarkerIgnored = noCompletionEffect();
+
+  resetTracker(false);
+  const startupTestNowMs = pluginStartedAtMs + 1_000;
+  const startupEndedAtMs = pluginStartedAtMs + 500;
+  const startupQueuedTerminal = thread(
+    "completed",
+    1,
+    pluginStartedAtMs - 1_000,
+    startupEndedAtMs
+  );
+  trackCompletionTransitions([], [startupQueuedTerminal], startupTestNowMs);
+  const startupQueuedTerminalIgnored = noCompletionEffect()
+    && observedCompletionEndMs.get(threadId) === startupEndedAtMs;
+
+  resetTracker();
+  const finalQueuedTurnStartedAtMs = nowMs + 500;
+  const finalQueuedTurnWorking = thread("working", 0, finalQueuedTurnStartedAtMs);
+  trackCompletionTransitions(
+    [queuedWorking],
+    [finalQueuedTurnWorking],
+    nowMs + 600
+  );
+  const finalQueuedTurnTerminal = thread(
+    "completed",
+    0,
+    finalQueuedTurnStartedAtMs,
+    nowMs + 5_000
+  );
+  trackCompletionTransitions(
+    [finalQueuedTurnWorking],
+    [finalQueuedTurnTerminal],
+    nowMs + 5_100
+  );
+  const queuedFinalCompletionStaged = noCompletionEffect()
+    && pendingCompletionByThreadId.get(threadId)?.endedAtMs === nowMs + 5_000;
+  trackCompletionTransitions(
+    [finalQueuedTurnTerminal],
+    [finalQueuedTurnTerminal],
+    nowMs + 5_200
+  );
+  const queuedFinalCompletionPulsed = queuedFinalCompletionStaged
+    && completionPulseStartedAt.get(threadId) === nowMs + 5_200
+    && globalCompletionStartedAtMs === nowMs + 5_200;
+
+  resetTracker();
+  const collapsedFinalStartedAtMs = nowMs + 500;
+  const collapsedFinalEndedAtMs = nowMs + 2_500;
+  const collapsedFinalTerminal = thread(
+    "completed",
+    0,
+    collapsedFinalStartedAtMs,
+    collapsedFinalEndedAtMs
+  );
+  trackCompletionTransitions(
+    [queuedWorking],
+    [collapsedFinalTerminal],
+    nowMs + 2_600
+  );
+  const collapsedQueuedFinalStaged = noCompletionEffect()
+    && pendingCompletionByThreadId.get(threadId)?.endedAtMs === collapsedFinalEndedAtMs;
+  trackCompletionTransitions(
+    [collapsedFinalTerminal],
+    [collapsedFinalTerminal],
+    nowMs + 2_800
+  );
+  const collapsedQueuedFinalPulsed = collapsedQueuedFinalStaged
+    && completionPulseStartedAt.get(threadId) === nowMs + 2_800
+    && globalCompletionStartedAtMs === nowMs + 2_800;
+
+  resetTracker();
+  const unknownStartQueuedWorking = thread("working", 1, null);
+  trackCompletionTransitions(
+    [unknownStartQueuedWorking],
+    [collapsedFinalTerminal],
+    nowMs + 2_600
+  );
+  const unknownStartCollapsedFinalStaged = noCompletionEffect()
+    && pendingCompletionByThreadId.get(threadId)?.endedAtMs === collapsedFinalEndedAtMs;
+  trackCompletionTransitions(
+    [collapsedFinalTerminal],
+    [collapsedFinalTerminal],
+    nowMs + 2_800
+  );
+  const unknownStartCollapsedFinalPulsed = unknownStartCollapsedFinalStaged
+    && completionPulseStartedAt.get(threadId) === nowMs + 2_800
+    && globalCompletionStartedAtMs === nowMs + 2_800;
+
+  resetTracker();
+  const finalWorking = thread("working", 0, oldStartedAtMs);
+  const finalTerminal = thread("completed", 0, oldStartedAtMs, nowMs);
+  trackCompletionTransitions([finalWorking], [finalTerminal], nowMs + 100);
+  const confirmedFinalCompletionStaged = noCompletionEffect()
+    && pendingCompletionByThreadId.get(threadId)?.endedAtMs === nowMs;
+  trackCompletionTransitions([finalTerminal], [finalTerminal], nowMs + 1_000);
+  const firstPulseStartedAtMs = completionPulseStartedAt.get(threadId);
+  const confirmedFinalCompletionPulsed = confirmedFinalCompletionStaged
+    && firstPulseStartedAtMs === nowMs + 1_000
+    && globalCompletionStartedAtMs === nowMs + 1_000
+    && globalCompletionThreadId === threadId;
+  trackCompletionTransitions([finalTerminal], [finalTerminal], nowMs + 1_500);
+  const identicalTerminalDidNotRetrigger = completionPulseStartedAt.get(threadId) === firstPulseStartedAtMs
+    && globalCompletionStartedAtMs === firstPulseStartedAtMs;
+
+  const passed = queueEditIgnored
+    && remoteQueueHandoffIgnored
+    && lateQueueHandoffNeverRendered
+    && delayedOldMarkerIgnored
+    && startupQueuedTerminalIgnored
+    && queuedFinalCompletionPulsed
+    && collapsedQueuedFinalPulsed
+    && unknownStartCollapsedFinalPulsed
+    && confirmedFinalCompletionPulsed
+    && identicalTerminalDidNotRetrigger;
+  resetTracker(false);
+  return {
+    passed,
+    queueEditIgnored,
+    oldTerminalAtHandoffIgnored,
+    remoteQueueHandoffIgnored,
+    ambiguousTerminalWasOnlyStaged,
+    lateQueueHandoffNeverRendered,
+    delayedOldMarkerIgnored,
+    startupQueuedTerminalIgnored,
+    queuedFinalCompletionStaged,
+    queuedFinalCompletionPulsed,
+    collapsedQueuedFinalStaged,
+    collapsedQueuedFinalPulsed,
+    unknownStartCollapsedFinalStaged,
+    unknownStartCollapsedFinalPulsed,
+    confirmedFinalCompletionStaged,
+    confirmedFinalCompletionPulsed,
+    identicalTerminalDidNotRetrigger
+  };
+}
+
 function verifyCompletionFanout() {
   const nowMs = DEMO_EPOCH_MS + 10_000;
   const targetId = DEMO_COMPLETED_ID;
+  const transitionPolicy = verifyCompletionTransitionPolicy(nowMs);
   const actions = [
     ACTIONS.weekly,
     ACTIONS.thread1,
+    ACTIONS.topThread1,
     ACTIONS.sideChat,
     ACTIONS.newThread,
     ACTIONS.voice,
@@ -5255,7 +5993,7 @@ function verifyCompletionFanout() {
     queueCount: 0
   };
   fixedRenderTimeMs = nowMs;
-  startCompletionEffects(targetId, nowMs, "completion");
+  startCompletionEffects(targetId, nowMs);
   renderGlobalCompletionContexts(nowMs);
 
   const imageMessages = messages.filter((message) => message.event === "setImage");
@@ -5273,15 +6011,18 @@ function verifyCompletionFanout() {
     }
   }
   const allContextsSentOnce = actions.every((_, index) => counts.get(`completion-context-${index}`) === 1);
+  const targetTaskContextCount = 2;
   const passed = imageMessages.length === actions.length
     && allContextsSentOnce
-    && globalChromeCount === actions.length - 1
-    && globalCompletionInitialFanoutPending === false;
+    && globalChromeCount === actions.length - targetTaskContextCount
+    && globalCompletionInitialFanoutPending === false
+    && transitionPolicy.passed;
   console.log(JSON.stringify({
     passed,
     visibleContexts: actions.length,
     firstFrameImages: imageMessages.length,
-    nonTargetGlobalChrome: globalChromeCount
+    nonTargetGlobalChrome: globalChromeCount,
+    transitionPolicy
   }));
   if (!passed) process.exitCode = 1;
   fixedRenderTimeMs = null;
@@ -5373,6 +6114,41 @@ async function verifyThreadRefreshResilience() {
     console.error = originalConsoleError;
   }
 
+  const rankedThreads = Array.from({ length: THREAD_COUNT }, (_, index) => ({
+    ...stableThread,
+    id: `00000000-0000-4000-8000-${String(index + 10).padStart(12, "0")}`,
+    title: `순위 작업 ${index + 1}`
+  }));
+  const offListCurrent = {
+    ...stableThread,
+    id: "00000000-0000-4000-8000-000000000099",
+    title: "순위 밖 현재 작업"
+  };
+  primaryThreadId = offListCurrent.id;
+  primaryThreadRow = offListCurrent;
+  fastModeState = {
+    threadId: offListCurrent.id,
+    enabled: null,
+    available: null,
+    failed: false
+  };
+  hasLoadedThreadState = true;
+  consecutiveThreadRefreshFailures = 0;
+  threadRefreshUnavailable = false;
+  const rankedSnapshotLoaded = await refreshThreads(null, {
+    reader: async () => ({
+      threads: rankedThreads,
+      currentThread: offListCurrent
+    }),
+    retryDelays: []
+  });
+  const rankedListKeepsAllEight = rankedSnapshotLoaded
+    && threadSlots.map((thread) => thread?.id).join(",")
+      === rankedThreads.map((thread) => thread.id).join(",")
+    && threadForAction(ACTIONS.thread1)?.id === offListCurrent.id
+    && threadForAction(ACTIONS.topThread1)?.id === rankedThreads[0].id
+    && threadForAction(ACTIONS.thread8)?.id === rankedThreads[7].id;
+
   const sideChatCreatedAtMs = Date.now();
   const timestampHex = sideChatCreatedAtMs.toString(16).padStart(12, "0").slice(-12);
   const sideChatId = `${timestampHex.slice(0, 8)}-${timestampHex.slice(8)}-7000-8000-000000000001`;
@@ -5439,6 +6215,7 @@ async function verifyThreadRefreshResilience() {
     && keptLastGoodList
     && oneOffStartupHidden
     && startupErrorStable
+    && rankedListKeepsAllEight
     && sideChatCachePreserved
     && persistentSideChatReentryBlocked;
   console.log(JSON.stringify({
@@ -5446,6 +6223,7 @@ async function verifyThreadRefreshResilience() {
     retryAttempts,
     keptLastGoodList,
     oneOffStartupHidden,
+    rankedListKeepsAllEight,
     sideChatCachePreserved,
     persistentSideChatReentryBlocked,
     startupErrorAfterFailures: startupErrorStable ? THREAD_REFRESH_STARTUP_ERROR_FAILURES : null
@@ -6359,6 +7137,103 @@ async function verifyInteractionPolicy() {
     status === "completed" ? { strength: 0 } : null
   ).includes('data-mode="fast"'));
 
+  const goalThreadBase = {
+    id: "00000000-0000-4000-8000-000000000020",
+    title: "목표 표시 확인",
+    remote: true,
+    queueCount: 0,
+    startedAtMs: 120_000,
+    endedAtMs: 130_000
+  };
+  const activeGoalMarkup = threadSvg({
+    ...goalThreadBase,
+    status: "working",
+    goal: { status: "active", timeUsedSeconds: 125, updatedAtMs: Date.now() }
+  }, 0);
+  const blockedGoalMarkup = threadSvg({
+    ...goalThreadBase,
+    status: "stopped",
+    goal: { status: "blocked", timeUsedSeconds: 125, updatedAtMs: 100_000 }
+  }, 0);
+  const completedGoalMarkup = threadSvg({
+    ...goalThreadBase,
+    status: "completed",
+    goal: { status: "complete", timeUsedSeconds: 125, updatedAtMs: 100_000 }
+  }, 0);
+  const activeGoalUsesOfficialBadge = activeGoalMarkup.includes('data-goal="active"')
+    && activeGoalMarkup.includes('d="M12 13V2l8 4-8 4"');
+  const blockedGoalBadgeAndTimeFreeze = blockedGoalMarkup.includes('data-goal="blocked"')
+    && blockedGoalMarkup.includes(">02:05</text>");
+  const completedGoalHidesBadgeButKeepsTotal = !completedGoalMarkup.includes("data-goal=")
+    && completedGoalMarkup.includes(">02:05</text>");
+  const completedGoalLifetimeFollowsTurn = !goalPredatesWorkingTurn(
+    { status: "complete", updatedAtMs: 120_000 },
+    { status: "working", startedAtMs: 90_000 }
+  ) && goalPredatesWorkingTurn(
+    { status: "complete", updatedAtMs: 120_000 },
+    { status: "working", startedAtMs: 130_000 }
+  );
+
+  const goalProbeThread = {
+    id: "00000000-0000-4000-8000-000000000021",
+    title: "원격 목표 감지",
+    remote: true
+  };
+  goalProbe = { threadId: null, checkedAtMs: 0, absentCount: 0 };
+  observedGoalByThreadId.delete(goalProbeThread.id);
+  confirmedGoalAbsentByThreadId.delete(goalProbeThread.id);
+  const detectedRemoteGoal = await refreshFocusedGoalState(goalProbeThread, 10_000, {
+    probe: async () => ({ stdout: "state=active elapsed=42 visited=80" })
+  });
+  const retainedUnknownGoalTime = await refreshFocusedGoalState(goalProbeThread, 13_000, {
+    probe: async () => ({ stdout: "state=active elapsed=unknown visited=80" })
+  });
+  const explicitNoGoalProbe = async () => {
+    const error = new Error("simulated complete no-goal scan");
+    error.exitCode = 2;
+    error.stdout = "state=none elapsed=0 visited=80";
+    throw error;
+  };
+  const firstMissingGoal = await refreshFocusedGoalState(goalProbeThread, 16_000, {
+    probe: explicitNoGoalProbe
+  });
+  const secondMissingGoal = await refreshFocusedGoalState(goalProbeThread, 19_000, {
+    probe: explicitNoGoalProbe
+  });
+  const remoteGoalProbeNeedsStableAbsence = detectedRemoteGoal?.status === "active"
+    && retainedUnknownGoalTime?.timeUsedSeconds === 45
+    && firstMissingGoal?.status === "active"
+    && secondMissingGoal === null
+    && confirmedGoalAbsentByThreadId.has(goalProbeThread.id);
+  const unknownNewGoalAfterComplete = mergeObservedGoal({
+    threadId: goalProbeThread.id,
+    goalId: "finished-goal",
+    status: "complete",
+    timeUsedSeconds: 9_000,
+    updatedAtMs: 20_000,
+    source: "accessibility"
+  }, {
+    threadId: goalProbeThread.id,
+    goalId: null,
+    status: "active",
+    timeUsedSeconds: null,
+    updatedAtMs: 21_000,
+    source: "accessibility",
+    timeUnknown: true
+  }, 21_000);
+  const unknownNewGoalDoesNotInheritCompletedTime = unknownNewGoalAfterComplete.goalId === null
+    && unknownNewGoalAfterComplete.timeUsedSeconds === null;
+  const expiredGoalThreadId = "00000000-0000-4000-8000-000000000022";
+  observedGoalByThreadId.set(expiredGoalThreadId, {
+    threadId: expiredGoalThreadId,
+    status: "active",
+    timeUsedSeconds: 5,
+    updatedAtMs: 1
+  });
+  pruneExpiredRemoteGoals(REMOTE_GOAL_CACHE_MAX_AGE_MS + 2);
+  const expiredRemoteGoalCacheIsPruned = !observedGoalByThreadId.has(expiredGoalThreadId)
+    && confirmedGoalAbsentByThreadId.has(expiredGoalThreadId);
+
   const remoteThread = {
     id: "00000000-0000-4000-8000-000000000030",
     title: "원격 전환 확인",
@@ -6409,6 +7284,41 @@ async function verifyInteractionPolicy() {
       && args.length === 1)
     && focusedIdentityCalls[0].args[0] === ambiguousRemote.id
     && focusedIdentityCalls[1].args[0] === ambiguousRemotePeer.id;
+  const composerTurnStartedAtMs = 180_000;
+  remoteLifecycleCache.set(remoteThread.id, {
+    status: "working",
+    startedAtMs: composerTurnStartedAtMs,
+    endedAtMs: null,
+    latestTurnId: "00000000-0000-7000-8000-000000000032"
+  });
+  const focusedRemoteForSpeed = {
+    ...remoteThread,
+    threadRuntimeStatus: { type: "active", activeFlags: [] },
+    serviceTier: null
+  };
+  threadSlots = [focusedRemoteForSpeed, ...Array(THREAD_COUNT - 1).fill(null)];
+  primaryThreadId = focusedRemoteForSpeed.id;
+  primaryThreadRow = focusedRemoteForSpeed;
+  const remoteFastApplied = applyFocusedRemoteComposerState(
+    focusedRemoteForSpeed,
+    { enabled: true, available: true },
+    composerTurnStartedAtMs + 500
+  );
+  const remoteFastCardShowsBolt = threadSlots[0]?.serviceTier === "priority"
+    && threadSvg(threadSlots[0], 0).includes('data-mode="fast"');
+  const remoteStandardApplied = applyFocusedRemoteComposerState(
+    threadSlots[0],
+    { enabled: false, available: true },
+    composerTurnStartedAtMs + 700
+  );
+  const remoteStandardCardClearsBolt = threadSlots[0]?.serviceTier === "default"
+    && !threadSvg(threadSlots[0], 0).includes('data-mode="fast"');
+  const focusedRemoteSpeedUpdatesImmediately = remoteFastApplied
+    && remoteFastCardShowsBolt
+    && remoteStandardApplied
+    && remoteStandardCardClearsBolt;
+  remoteComposerStateByThreadId.delete(remoteThread.id);
+  remoteLifecycleCache.delete(remoteThread.id);
   let directAttempts = 0;
   let searchAttempts = 0;
   const activationOrder = [];
@@ -6545,9 +7455,14 @@ async function verifyInteractionPolicy() {
   voiceSessionIdByContext.clear();
   const currentSlotContext = "interaction-current-slot";
   contexts.set(currentSlotContext, ACTIONS.thread2);
+  threadSlots = [localThreadA, localThreadB, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+  primaryThreadId = localThreadC.id;
+  primaryThreadRow = localThreadC;
+  const independentCurrentAndRankedActions = threadForAction(ACTIONS.thread1)?.id === localThreadC.id
+    && threadForAction(ACTIONS.topThread1)?.id === localThreadA.id
+    && threadForAction(ACTIONS.thread2)?.id === localThreadB.id;
   primaryThreadId = localThreadA.id;
   primaryThreadRow = localThreadA;
-  threadSlots = [localThreadA, localThreadB, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
   const originalConsoleError = console.error;
   console.error = () => {};
   const failedLocalNavigation = await openThread(currentSlotContext, 1, {
@@ -6566,9 +7481,11 @@ async function verifyInteractionPolicy() {
     feedback: () => {},
     rememberThread: (thread) => rememberVerifiedThread(thread, { refreshFastMode: false })
   });
-  const verifiedNavigationPromotesCurrentSlot = successfulLocalNavigation
+  const verifiedNavigationUpdatesCurrentOnly = successfulLocalNavigation
     && primaryThreadId === localThreadB.id
-    && threadSlots[0]?.id === localThreadB.id
+    && primaryThreadRow?.id === localThreadB.id
+    && threadSlots[0]?.id === localThreadA.id
+    && threadSlots[1]?.id === localThreadB.id
     && threadSlots.filter((thread) => thread?.id === localThreadB.id).length === 1;
   const refreshedCurrentRows = primaryFirstThreadRows(
     [localThreadC, localThreadA],
@@ -7230,9 +8147,17 @@ async function verifyInteractionPolicy() {
   const passed = fastBadgeNonCompletedStates
     && completedHidesFastBadge
     && standardHasNoFastBadge
+    && activeGoalUsesOfficialBadge
+    && blockedGoalBadgeAndTimeFreeze
+    && completedGoalHidesBadgeButKeepsTotal
+    && completedGoalLifetimeFollowsTurn
+    && remoteGoalProbeNeedsStableAbsence
+    && unknownNewGoalDoesNotInheritCompletedTime
+    && expiredRemoteGoalCacheIsPruned
     && knownTitleAmbiguityDetected
     && ambiguousTitleUsesStrictIdentity
     && sameTitleVoiceTargetIsIdentitySafe
+    && focusedRemoteSpeedUpdatesImmediately
     && fallbackSearchRunsOnce
     && activationWaitRunsOnceBeforeNavigation
     && successfulButUnreadyDirectRetries
@@ -7240,8 +8165,9 @@ async function verifyInteractionPolicy() {
     && firstClickLocalRetries
     && sameTargetSharesNavigation
     && navigationLeaseCleared
+    && independentCurrentAndRankedActions
     && failedNavigationKeepsCurrentSlot
-    && verifiedNavigationPromotesCurrentSlot
+    && verifiedNavigationUpdatesCurrentOnly
     && refreshPreservesCurrentSlot
     && currentUnpinnedRemoteIsSlotOneException
     && staleCurrentRequiresStrictIdentity
@@ -7272,9 +8198,17 @@ async function verifyInteractionPolicy() {
     fastBadgeNonCompletedStates,
     completedHidesFastBadge,
     standardHasNoFastBadge,
+    activeGoalUsesOfficialBadge,
+    blockedGoalBadgeAndTimeFreeze,
+    completedGoalHidesBadgeButKeepsTotal,
+    completedGoalLifetimeFollowsTurn,
+    remoteGoalProbeNeedsStableAbsence,
+    unknownNewGoalDoesNotInheritCompletedTime,
+    expiredRemoteGoalCacheIsPruned,
     knownTitleAmbiguityDetected,
     ambiguousTitleUsesStrictIdentity,
     sameTitleVoiceTargetIsIdentitySafe,
+    focusedRemoteSpeedUpdatesImmediately,
     fallbackSearchRunsOnce,
     activationWaitRunsOnceBeforeNavigation,
     successfulButUnreadyDirectRetries,
@@ -7282,8 +8216,9 @@ async function verifyInteractionPolicy() {
     firstClickLocalRetries,
     sameTargetSharesNavigation,
     navigationLeaseCleared,
+    independentCurrentAndRankedActions,
     failedNavigationKeepsCurrentSlot,
-    verifiedNavigationPromotesCurrentSlot,
+    verifiedNavigationUpdatesCurrentOnly,
     refreshPreservesCurrentSlot,
     currentUnpinnedRemoteIsSlotOneException,
     staleCurrentRequiresStrictIdentity,
@@ -7335,6 +8270,13 @@ async function verifyInteractionPolicy() {
   contextImages.clear();
   contextSentImages.clear();
   contextFeedback.clear();
+  observedGoalByThreadId.clear();
+  displayedGoalByThreadId.clear();
+  goalTerminalCutoffByThreadId.clear();
+  confirmedGoalAbsentByThreadId.clear();
+  goalProbe = { threadId: null, checkedAtMs: 0, absentCount: 0 };
+  remoteComposerStateByThreadId.clear();
+  remoteComposerProbe = { threadId: null, turnKey: null };
   threadSlots = Array(THREAD_COUNT).fill(null);
   primaryThreadId = null;
   primaryThreadRow = null;
@@ -7389,8 +8331,9 @@ function runSelectedMode() {
     else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
   } else if (snapshotMode) {
     readTopThreads()
-      .then((threads) => {
-        console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, remote, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount }) => ({
+      .then((snapshot) => {
+        const threads = Array.isArray(snapshot) ? snapshot : snapshot.threads;
+        console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, remote, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount, goal }) => ({
           id,
           title: normalizeTitle(title),
           pinned,
@@ -7402,7 +8345,11 @@ function runSelectedMode() {
           serviceTier,
           queueCount,
           speed: isFastServiceTier(serviceTier) ? "fast" : "standard",
-          timing: timingLabel({ status, startedAtMs, endedAtMs })
+          timing: timingLabel({ status, startedAtMs, endedAtMs, goal }),
+          goal: goal ? {
+            status: goal.status,
+            unfinished: goalIsUnfinished(goal)
+          } : null
         })), null, 2));
       })
       .catch((error) => {
@@ -7421,4 +8368,4 @@ function main() {
 
 if (require.main === module) main();
 
-module.exports = { main };
+module.exports = { main, shouldProbeRemoteComposerState };

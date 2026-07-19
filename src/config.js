@@ -2,6 +2,7 @@
 
 const ACTIONS = {
   weekly: "com.yechan.threaddeck.weekly",
+  topThread1: "com.yechan.threaddeck.thread.top1",
   thread1: "com.yechan.threaddeck.thread1",
   thread2: "com.yechan.threaddeck.thread2",
   thread3: "com.yechan.threaddeck.thread3",
@@ -28,8 +29,8 @@ const ACTIONS = {
   pageNext: "com.yechan.threaddeck.page.next"
 };
 
-const THREAD_ACTIONS = [
-  ACTIONS.thread1,
+const RANKED_THREAD_ACTIONS = [
+  ACTIONS.topThread1,
   ACTIONS.thread2,
   ACTIONS.thread3,
   ACTIONS.thread4,
@@ -38,7 +39,12 @@ const THREAD_ACTIONS = [
   ACTIONS.thread7,
   ACTIONS.thread8
 ];
-const THREAD_COUNT = THREAD_ACTIONS.length;
+const THREAD_ACTIONS = [
+  ACTIONS.thread1,
+  ...RANKED_THREAD_ACTIONS
+];
+const THREAD_COUNT = RANKED_THREAD_ACTIONS.length;
+const CURRENT_THREAD_SLOT = -1;
 const THREAD_COMPLETION_PULSE_DURATION_MS = 5200;
 const THREAD_REFRESH_RETRY_DELAYS_MS = [120, 360];
 const THREAD_REFRESH_STARTUP_ERROR_FAILURES = 3;
@@ -75,7 +81,10 @@ const THREAD_REFRESH_ERROR_STATE = Object.freeze({
   pinned: false,
   activity: { kind: "error", label: "상태 확인" }
 });
-const THREAD_SLOT_BY_ACTION = new Map(THREAD_ACTIONS.map((action, index) => [action, index]));
+const THREAD_SLOT_BY_ACTION = new Map([
+  [ACTIONS.thread1, CURRENT_THREAD_SLOT],
+  ...RANKED_THREAD_ACTIONS.map((action, index) => [action, index])
+]);
 const MEDIA_COMMAND_BY_ACTION = new Map([
   [ACTIONS.mediaPrevious, "media-previous"],
   [ACTIONS.mediaRewind, "media-rewind"],
@@ -99,6 +108,7 @@ module.exports = {
   APP_SERVER_START_TOLERANCE_MS,
   COMPLETION_OBSERVATION_OVERLAP_MS,
   COMPLETION_STARTUP_GRACE_MS,
+  CURRENT_THREAD_SLOT,
   DEFAULT_PROFILE_PAGE_COUNT,
   DESKTOP_LOG_PATH_CACHE_MS,
   DISTRIBUTED_PROFILE_NAME,
@@ -108,6 +118,7 @@ module.exports = {
   MEDIA_COMMAND_BY_ACTION,
   PAGE_DIRECTION_BY_ACTION,
   QUEUE_ZERO_CONFIRM_MS,
+  RANKED_THREAD_ACTIONS,
   SEND_LONG_PRESS_MS,
   SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES,
   SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS,

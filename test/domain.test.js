@@ -27,6 +27,17 @@ const {
   uuidV7TimestampMs
 } = require("../src/time");
 const {
+  applyGoalTerminalCutoff,
+  freezeGoal,
+  goalElapsedMs,
+  goalIdentity,
+  goalIsUnfinished,
+  normalizeGoalRecord,
+  normalizeGoalStatus,
+  parseCodexGoalState,
+  timestampMs
+} = require("../src/goal-state");
+const {
   parseCodexQueueWindows,
   queueCountForWindow
 } = require("../src/queue-state");
@@ -45,8 +56,10 @@ const {
 } = require("../src/log-lines");
 const {
   ACTIONS,
+  CURRENT_THREAD_SLOT,
   MEDIA_COMMAND_BY_ACTION,
   PAGE_DIRECTION_BY_ACTION,
+  RANKED_THREAD_ACTIONS,
   THREAD_ACTIONS,
   THREAD_COUNT,
   THREAD_REFRESH_ERROR_STATE,
@@ -55,19 +68,30 @@ const {
 
 test("configuration exposes a complete and internally consistent action contract", () => {
   const actionValues = Object.values(ACTIONS);
-  assert.equal(actionValues.length, 25);
-  assert.equal(new Set(actionValues).size, 25);
+  assert.equal(actionValues.length, 26);
+  assert.equal(new Set(actionValues).size, 26);
   assert.equal(ACTIONS.fastMode, "com.yechan.threaddeck.fastmode");
+  assert.equal(ACTIONS.topThread1, "com.yechan.threaddeck.thread.top1");
 
-  assert.equal(THREAD_ACTIONS.length, 8);
+  assert.equal(THREAD_ACTIONS.length, 9);
   assert.deepEqual(
     THREAD_ACTIONS,
-    Array.from({ length: 8 }, (_, index) => ACTIONS[`thread${index + 1}`])
+    [ACTIONS.thread1, ...RANKED_THREAD_ACTIONS]
   );
-  assert.equal(THREAD_COUNT, THREAD_ACTIONS.length);
+  assert.deepEqual(
+    RANKED_THREAD_ACTIONS,
+    [
+      ACTIONS.topThread1,
+      ...Array.from({ length: 7 }, (_, index) => ACTIONS[`thread${index + 2}`])
+    ]
+  );
+  assert.equal(THREAD_COUNT, RANKED_THREAD_ACTIONS.length);
   assert.deepEqual(
     [...THREAD_SLOT_BY_ACTION.entries()],
-    THREAD_ACTIONS.map((action, index) => [action, index])
+    [
+      [ACTIONS.thread1, CURRENT_THREAD_SLOT],
+      ...RANKED_THREAD_ACTIONS.map((action, index) => [action, index])
+    ]
   );
 
   assert.equal(MEDIA_COMMAND_BY_ACTION.get(ACTIONS.mediaPrevious), "media-previous");
@@ -191,6 +215,271 @@ test("duration and timing labels handle known, long, and unknown times", () => {
   assert.equal(timingLabel({ status: "working", startedAtMs: null }, 9_000), "--:--");
   assert.equal(timingLabel({ status: "completed", startedAtMs: 3_000, endedAtMs: 2_000 }, 9_000), "--:--");
   assert.equal(timingLabel({ status: "idle", startedAtMs: null }, 9_000), "열기");
+});
+
+test("goal records normalize local and app-server status and timestamp formats", () => {
+  assert.equal(normalizeGoalStatus("usage_limited"), "usageLimited");
+  assert.equal(normalizeGoalStatus("budget-limited"), "budgetLimited");
+  assert.equal(normalizeGoalStatus("unknown"), null);
+  assert.equal(timestampMs(1_750_000_000), 1_750_000_000_000);
+  assert.equal(timestampMs(1_750_000_000_123), 1_750_000_000_123);
+
+  const goal = normalizeGoalRecord({
+    thread_id: "thread-1",
+    goal_id: "goal-1",
+    status: "usage_limited",
+    time_used_seconds: 125,
+    created_at_ms: 10_000,
+    updated_at_ms: 20_000
+  }, { source: "database" });
+  assert.deepEqual(goal, {
+    threadId: "thread-1",
+    goalId: "goal-1",
+    status: "usageLimited",
+    timeUsedSeconds: 125,
+    createdAtMs: 10_000,
+    updatedAtMs: 20_000,
+    source: "database"
+  });
+  assert.equal(goalIdentity(goal), "goal-1");
+  assert.equal(goalIsUnfinished(goal), true);
+  assert.equal(goalIsUnfinished({ status: "complete" }), false);
+});
+
+test("goal timing follows Codex active-only accumulation and freezes every terminal state", () => {
+  const active = {
+    status: "active",
+    timeUsedSeconds: 120,
+    updatedAtMs: 100_000
+  };
+  assert.equal(goalElapsedMs(active, 105_000), 125_000);
+  assert.equal(timingLabel({
+    status: "working",
+    startedAtMs: 104_000,
+    goal: active
+  }, 105_000), "02:05");
+
+  for (const status of ["paused", "blocked", "usageLimited", "budgetLimited", "complete"]) {
+    assert.equal(goalElapsedMs({ ...active, status }, 999_000), 120_000, status);
+  }
+  assert.equal(timingLabel({
+    status: "working",
+    startedAtMs: 100_000,
+    goal: { status: "blocked", timeUsedSeconds: null, updatedAtMs: 150_000 }
+  }, 200_000), "--:--");
+  assert.equal(timingLabel({
+    status: "working",
+    startedAtMs: 100_000,
+    goal: { status: "blocked", timeUsedSeconds: null, updatedAtMs: 150_000 }
+  }, 260_000), "--:--");
+
+  const stopped = freezeGoal(active, 106_500);
+  assert.equal(goalElapsedMs(stopped, 999_000), 126_500);
+  assert.equal(goalElapsedMs(stopped, 1_999_000), 126_500);
+  const completed = freezeGoal(active, 106_500, "complete");
+  assert.equal(completed.status, "complete");
+  assert.equal(goalElapsedMs(completed, 999_000), 126_500);
+});
+
+test("stale active remote goals keep one terminal cutoff until a newer snapshot resumes them", () => {
+  const active = {
+    threadId: "remote-thread",
+    goalId: "goal-remote",
+    status: "active",
+    timeUsedSeconds: 300,
+    updatedAtMs: 100_000,
+    source: "accessibility"
+  };
+  const stopped = applyGoalTerminalCutoff(
+    active,
+    { id: "remote-thread", status: "stopped", endedAtMs: 112_000 },
+    null,
+    120_000
+  );
+  assert.equal(goalElapsedMs(stopped.goal, 900_000), 312_000);
+
+  const stillStale = applyGoalTerminalCutoff(
+    active,
+    { id: "remote-thread", status: "working", endedAtMs: null },
+    stopped.cutoff,
+    800_000
+  );
+  assert.equal(goalElapsedMs(stillStale.goal, 900_000), 312_000);
+
+  const staleButIncreasingAccessibilitySnapshot = applyGoalTerminalCutoff(
+    { ...active, timeUsedSeconds: 380, updatedAtMs: 130_000 },
+    { id: "remote-thread", status: "stopped", endedAtMs: 112_000 },
+    stopped.cutoff,
+    140_000
+  );
+  assert.equal(
+    goalElapsedMs(staleButIncreasingAccessibilitySnapshot.goal, 900_000),
+    312_000
+  );
+
+  const resumed = applyGoalTerminalCutoff(
+    { ...active, timeUsedSeconds: 313, updatedAtMs: 130_000 },
+    { id: "remote-thread", status: "working", endedAtMs: null },
+    stopped.cutoff,
+    135_000
+  );
+  assert.equal(resumed.cutoff, null);
+  assert.equal(goalElapsedMs(resumed.goal, 135_000), 318_000);
+});
+
+test("remote completion provisionally freezes a stale goal and the next continuation releases it", () => {
+  const active = {
+    threadId: "remote-thread",
+    goalId: "goal-remote",
+    status: "active",
+    timeUsedSeconds: 60,
+    updatedAtMs: 100_000,
+    source: "accessibility"
+  };
+  const betweenTurns = applyGoalTerminalCutoff(active, {
+    id: "remote-thread",
+    remote: true,
+    status: "completed",
+    endedAtMs: 110_000
+  }, null, 112_000);
+  assert.equal(betweenTurns.cutoff.provisional, true);
+  assert.equal(goalElapsedMs(betweenTurns.goal, 900_000), 70_000);
+
+  const continued = applyGoalTerminalCutoff(betweenTurns.goal, {
+    id: "remote-thread",
+    remote: true,
+    status: "working",
+    endedAtMs: null
+  }, betweenTurns.cutoff, 115_000);
+  assert.equal(continued.cutoff, null);
+  assert.equal(goalElapsedMs(continued.goal, 115_000), 75_000);
+});
+
+test("remote idle provisionally freezes an observed goal until work resumes", () => {
+  const active = {
+    threadId: "remote-thread",
+    goalId: "goal-remote",
+    status: "active",
+    timeUsedSeconds: 60,
+    updatedAtMs: 100_000,
+    source: "accessibility"
+  };
+  const idle = applyGoalTerminalCutoff(active, {
+    id: "remote-thread",
+    remote: true,
+    status: "idle",
+    endedAtMs: null
+  }, null, 110_000);
+  assert.equal(idle.cutoff.provisional, true);
+  assert.equal(goalElapsedMs(idle.goal, 900_000), 70_000);
+
+  const continued = applyGoalTerminalCutoff(idle.goal, {
+    id: "remote-thread",
+    remote: true,
+    status: "working",
+    endedAtMs: null
+  }, idle.cutoff, 115_000);
+  assert.equal(continued.cutoff, null);
+  assert.equal(goalElapsedMs(continued.goal, 115_000), 75_000);
+});
+
+test("a persisted active remote goal stays frozen until a fresh goal observation", () => {
+  const cached = {
+    threadId: "remote-thread",
+    goalId: "goal-remote",
+    status: "active",
+    timeUsedSeconds: 60,
+    updatedAtMs: 100_000,
+    source: "accessibility-cache",
+    freezeAtMs: 100_000,
+    frozenElapsedMs: 60_000,
+    resumeRequiresObservation: true
+  };
+  const runtimeOnly = applyGoalTerminalCutoff(cached, {
+    id: "remote-thread",
+    remote: true,
+    status: "working"
+  }, null, 900_000);
+  assert.equal(goalElapsedMs(runtimeOnly.goal, 900_000), 60_000);
+  assert.equal(runtimeOnly.goal.resumeRequiresObservation, true);
+
+  const idle = applyGoalTerminalCutoff(runtimeOnly.goal, {
+    id: "remote-thread",
+    remote: true,
+    status: "idle"
+  }, runtimeOnly.cutoff, 910_000);
+  const runtimeResumedWithoutGoalEvidence = applyGoalTerminalCutoff(idle.goal, {
+    id: "remote-thread",
+    remote: true,
+    status: "working"
+  }, idle.cutoff, 920_000);
+  assert.equal(goalElapsedMs(runtimeResumedWithoutGoalEvidence.goal, 999_000), 60_000);
+  assert.equal(runtimeResumedWithoutGoalEvidence.cutoff, idle.cutoff);
+
+  const strictStopBeforeLastObservation = applyGoalTerminalCutoff({
+    ...cached,
+    updatedAtMs: 130_000,
+    freezeAtMs: 130_000
+  }, {
+    id: "remote-thread",
+    remote: true,
+    status: "stopped",
+    endedAtMs: 112_000
+  }, null, 140_000);
+  const runtimeWorkingWithoutFreshGoal = applyGoalTerminalCutoff(
+    strictStopBeforeLastObservation.goal,
+    { id: "remote-thread", remote: true, status: "working" },
+    strictStopBeforeLastObservation.cutoff,
+    900_000
+  );
+  assert.equal(goalElapsedMs(runtimeWorkingWithoutFreshGoal.goal, 900_000), 60_000);
+  assert.equal(runtimeWorkingWithoutFreshGoal.cutoff, strictStopBeforeLastObservation.cutoff);
+
+  const freshlyObserved = applyGoalTerminalCutoff({
+    ...cached,
+    timeUsedSeconds: 61,
+    updatedAtMs: 921_000,
+    source: "accessibility",
+    freezeAtMs: undefined,
+    frozenElapsedMs: undefined,
+    resumeRequiresObservation: undefined
+  }, {
+    id: "remote-thread",
+    remote: true,
+    status: "working"
+  }, idle.cutoff, 925_000);
+  assert.equal(freshlyObserved.cutoff, null);
+  assert.equal(goalElapsedMs(freshlyObserved.goal, 925_000), 65_000);
+});
+
+test("Accessibility goal output is parsed without exposing objective text", () => {
+  assert.deepEqual(
+    parseCodexGoalState("state=budget_limited elapsed=508 visited=127", 900_000),
+    {
+      threadId: null,
+      goalId: null,
+      status: "budgetLimited",
+      timeUsedSeconds: 508,
+      createdAtMs: null,
+      updatedAtMs: 900_000,
+      source: "accessibility"
+    }
+  );
+  assert.deepEqual(
+    parseCodexGoalState("state=active elapsed=unknown visited=91", 901_000),
+    {
+      threadId: null,
+      goalId: null,
+      status: "active",
+      timeUsedSeconds: null,
+      createdAtMs: null,
+      updatedAtMs: 901_000,
+      source: "accessibility",
+      timeUnknown: true
+    }
+  );
+  assert.equal(parseCodexGoalState("state=none elapsed=0 visited=127", 900_000), null);
+  assert.equal(parseCodexGoalState("state=active elapsed=secret", 900_000), null);
 });
 
 test("log chunks preserve long partial lines across refresh cycles", () => {

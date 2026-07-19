@@ -2,7 +2,10 @@
 
 // Pure parsers for the Codex Desktop global-state snapshot.
 
-const { normalizedReasoningEffort } = require("./remote-state");
+const {
+  normalizedReasoningEffort,
+  normalizedServiceTier
+} = require("./remote-state");
 const { isInternalThreadRecord } = require("./thread-privacy");
 const { UUID_PATTERN, threadRecencyMs } = require("./time");
 
@@ -84,7 +87,11 @@ function remoteThreadRowsFromState(globalState) {
         threadRuntimeStatus: summary?.threadRuntimeStatus ?? { type: "notLoaded" },
         reasoningEffort: normalizedReasoningEffort(summary?.reasoningEffort)
           ?? normalizedReasoningEffort(summary?.latestReasoningEffort),
-        serviceTier: typeof summary?.serviceTier === "string" ? summary.serviceTier : "default",
+        // The production v2 summary currently has a workspace `mode` field
+        // (typically "default"), not a response-speed field. Never infer Fast
+        // or Standard from that ambiguous value; only accept an explicit,
+        // validated service tier when a newer Codex schema supplies one.
+        serviceTier: normalizedServiceTier(summary?.serviceTier),
         workspaceKind: summary?.workspaceKind ?? "project"
       });
     }

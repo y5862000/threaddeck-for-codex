@@ -12,11 +12,15 @@ const {
   applyRemoteActivityLogLine,
   applyRemoteLifecycleLogLine,
   classifyRemoteReasoningSummary,
+  composerStateForRemoteThread,
   deriveRemoteStatus,
+  parseCodexComposerState,
   parseRemoteLogLine,
   parseCodexReasoningState,
+  recordRemoteComposerStateObservation,
   reasoningEffortForRemoteThread,
   remoteReasoningActivityFromLogLine,
+  serviceTierForRemoteThread,
   remoteTurnStatus,
   remoteWorkingActivity
 } = require("../src/remote-state");
@@ -42,6 +46,7 @@ function derive(thread, options) {
     nowMs: options.nowMs,
     lifecycle: options.lifecycle ?? null,
     reasoningEfforts: options.reasoningEfforts ?? new Map(),
+    composerStates: options.composerStates,
     runtimeObservations: options.runtimeObservations ?? new Map(),
     activities: options.activities ?? new Map()
   });
@@ -798,6 +803,89 @@ test("reasoning effort rejects stale observations and prefers summary metadata",
   ), "max");
   assert.equal(parseCodexReasoningState("effort=ultra confidence=120 visited=800"), "ultra");
   assert.equal(parseCodexReasoningState("effort=unknown confidence=0 visited=800"), null);
+});
+
+test("unified composer state parses reasoning and canonical response speed", () => {
+  assert.deepEqual(parseCodexComposerState(
+    "reasoning=medium service_tier=priority available=1 reasoning_available=1 service_tier_available=1 confidence=520 visited=812"
+  ), {
+    reasoningEffort: "medium",
+    serviceTier: "priority",
+    available: true,
+    reasoningAvailable: true,
+    serviceTierAvailable: true
+  });
+  assert.deepEqual(parseCodexComposerState(
+    "reasoning=unknown service_tier=unknown available=0 reasoning_available=0 service_tier_available=0"
+  ), {
+    reasoningEffort: null,
+    serviceTier: null,
+    available: false,
+    reasoningAvailable: false,
+    serviceTierAvailable: false
+  });
+  assert.equal(
+    parseCodexComposerState("effort=high service_tier=fast available=1").serviceTier,
+    "priority"
+  );
+});
+
+test("remote composer observations are bound to the exact turn and never bleed", () => {
+  const startedAtMs = uuidV7TimestampMs(TURN_ID);
+  const lifecycle = { status: "working", startedAtMs, latestTurnId: TURN_ID };
+  const observations = new Map();
+  assert.equal(recordRemoteComposerStateObservation(
+    { id: THREAD_ID },
+    lifecycle,
+    { reasoningEffort: "medium", serviceTier: "priority" },
+    startedAtMs + 500,
+    observations
+  ), true);
+  assert.deepEqual(composerStateForRemoteThread(
+    { id: THREAD_ID },
+    lifecycle,
+    observations
+  ), { reasoningEffort: "medium", serviceTier: "priority" });
+  assert.equal(serviceTierForRemoteThread(
+    { id: THREAD_ID },
+    lifecycle,
+    observations
+  ), "priority");
+  assert.equal(recordRemoteComposerStateObservation(
+    { id: THREAD_ID },
+    lifecycle,
+    {
+      reasoningEffort: "high",
+      serviceTier: "default",
+      reasoningAvailable: false,
+      serviceTierAvailable: false
+    },
+    startedAtMs + 600,
+    observations
+  ), false);
+
+  const nextLifecycle = {
+    status: "working",
+    startedAtMs: startedAtMs + 60_000,
+    latestTurnId: "019f77d6-bd79-7000-8000-000000000003"
+  };
+  assert.deepEqual(composerStateForRemoteThread(
+    { id: THREAD_ID },
+    nextLifecycle,
+    observations
+  ), { reasoningEffort: null, serviceTier: null });
+  assert.deepEqual(composerStateForRemoteThread(
+    { id: THREAD_ID, reasoningEffort: "high", serviceTier: "standard" },
+    nextLifecycle,
+    observations
+  ), { reasoningEffort: "high", serviceTier: "default" });
+  assert.equal(recordRemoteComposerStateObservation(
+    { id: THREAD_ID },
+    nextLifecycle,
+    { reasoningEffort: "low", serviceTier: "default" },
+    startedAtMs,
+    observations
+  ), false);
 });
 
 test("queue parser preserves the focused Codex window", () => {

@@ -36,6 +36,7 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" voice-event-selftest
 "$BRIDGE" voice-release-selftest
 "$BRIDGE" reasoning-state-selftest
+"$BRIDGE" goal-state-selftest
 "$BRIDGE" fast-mode-selftest
 "$BRIDGE" thread-fingerprint-selftest
 "$BRIDGE" focused-thread-geometry-selftest

@@ -1,6 +1,6 @@
 {
   "name": "threaddeck-for-codex",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "description": "Monitor, switch, and dictate into Codex Desktop tasks from Stream Deck Neo on macOS.",
   "license": "MIT",

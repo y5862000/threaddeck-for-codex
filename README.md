@@ -33,10 +33,10 @@ The overview and ThreadDeck gesture demos below are generated from the plugin's 
 
 ## What it puts on your desk
 
-- **Live task cards** — activity, title, pin, queue count, elapsed or completed time, reasoning intensity, and fast/standard service cues.
+- **Live task cards** — activity, title, pin, queue count, goal badge and goal-wide elapsed time, reasoning intensity, and fast/standard service cues.
 - **Reliable switching** — open local tasks directly and activate the correct computer for an explicitly pinned remote task without moving or clicking the mouse pointer.
 - **Hardware dictation** — hold a task key to speak and auto-submit a follow-up, or use the dedicated microphone to leave a draft for review.
-- **Completion feedback** — every visible ThreadDeck-owned key acknowledges the first completion frame; the matching task continues with a stronger green pulse.
+- **Completion feedback** — after a fresh final-turn end is confirmed with no queued continuation, every visible ThreadDeck-owned key acknowledges the first completion frame and the matching task continues with a stronger green pulse. Queue edits and dequeue-to-execution transitions never count as completion.
 - **Workflow controls** — toggle Codex Fast mode, create a task or Side Chat, send, switch apps, change pages, control media, and optionally show a weekly quota ring.
 
 ## Install in 60 seconds
@@ -79,18 +79,18 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 
 | Key | Press behavior | Hold or release behavior |
 |---|---|---|
-| Current / last switched task (slot 1) | Opens the current task, or the last task whose switch ThreadDeck confirmed | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
-| Task 2–8 | Starts opening that local, remote, or Side Chat task | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Current / last switched task | Opens the current task, or the last task whose switch ThreadDeck confirmed | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Top Task 1–8 | Starts opening that position in the sorted local, pinned-remote, and Side Chat list | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
 | Microphone | Starts dictation immediately and pauses supported audio-producing media apps | Keep held while speaking; release to stop, resume media, and leave the transcript in the composer **without submitting** |
 | Send | Release before 0.6 s to send Return | At **0.6 s** the key turns blue; release to send Command+Return |
 | App launcher | Tap to open or bring the configured app forward | Long-press to quit that app; the threshold and native artwork are managed by Stream Deck |
 | Weekly quota | — | Release to refresh CodexBar immediately |
 | New task / Side Chat | — | Release to run `⌥⌘O` / `⌥⌘S` |
-| Fast mode | — | Release to toggle Fast mode in the current task's Codex composer; the key shows only a confirmed state |
+| Fast mode | — | Release to toggle Fast mode in the current task's Codex composer; the icon shows verified Fast or standard mode and reports unavailable only when Codex exposes no usable control |
 | App switcher / media | Runs immediately on press | No alternate hold action |
 | Previous / next page | — | Release to cycle through the three ThreadDeck pages |
 
-The Dashboard's slot-1 task key is deliberately stable: it represents the currently identified Codex task and, after ThreadDeck confirms a task switch, keeps that last successful destination. A failed or ambiguous switch does not replace it.
+The Dashboard's Current / Last key is deliberately stable: it represents the currently identified Codex task and, after ThreadDeck confirms a task switch, keeps that last successful destination. A failed or ambiguous switch does not replace it. **Top Task 1** is a separate selectable action, so custom profiles can place both keys side by side; the bundled Tasks page starts with Top Task 1 while the Dashboard keeps Current / Last.
 
 ## Keys with hold gestures
 
@@ -122,7 +122,7 @@ The Media page includes Stream Deck, Music, Chrome, and Codex launchers built wi
 
 | Example | Meaning |
 |---|---|
-| <img src="docs/media/working-task-key.png" width="104" alt="Working task key"> | The header shows the current phase. The pin precedes the title, the timer updates every second, the track reflects trustworthy reasoning intensity, and the lightning cue marks fast service. An amber `+N` is the observed queued-follow-up count. |
+| <img src="docs/media/working-task-key.png" width="104" alt="Working task key"> | The header shows the current phase. The pin precedes the title, the timer updates every second, the track reflects trustworthy reasoning intensity, and the lightning cue marks fast service. A target at the timer's left marks an unfinished goal; while it is present, the timer is the whole goal's accumulated time rather than only the latest turn. An amber `+N` is the observed queued-follow-up count. |
 | <img src="docs/media/completed-task-key.png" width="104" alt="Completed task key"> | The check and frozen timer mean the latest observed turn completed. Completed cards hide the fast-service lightning cue so the check remains the single status signal. The final duration is never rewritten by a later resume observation. |
 | <img src="docs/media/quota-key.png" width="104" alt="Weekly quota key"> | Optional remaining weekly capacity from CodexBar. The last good value appears immediately during page changes and survives a transient refresh failure. |
 | <img src="docs/media/side-chat-key.png" width="104" alt="Side Chat key"> | A workflow action using the same light/dark visual system as task cards. |
@@ -139,14 +139,14 @@ ThreadDeck fills up to eight slots with user-facing tasks only:
 2. **remote** tasks only when you explicitly pin them in Codex, apart from the current-task exception below;
 3. temporary **Side Chats** while their Codex session remains open.
 
-Unpinned remote history does not consume ordinary hardware slots. The single exception is slot 1: when the currently verified task—or ThreadDeck's last successfully switched task—is remote, that exact task may remain there without a pin. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
+Unpinned remote history does not consume ordinary Top Task slots. The separate Current / Last action is the single exception: when the currently verified task—or ThreadDeck's last successfully switched task—is remote, that exact task may remain on that key without a pin. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
 
 To put a remote task on the deck, open its computer in Codex once so its summary is cached, then pin only the task you want. Pressing the key prefers the exact task UUID exposed by Codex, then activates the verified sidebar or single unified-search result from the keyboard, which switches both the computer and task. Known duplicate titles require strict UUID identity; if Codex does not expose enough identity, ThreadDeck reports a duplicate instead of guessing.
 
 <details>
 <summary><strong>How remote status, timing, and reasoning stay conservative</strong></summary>
 
-Remote summary timestamps are used for ordering, never as invented completion times. ThreadDeck reconstructs a turn start from its UUIDv7 ID and freezes duration only at an explicit terminal marker or a confirmed live active-to-not-loaded transition. If no trustworthy end exists after a cold start, it shows an unknown duration. Intermediate reasoning summaries are reduced to privacy-safe phases such as Planning, Analyzing, Implementing, Verifying, Running, and Summarizing without rendering or storing the source summary text. Reasoning intensity appears only when Codex exposes a value tied to the exact task; otherwise the track stays empty.
+Remote summary timestamps are used for ordering, never as invented completion times. ThreadDeck reconstructs a turn start from its UUIDv7 ID and freezes duration only at an explicit terminal marker or a confirmed live active-to-not-loaded transition. Goal time follows Codex's own accumulated counter: only `active` advances, while paused, blocked, limited, completed, stopped, error, and confirmed remote-idle states freeze at one fixed value. A newly active continuation releases a provisional between-turn cutoff. Focused remote goal detection exact-matches only Codex's fixed status labels plus its compact duration or token-progress field, never the goal objective or conversation text. The last observed remote state and time are kept locally for up to seven days so a plugin restart does not erase the badge; a remote goal that has never been focused cannot be inferred from Codex's summary metadata. When a token-budget row does not expose elapsed time, the badge remains and the timer shows `--:--` instead of inventing a value or advancing after a block. If no trustworthy end exists after a cold start, it shows an unknown duration. Intermediate reasoning summaries are reduced to privacy-safe phases such as Planning, Analyzing, Implementing, Verifying, Running, and Summarizing without rendering or storing the source summary text. Reasoning intensity and Fast/standard speed are accepted only from explicit metadata tied to the exact remote task or an exact focused-task composer match. The live observation is cached only for that exact turn, so it cannot bleed into another task or a later turn; ambiguous summary `mode` fields are deliberately ignored. The task-card lightning cue and Fast mode action therefore agree when a trustworthy value exists and remain unknown instead of guessing otherwise.
 
 </details>
 
@@ -154,8 +154,8 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 The bundled profile has three pages and can be rearranged in Stream Deck:
 
-1. **Dashboard** — quota, the current/last successfully switched task, Fast mode, new task, Side Chat, microphone, Send, and back navigation. The Fast mode key occupies `1,1`; the task remains at `0,1`.
-2. **Tasks** — the current/last switched task, task slots 2–7, and back navigation. Task 8 is available in the action list for custom layouts.
+1. **Dashboard** — quota, the current/last successfully switched task, Fast mode, new task, Side Chat, microphone, Send, and back navigation. The Fast mode key occupies `1,1`; Current / Last remains at `0,1`.
+2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current / Last action are available in the action list for custom layouts.
 3. **Media** — previous track, rewind, play/pause, four app launchers, and back navigation. Forward page, next track, seek, mute, and volume actions are also available.
 
 Elgato-owned app-launch keys keep their native artwork, support their configured long-press-to-quit behavior, and do not receive ThreadDeck's completion overlay. ThreadDeck page-navigation keys do.
@@ -177,10 +177,11 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 
 | Source | Access | Purpose |
 |---|---|---|
-| `~/.codex` and Codex Desktop logs | Read-only | User task titles, pins, cached remote summaries, lifecycle, activity, timing, service metadata, and temporary Side Chat lifecycle |
+| `~/.codex` and Codex Desktop logs | Read-only | User task titles, pins, cached remote summaries, lifecycle, goal status and accumulated time, activity, timing, service metadata, and temporary Side Chat lifecycle |
+| `~/Library/Application Support/ThreadDeck/remote-goals-v1.json` | Local read/write | Last observed remote goal status and numeric time for at most seven days; no objective, title, or conversation text |
 | CodexBar CLI | Optional child process | Weekly remaining quota only; CodexBar has its own provider behavior |
 | Stream Deck plugin socket | Localhost | Receive key events and send rendered key images |
-| macOS Accessibility and Core Audio | Local system APIs | Keyboard/media actions, focused-composer checks, queue counts, remote selection, and push-to-talk audio handling |
+| macOS Accessibility and Core Audio | Local system APIs | Keyboard/media actions, focused-composer checks, fixed goal status/time labels, queue counts, remote selection, and push-to-talk audio handling |
 
 ThreadDeck never writes to Codex database or session files, but a physical key press can intentionally open Codex UI or submit the message you dictated. Remote titles are passed to the native helper through stdin rather than command-line arguments. Queued message text and arbitrary accessibility text are never returned, logged, or stored. Anyone who can see the physical device can see the task titles displayed on it; review [Security and privacy](SECURITY.md) before sharing logs or screenshots.
 

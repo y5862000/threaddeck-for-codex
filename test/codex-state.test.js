@@ -100,6 +100,7 @@ test("remote rows select the newest duplicate and normalize summary fields", () 
         reasoningEffort: "unknown",
         latestReasoningEffort: "MAX",
         serviceTier: null,
+        mode: "fast",
         workspaceKind: null
       },
       {
@@ -145,7 +146,7 @@ test("remote rows select the newest duplicate and normalize summary fields", () 
     hasUnreadTurn: true,
     threadRuntimeStatus: { type: "notLoaded" },
     reasoningEffort: "max",
-    serviceTier: "default",
+    serviceTier: null,
     workspaceKind: "project"
   });
   assert.deepEqual(rows[0], {
@@ -162,7 +163,7 @@ test("remote rows select the newest duplicate and normalize summary fields", () 
     hasUnreadTurn: false,
     threadRuntimeStatus: { type: "notLoaded" },
     reasoningEffort: "low",
-    serviceTier: "fast",
+    serviceTier: "priority",
     workspaceKind: "cloud"
   });
 });

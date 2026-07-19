@@ -38,6 +38,22 @@
         "Keypad"
       ],
       "Icon": "images/action",
+      "Name": "Codex 상위 작업 1",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "짧게 누르면 정렬된 첫 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다. 현재/마지막 전환 작업 액션과 별도로 사용할 수 있습니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.thread.top1"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
       "Name": "Codex 상위 작업 2",
       "States": [
         {
@@ -433,5 +449,5 @@
   },
   "UUID": "com.yechan.threaddeck",
   "URL": "https://github.com/y5862000/threaddeck-for-codex",
-  "Version": "0.2.0.0"
+  "Version": "0.3.0.0"
 }

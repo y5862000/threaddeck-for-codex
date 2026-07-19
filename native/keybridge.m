@@ -3,6 +3,7 @@
 #include <CoreAudio/CoreAudio.h>
 #include <IOKit/hidsystem/IOLLEvent.h>
 #include <IOKit/hidsystem/ev_keymap.h>
+#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -1099,6 +1100,7 @@ static bool string_fingerprint(CFTypeRef value, size_t *length, uint64_t *hash) 
 static bool copy_element_position(AXUIElementRef element, CGPoint *position);
 static bool copy_element_size(AXUIElementRef element, CGSize *size);
 static bool element_is_hidden(AXUIElementRef element);
+static bool codex_accessibility_element_supports_press(AXUIElementRef element);
 
 typedef struct {
   const char *effort;
@@ -1140,6 +1142,112 @@ static const char *reasoning_effort_from_accessibility_string(
   return NULL;
 }
 
+// Codex Work intentionally reuses the word "Standard" for two unrelated
+// settings: medium reasoning in the closed intelligence trigger and standard
+// response speed inside its popover. Keep these aliases out of the generic
+// parser and admit them only after the element has been proven to be the
+// composer intelligence trigger.
+static const char *reasoning_effort_from_intelligence_alias_string(CFTypeRef value) {
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return NULL;
+  @autoreleasepool {
+    NSString *text = [[(__bridge NSString *)value lowercaseString]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    NSArray<NSString *> *parts = [text
+      componentsSeparatedByCharactersInSet:[[NSCharacterSet alphanumericCharacterSet]
+        invertedSet]];
+    for (NSString *part in parts) {
+      if ([part isEqualToString:@"extended"]) return "high";
+      if ([part isEqualToString:@"standard"]) return "medium";
+    }
+  }
+  return NULL;
+}
+
+static bool accessibility_string_has_codex_model_context(CFTypeRef value) {
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return false;
+  @autoreleasepool {
+    NSString *text = [[(__bridge NSString *)value lowercaseString]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    return [text containsString:@"gpt-"]
+      || [text containsString:@"codex"]
+      || [text containsString:@"terra"]
+      || [text containsString:@" sol"]
+      || [text hasPrefix:@"sol "];
+  }
+}
+
+static const char *reasoning_effort_from_intelligence_trigger_label(CFTypeRef value) {
+  if (!accessibility_string_has_codex_model_context(value)) return NULL;
+  bool ignored_context = false;
+  const char *effort = reasoning_effort_from_accessibility_string(
+    value,
+    &ignored_context
+  );
+  return effort != NULL
+    ? effort
+    : reasoning_effort_from_intelligence_alias_string(value);
+}
+
+typedef struct {
+  bool model_context;
+  const char *effort;
+  unsigned visited;
+} CodexIntelligenceTextState;
+
+static void collect_codex_intelligence_text_state(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexIntelligenceTextState *state
+) {
+  if (element == NULL || state == NULL || depth > 4 || state->visited >= 64) return;
+  state->visited += 1;
+  CFStringRef attributes[] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    CFSTR("AXDOMIdentifier")
+  };
+  for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyAttributeValue(element, attributes[index], &value) != kAXErrorSuccess
+        || value == NULL) {
+      if (value != NULL) CFRelease(value);
+      continue;
+    }
+    state->model_context |= accessibility_string_has_codex_model_context(value);
+    bool ignored_context = false;
+    const char *effort = reasoning_effort_from_accessibility_string(
+      value,
+      &ignored_context
+    );
+    if (effort == NULL) effort = reasoning_effort_from_intelligence_alias_string(value);
+    if (effort != NULL) state->effort = effort;
+    CFRelease(value);
+  }
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value)
+        != kAXErrorSuccess
+      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_codex_intelligence_text_state(
+        (AXUIElementRef)child,
+        depth + 1,
+        state
+      );
+    }
+  }
+  CFRelease(children_value);
+}
+
 static void collect_codex_reasoning_state(
   AXUIElementRef element,
   unsigned depth,
@@ -1174,6 +1282,17 @@ static void collect_codex_reasoning_state(
     && position.y >= state->window_origin.y + state->window_size.height * 0.62
     && size.width <= 320
     && size.height <= 56;
+
+  if (is_button && composer_region
+      && codex_accessibility_element_supports_press(element)) {
+    CodexIntelligenceTextState intelligence = { 0 };
+    collect_codex_intelligence_text_state(element, 0, &intelligence);
+    if (intelligence.model_context && intelligence.effort != NULL
+        && 150 > state->score) {
+      state->effort = intelligence.effort;
+      state->score = 150;
+    }
+  }
 
   CFStringRef attributes[] = {
     kAXTitleAttribute,
@@ -1291,8 +1410,848 @@ static int reasoning_state_selftest(void) {
       break;
     }
   }
-  printf("localized_effort_mapping=%d\n", passed ? 1 : 0);
-  return passed ? 0 : 1;
+  bool work_aliases = strcmp(
+    reasoning_effort_from_intelligence_trigger_label(CFSTR("5.6 Sol Standard")),
+    "medium"
+  ) == 0 && strcmp(
+    reasoning_effort_from_intelligence_trigger_label(CFSTR("5.6 Sol Extended")),
+    "high"
+  ) == 0;
+  bool speed_collision_rejected = reasoning_effort_from_intelligence_trigger_label(
+    CFSTR("Speed Standard")
+  ) == NULL && reasoning_effort_from_intelligence_trigger_label(
+    CFSTR("Enable standard mode")
+  ) == NULL;
+  printf(
+    "localized_effort_mapping=%d work_aliases=%d speed_collision_rejected=%d\n",
+    passed ? 1 : 0,
+    work_aliases ? 1 : 0,
+    speed_collision_rejected ? 1 : 0
+  );
+  return passed && work_aliases && speed_collision_rejected ? 0 : 1;
+}
+
+typedef enum {
+  CODEX_GOAL_UNKNOWN = 0,
+  CODEX_GOAL_ACTIVE,
+  CODEX_GOAL_PAUSED,
+  CODEX_GOAL_BLOCKED,
+  CODEX_GOAL_USAGE_LIMITED,
+  CODEX_GOAL_BUDGET_LIMITED,
+  CODEX_GOAL_COMPLETE
+} CodexGoalStatus;
+
+typedef struct {
+  CodexGoalStatus status;
+  CGPoint position;
+  CGSize size;
+} CodexGoalStatusCandidate;
+
+typedef struct {
+  uint64_t elapsed_seconds;
+  CGPoint position;
+  CGSize size;
+} CodexGoalDurationCandidate;
+
+typedef struct {
+  CGPoint position;
+  CGSize size;
+} CodexGoalTokenProgressCandidate;
+
+#define CODEX_GOAL_MAX_STATUS_CANDIDATES 32
+#define CODEX_GOAL_MAX_DURATION_CANDIDATES 64
+#define CODEX_GOAL_MAX_TOKEN_PROGRESS_CANDIDATES 64
+#define CODEX_GOAL_MAX_SCAN_DEPTH 28
+#define CODEX_GOAL_MAX_VISITED_ELEMENTS 6000
+
+typedef struct {
+  CodexGoalStatusCandidate statuses[CODEX_GOAL_MAX_STATUS_CANDIDATES];
+  unsigned status_count;
+  CodexGoalDurationCandidate durations[CODEX_GOAL_MAX_DURATION_CANDIDATES];
+  unsigned duration_count;
+  CodexGoalTokenProgressCandidate token_progress[CODEX_GOAL_MAX_TOKEN_PROGRESS_CANDIDATES];
+  unsigned token_progress_count;
+  unsigned visited;
+  bool traversal_failed;
+  CGPoint window_origin;
+  CGSize window_size;
+} CodexGoalScanState;
+
+static NSString *normalized_accessibility_label(CFTypeRef value) {
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return nil;
+  NSString *text = [(__bridge NSString *)value
+    stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  if (text.length == 0) return nil;
+  NSArray<NSString *> *parts = [text
+    componentsSeparatedByCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  NSMutableArray<NSString *> *words = [NSMutableArray arrayWithCapacity:parts.count];
+  for (NSString *part in parts) {
+    if (part.length > 0) [words addObject:part];
+  }
+  return [[words componentsJoinedByString:@" "] lowercaseString];
+}
+
+// Match only Codex's fixed summary vocabulary. Substring matching would let a
+// task title or assistant message impersonate goal state, so even punctuation
+// or surrounding prose intentionally makes this return UNKNOWN.
+static CodexGoalStatus codex_goal_status_from_accessibility_string(CFTypeRef value) {
+  NSString *label = normalized_accessibility_label(value);
+  if (label == nil) return CODEX_GOAL_UNKNOWN;
+  if ([label isEqualToString:@"pursuing goal"]
+      || [label isEqualToString:@"진행 중인 목표"]) return CODEX_GOAL_ACTIVE;
+  if ([label isEqualToString:@"paused goal"]
+      || [label isEqualToString:@"일시중지된 목표"]) return CODEX_GOAL_PAUSED;
+  if ([label isEqualToString:@"goal blocked"]
+      || [label isEqualToString:@"목표가 차단됨"]) return CODEX_GOAL_BLOCKED;
+  if ([label isEqualToString:@"goal usage limited"]
+      || [label isEqualToString:@"목표 사용 제한"]) return CODEX_GOAL_USAGE_LIMITED;
+  if ([label isEqualToString:@"goal limited"]
+      || [label isEqualToString:@"목표 제한됨"]) return CODEX_GOAL_BUDGET_LIMITED;
+  if ([label isEqualToString:@"goal achieved"]
+      || [label isEqualToString:@"목표 달성"]) return CODEX_GOAL_COMPLETE;
+  return CODEX_GOAL_UNKNOWN;
+}
+
+static const char *codex_goal_status_name(CodexGoalStatus status) {
+  switch (status) {
+    case CODEX_GOAL_ACTIVE: return "active";
+    case CODEX_GOAL_PAUSED: return "paused";
+    case CODEX_GOAL_BLOCKED: return "blocked";
+    case CODEX_GOAL_USAGE_LIMITED: return "usage_limited";
+    case CODEX_GOAL_BUDGET_LIMITED: return "budget_limited";
+    case CODEX_GOAL_COMPLETE: return "complete";
+    case CODEX_GOAL_UNKNOWN: return "none";
+  }
+  return "none";
+}
+
+// Parse only the compact duration emitted by Codex (for example, "2h 3m 4s"
+// or "• 3m"). No surrounding words are allowed, which keeps ordinary task
+// text out of the goal-state channel.
+static bool compact_goal_duration_seconds(CFTypeRef value, uint64_t *seconds_out) {
+  NSString *text = normalized_accessibility_label(value);
+  if (text == nil) return false;
+  if ([text hasPrefix:@"•"] || [text hasPrefix:@"·"]) {
+    text = [[text substringFromIndex:1]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  }
+  const char *cursor = text.UTF8String;
+  if (cursor == NULL || *cursor == '\0') return false;
+
+  uint64_t total = 0;
+  unsigned previous_rank = 5;
+  bool found = false;
+  while (*cursor != '\0') {
+    while (isspace((unsigned char)*cursor)) cursor += 1;
+    if (!isdigit((unsigned char)*cursor)) return false;
+    uint64_t amount = 0;
+    while (isdigit((unsigned char)*cursor)) {
+      unsigned digit = (unsigned)(*cursor - '0');
+      if (amount > (UINT64_MAX - digit) / 10) return false;
+      amount = amount * 10 + digit;
+      cursor += 1;
+    }
+
+    uint64_t multiplier = 0;
+    unsigned rank = 0;
+    switch (*cursor) {
+      case 'd': multiplier = 86400; rank = 4; break;
+      case 'h': multiplier = 3600; rank = 3; break;
+      case 'm': multiplier = 60; rank = 2; break;
+      case 's': multiplier = 1; rank = 1; break;
+      default: return false;
+    }
+    if (rank >= previous_rank || amount > (UINT64_MAX - total) / multiplier) return false;
+    total += amount * multiplier;
+    previous_rank = rank;
+    found = true;
+    cursor += 1;
+    if (*cursor != '\0' && !isspace((unsigned char)*cursor)) return false;
+  }
+  if (!found) return false;
+  if (seconds_out != NULL) *seconds_out = total;
+  return true;
+}
+
+static bool consume_compact_token_scale(const char **cursor_in_out) {
+  if (cursor_in_out == NULL || *cursor_in_out == NULL) return false;
+  const char *cursor = *cursor_in_out;
+  if (*cursor == 'k' || *cursor == 'm' || *cursor == 'b') {
+    *cursor_in_out = cursor + 1;
+    return true;
+  }
+  const char *korean_scales[] = { "천", "만", "억" };
+  for (size_t index = 0; index < sizeof(korean_scales) / sizeof(korean_scales[0]); index += 1) {
+    size_t length = strlen(korean_scales[index]);
+    if (strncmp(cursor, korean_scales[index], length) == 0) {
+      *cursor_in_out = cursor + length;
+      return true;
+    }
+  }
+  return false;
+}
+
+// Accept only Codex's localized compact token-budget progress shape, such as
+// "1.2K / 10K" or "1.2천 / 1만". Requiring a known scaled denominator keeps
+// generic fractions, paths, URLs, and prose containing a slash out of this
+// fallback.
+static bool compact_goal_token_progress(CFTypeRef value) {
+  NSString *text = normalized_accessibility_label(value);
+  if (text == nil) return false;
+  if ([text hasPrefix:@"•"] || [text hasPrefix:@"·"]) {
+    text = [[text substringFromIndex:1]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+  }
+  const char *cursor = text.UTF8String;
+  if (cursor == NULL || *cursor == '\0') return false;
+
+  bool denominator_scaled = false;
+  for (unsigned quantity = 0; quantity < 2; quantity += 1) {
+    while (isspace((unsigned char)*cursor)) cursor += 1;
+    if (!isdigit((unsigned char)*cursor)) return false;
+    bool quantity_nonzero = false;
+    while (isdigit((unsigned char)*cursor)) {
+      if (*cursor != '0') quantity_nonzero = true;
+      cursor += 1;
+    }
+
+    bool has_decimal = false;
+    if (*cursor == '.') {
+      has_decimal = true;
+      cursor += 1;
+      unsigned decimal_digits = 0;
+      while (isdigit((unsigned char)*cursor) && decimal_digits < 2) {
+        if (*cursor != '0') quantity_nonzero = true;
+        cursor += 1;
+        decimal_digits += 1;
+      }
+      if (decimal_digits == 0 || isdigit((unsigned char)*cursor)) return false;
+    }
+
+    bool scaled = consume_compact_token_scale(&cursor);
+    if (has_decimal && !scaled) return false;
+    if (quantity == 1) {
+      denominator_scaled = scaled;
+      if (!quantity_nonzero) return false;
+    }
+
+    while (isspace((unsigned char)*cursor)) cursor += 1;
+    if (quantity == 0) {
+      if (*cursor != '/') return false;
+      cursor += 1;
+    }
+  }
+  return denominator_scaled && *cursor == '\0';
+}
+
+static bool codex_goal_candidate_geometry(
+  CGPoint window_origin,
+  CGSize window_size,
+  CGPoint position,
+  CGSize size,
+  bool duration
+) {
+  if (window_size.width <= 1 || window_size.height <= 1
+      || size.width <= 1 || size.height <= 1) return false;
+  double right = window_origin.x + window_size.width;
+  double bottom = window_origin.y + window_size.height;
+  bool inside_window = position.x + size.width >= window_origin.x
+    && position.x <= right
+    && position.y + size.height >= window_origin.y
+    && position.y <= bottom;
+  if (!inside_window) return false;
+
+  // The goal summary is a compact row immediately above the composer in the
+  // main content column. Excluding the title/sidebar and the upper transcript
+  // is the geometry half of the false-positive guard.
+  return position.x >= window_origin.x + window_size.width * 0.20
+    && position.y >= window_origin.y + window_size.height * 0.52
+    && position.y <= bottom - 36
+    && size.width <= (duration ? 220 : 440)
+    && size.height <= 60;
+}
+
+static void add_codex_goal_status_candidate(
+  CodexGoalScanState *state,
+  CodexGoalStatus status,
+  CGPoint position,
+  CGSize size
+) {
+  for (unsigned index = 0; index < state->status_count; index += 1) {
+    CodexGoalStatusCandidate existing = state->statuses[index];
+    if (existing.status == status
+        && existing.position.x == position.x
+        && existing.position.y == position.y
+        && existing.size.width == size.width
+        && existing.size.height == size.height) return;
+  }
+  if (state->status_count >= CODEX_GOAL_MAX_STATUS_CANDIDATES) {
+    state->traversal_failed = true;
+    return;
+  }
+  state->statuses[state->status_count++] = (CodexGoalStatusCandidate) {
+    .status = status,
+    .position = position,
+    .size = size
+  };
+}
+
+static void add_codex_goal_duration_candidate(
+  CodexGoalScanState *state,
+  uint64_t elapsed_seconds,
+  CGPoint position,
+  CGSize size
+) {
+  for (unsigned index = 0; index < state->duration_count; index += 1) {
+    CodexGoalDurationCandidate existing = state->durations[index];
+    if (existing.elapsed_seconds == elapsed_seconds
+        && existing.position.x == position.x
+        && existing.position.y == position.y
+        && existing.size.width == size.width
+        && existing.size.height == size.height) return;
+  }
+  if (state->duration_count >= CODEX_GOAL_MAX_DURATION_CANDIDATES) {
+    state->traversal_failed = true;
+    return;
+  }
+  state->durations[state->duration_count++] = (CodexGoalDurationCandidate) {
+    .elapsed_seconds = elapsed_seconds,
+    .position = position,
+    .size = size
+  };
+}
+
+static void add_codex_goal_token_progress_candidate(
+  CodexGoalScanState *state,
+  CGPoint position,
+  CGSize size
+) {
+  for (unsigned index = 0; index < state->token_progress_count; index += 1) {
+    CodexGoalTokenProgressCandidate existing = state->token_progress[index];
+    if (existing.position.x == position.x
+        && existing.position.y == position.y
+        && existing.size.width == size.width
+        && existing.size.height == size.height) return;
+  }
+  if (state->token_progress_count >= CODEX_GOAL_MAX_TOKEN_PROGRESS_CANDIDATES) {
+    state->traversal_failed = true;
+    return;
+  }
+  state->token_progress[state->token_progress_count++] = (CodexGoalTokenProgressCandidate) {
+    .position = position,
+    .size = size
+  };
+}
+
+static bool begin_codex_goal_scan_visit(unsigned depth, CodexGoalScanState *state) {
+  if (state == NULL) return false;
+  if (depth > CODEX_GOAL_MAX_SCAN_DEPTH
+      || state->visited >= CODEX_GOAL_MAX_VISITED_ELEMENTS) {
+    // A safety-limit cutoff is an incomplete scan, not proof that the focused
+    // task has no goal. Report unknown so the caller retains its last snapshot.
+    state->traversal_failed = true;
+    return false;
+  }
+  state->visited += 1;
+  return true;
+}
+
+static void collect_codex_goal_state(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexGoalScanState *state
+) {
+  if (element == NULL || !begin_codex_goal_scan_visit(depth, state)) return;
+  if (element_is_hidden(element)) return;
+
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  bool has_geometry = copy_element_position(element, &position)
+    && copy_element_size(element, &size);
+  Boolean value_settable = false;
+  AXUIElementIsAttributeSettable(element, kAXValueAttribute, &value_settable);
+  // In particular, never interpret text currently typed into the composer as
+  // UI state, even if it exactly repeats one of the fixed labels.
+  bool status_geometry = !value_settable && has_geometry && codex_goal_candidate_geometry(
+    state->window_origin,
+    state->window_size,
+    position,
+    size,
+    false
+  );
+  bool duration_geometry = !value_settable && has_geometry && codex_goal_candidate_geometry(
+    state->window_origin,
+    state->window_size,
+    position,
+    size,
+    true
+  );
+
+  if (status_geometry || duration_geometry) {
+    CFStringRef attributes[] = {
+      kAXTitleAttribute,
+      kAXValueAttribute,
+      kAXDescriptionAttribute,
+      kAXHelpAttribute,
+      kAXIdentifierAttribute,
+      CFSTR("AXDOMIdentifier")
+    };
+    for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+      CFTypeRef value = NULL;
+      if (AXUIElementCopyAttributeValue(element, attributes[index], &value) != kAXErrorSuccess
+          || value == NULL) {
+        if (value != NULL) CFRelease(value);
+        continue;
+      }
+      if (status_geometry) {
+        CodexGoalStatus status = codex_goal_status_from_accessibility_string(value);
+        if (status != CODEX_GOAL_UNKNOWN) {
+          add_codex_goal_status_candidate(state, status, position, size);
+        }
+      }
+      if (duration_geometry) {
+        uint64_t elapsed_seconds = 0;
+        if (compact_goal_duration_seconds(value, &elapsed_seconds)) {
+          add_codex_goal_duration_candidate(state, elapsed_seconds, position, size);
+        } else if (compact_goal_token_progress(value)) {
+          add_codex_goal_token_progress_candidate(state, position, size);
+        }
+      }
+      CFRelease(value);
+    }
+  }
+
+  CFTypeRef children_value = NULL;
+  AXError children_error = AXUIElementCopyAttributeValue(
+    element,
+    kAXChildrenAttribute,
+    &children_value
+  );
+  if (children_error != kAXErrorSuccess
+      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    // Leaf elements normally report no children. A failed root traversal or a
+    // messaging timeout is different: it cannot prove that no goal exists.
+    if (depth == 0 || children_error == kAXErrorCannotComplete) {
+      state->traversal_failed = true;
+    }
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  CFIndex count = CFArrayGetCount(children);
+  for (CFIndex index = 0; index < count; index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_codex_goal_state((AXUIElementRef)child, depth + 1, state);
+    }
+  }
+  CFRelease(children_value);
+}
+
+static bool select_codex_goal_state(
+  const CodexGoalScanState *state,
+  CodexGoalStatus *status_out,
+  uint64_t *elapsed_seconds_out,
+  bool *elapsed_known_out
+) {
+  int best_score = -1;
+  CodexGoalStatus best_status = CODEX_GOAL_UNKNOWN;
+  uint64_t best_elapsed_seconds = 0;
+  for (unsigned status_index = 0; status_index < state->status_count; status_index += 1) {
+    CodexGoalStatusCandidate status = state->statuses[status_index];
+    double status_center_x = status.position.x + status.size.width / 2;
+    double status_center_y = status.position.y + status.size.height / 2;
+    for (unsigned duration_index = 0; duration_index < state->duration_count; duration_index += 1) {
+      CodexGoalDurationCandidate duration = state->durations[duration_index];
+      double duration_center_x = duration.position.x + duration.size.width / 2;
+      double duration_center_y = duration.position.y + duration.size.height / 2;
+      double dx = duration_center_x - status_center_x;
+      double dy = duration_center_y - status_center_y;
+      if (dy < 0) dy = -dy;
+
+      // Codex lays the elapsed value after the localized status on the same
+      // summary row. This rejects an exact phrase copied into the transcript
+      // unless a compact duration is also aligned with it like the real UI.
+      if (dy > 28 || dx < -8 || dx > state->window_size.width * 0.72 || dx > 900) continue;
+      int score = 1000
+        + (int)((status.position.y - state->window_origin.y) * 100 / state->window_size.height)
+        - (int)(dy * 8)
+        - (int)(dx / 24);
+      if (score > best_score) {
+        best_score = score;
+        best_status = status.status;
+        best_elapsed_seconds = duration.elapsed_seconds;
+      }
+    }
+  }
+  bool elapsed_known = best_status != CODEX_GOAL_UNKNOWN;
+
+  // Some Codex builds replace the elapsed duration with token-budget progress.
+  // Use that only as a tighter same-row fallback; an aligned duration always
+  // wins, even when the token candidate would receive a higher score.
+  if (!elapsed_known) {
+    for (unsigned status_index = 0; status_index < state->status_count; status_index += 1) {
+      CodexGoalStatusCandidate status = state->statuses[status_index];
+      double status_center_x = status.position.x + status.size.width / 2;
+      double status_center_y = status.position.y + status.size.height / 2;
+      for (unsigned token_index = 0;
+           token_index < state->token_progress_count;
+           token_index += 1) {
+        CodexGoalTokenProgressCandidate token = state->token_progress[token_index];
+        double token_center_x = token.position.x + token.size.width / 2;
+        double token_center_y = token.position.y + token.size.height / 2;
+        double dx = token_center_x - status_center_x;
+        double dy = token_center_y - status_center_y;
+        if (dy < 0) dy = -dy;
+
+        // The token fallback intentionally requires a closer pair than a
+        // duration. It proves that the exact status and exact progress value
+        // belong to the compact goal row rather than separate transcript text.
+        if (dy > 18 || dx < -8
+            || dx > state->window_size.width * 0.52 || dx > 620) continue;
+        int score = 1000
+          + (int)((status.position.y - state->window_origin.y) * 100 / state->window_size.height)
+          - (int)(dy * 12)
+          - (int)(dx / 20);
+        if (score > best_score) {
+          best_score = score;
+          best_status = status.status;
+        }
+      }
+    }
+  }
+  if (best_status == CODEX_GOAL_UNKNOWN) return false;
+  if (status_out != NULL) *status_out = best_status;
+  if (elapsed_seconds_out != NULL) *elapsed_seconds_out = best_elapsed_seconds;
+  if (elapsed_known_out != NULL) *elapsed_known_out = elapsed_known;
+  return true;
+}
+
+static int print_codex_goal_state(void) {
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) return 1;
+  AXUIElementSetMessagingTimeout(application, 0.8);
+
+  CFTypeRef window_value = NULL;
+  if (AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute, &window_value)
+      != kAXErrorSuccess || window_value == NULL
+      || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
+    if (window_value != NULL) CFRelease(window_value);
+    CFRelease(application);
+    return 1;
+  }
+  AXUIElementRef window = (AXUIElementRef)window_value;
+  CGPoint origin = CGPointZero;
+  CGSize size = CGSizeZero;
+  if (!copy_element_position(window, &origin) || !copy_element_size(window, &size)) {
+    CFRelease(window_value);
+    CFRelease(application);
+    return 1;
+  }
+
+  CodexGoalScanState scan = {
+    .status_count = 0,
+    .duration_count = 0,
+    .token_progress_count = 0,
+    .visited = 0,
+    .traversal_failed = false,
+    .window_origin = origin,
+    .window_size = size
+  };
+  collect_codex_goal_state(window, 0, &scan);
+  CodexGoalStatus status = CODEX_GOAL_UNKNOWN;
+  uint64_t elapsed_seconds = 0;
+  bool elapsed_known = false;
+  bool found = select_codex_goal_state(&scan, &status, &elapsed_seconds, &elapsed_known);
+  const char *reported_state = found ? codex_goal_status_name(status)
+    : scan.traversal_failed ? "unknown"
+      : "none";
+  if (found && !elapsed_known) {
+    printf("state=%s elapsed=unknown visited=%u\n", reported_state, scan.visited);
+  } else {
+    printf(
+      "state=%s elapsed=%llu visited=%u\n",
+      reported_state,
+      (unsigned long long)(found ? elapsed_seconds : 0),
+      scan.visited
+    );
+  }
+  CFRelease(window_value);
+  CFRelease(application);
+  // Exit 2 means the focused window was read successfully and contains no
+  // goal row. Exit 1 is reserved for application/window/AX failures so the
+  // caller can debounce a real removal without mistaking a probe failure for
+  // one.
+  return found ? 0 : scan.traversal_failed ? 1 : 2;
+}
+
+static int goal_state_selftest(void) {
+  @autoreleasepool {
+    struct {
+      NSString *label;
+      CodexGoalStatus expected;
+    } status_cases[] = {
+      { @"Pursuing goal", CODEX_GOAL_ACTIVE },
+      { @"진행 중인 목표", CODEX_GOAL_ACTIVE },
+      { @"Paused goal", CODEX_GOAL_PAUSED },
+      { @"일시중지된 목표", CODEX_GOAL_PAUSED },
+      { @"Goal blocked", CODEX_GOAL_BLOCKED },
+      { @"목표가 차단됨", CODEX_GOAL_BLOCKED },
+      { @"Goal usage limited", CODEX_GOAL_USAGE_LIMITED },
+      { @"목표 사용 제한", CODEX_GOAL_USAGE_LIMITED },
+      { @"Goal limited", CODEX_GOAL_BUDGET_LIMITED },
+      { @"목표 제한됨", CODEX_GOAL_BUDGET_LIMITED },
+      { @"Goal achieved", CODEX_GOAL_COMPLETE },
+      { @"목표 달성", CODEX_GOAL_COMPLETE }
+    };
+    bool mappings_passed = true;
+    for (size_t index = 0; index < sizeof(status_cases) / sizeof(status_cases[0]); index += 1) {
+      CodexGoalStatus actual = codex_goal_status_from_accessibility_string(
+        (__bridge CFStringRef)status_cases[index].label
+      );
+      if (actual != status_cases[index].expected) {
+        mappings_passed = false;
+        break;
+      }
+    }
+
+    struct {
+      NSString *duration;
+      uint64_t expected;
+    } duration_cases[] = {
+      { @"0s", 0 },
+      { @"59s", 59 },
+      { @"1m 2s", 62 },
+      { @"2h 3m 4s", 7384 },
+      { @"1d 2h 3m 4s", 93784 },
+      { @"• 3m 5s", 185 },
+      { @"  · 4h  ", 14400 }
+    };
+    bool durations_passed = true;
+    for (size_t index = 0; index < sizeof(duration_cases) / sizeof(duration_cases[0]); index += 1) {
+      uint64_t actual = 0;
+      if (!compact_goal_duration_seconds(
+          (__bridge CFStringRef)duration_cases[index].duration,
+          &actual
+        ) || actual != duration_cases[index].expected) {
+        durations_passed = false;
+        break;
+      }
+    }
+    NSString *rejected_durations[] = {
+      @"elapsed 2m", @"2m remaining", @"1m 2h", @"2m, 3s", @"•"
+    };
+    for (size_t index = 0;
+         durations_passed && index < sizeof(rejected_durations) / sizeof(rejected_durations[0]);
+         index += 1) {
+      durations_passed = !compact_goal_duration_seconds(
+        (__bridge CFStringRef)rejected_durations[index],
+        NULL
+      );
+    }
+
+    NSString *accepted_token_progress[] = {
+      @"1.2K / 10K",
+      @"800 / 10K",
+      @"0/10K",
+      @"• 2M / 10M",
+      @"1.2B / 10B",
+      @"1.2천 / 1만",
+      @"900 / 1만",
+      @"1만 / 1억"
+    };
+    bool token_progress_parser_passed = true;
+    for (size_t index = 0;
+         index < sizeof(accepted_token_progress) / sizeof(accepted_token_progress[0]);
+         index += 1) {
+      if (!compact_goal_token_progress(
+          (__bridge CFStringRef)accepted_token_progress[index]
+        )) {
+        token_progress_parser_passed = false;
+        break;
+      }
+    }
+    NSString *rejected_token_progress[] = {
+      @"1 / 2",
+      @"tokens 1.2K / 10K",
+      @"1.2K / 10K remaining",
+      @"docs/setup",
+      @"https://example.com/path",
+      @"1.2K / about 10K",
+      @"1.2K / 10K / 20K",
+      @"1.234K / 10K",
+      @"1K / 0K",
+      @"천 / 만",
+      @"1.2 천 / 1 만",
+      @"1.2천 tokens / 1만",
+      @"1.2천 / 목표 1만",
+      @"1.2천 / 1만 남음",
+      @"1.2조 / 1억"
+    };
+    for (size_t index = 0;
+         token_progress_parser_passed
+           && index < sizeof(rejected_token_progress) / sizeof(rejected_token_progress[0]);
+         index += 1) {
+      token_progress_parser_passed = !compact_goal_token_progress(
+        (__bridge CFStringRef)rejected_token_progress[index]
+      );
+    }
+
+    bool exact_label_guard = codex_goal_status_from_accessibility_string(
+        CFSTR("The Pursuing goal message")
+      ) == CODEX_GOAL_UNKNOWN
+      && codex_goal_status_from_accessibility_string(
+        CFSTR("진행 중인 목표를 설명")
+      ) == CODEX_GOAL_UNKNOWN;
+    CGPoint window_origin = CGPointMake(100, 100);
+    CGSize window_size = CGSizeMake(1200, 800);
+    bool geometry_guard = codex_goal_candidate_geometry(
+        window_origin,
+        window_size,
+        CGPointMake(440, 640),
+        CGSizeMake(140, 24),
+        false
+      )
+      && !codex_goal_candidate_geometry(
+        window_origin,
+        window_size,
+        CGPointMake(440, 130),
+        CGSizeMake(140, 24),
+        false
+      )
+      && !codex_goal_candidate_geometry(
+        window_origin,
+        window_size,
+        CGPointMake(140, 640),
+        CGSizeMake(140, 24),
+        false
+      );
+    CodexGoalScanState aligned_scan = {
+      .status_count = 1,
+      .duration_count = 1,
+      .token_progress_count = 1,
+      .window_origin = window_origin,
+      .window_size = window_size
+    };
+    aligned_scan.statuses[0] = (CodexGoalStatusCandidate) {
+      .status = CODEX_GOAL_BLOCKED,
+      .position = CGPointMake(440, 640),
+      .size = CGSizeMake(140, 24)
+    };
+    aligned_scan.durations[0] = (CodexGoalDurationCandidate) {
+      .elapsed_seconds = 125,
+      .position = CGPointMake(610, 642),
+      .size = CGSizeMake(60, 22)
+    };
+    aligned_scan.token_progress[0] = (CodexGoalTokenProgressCandidate) {
+      .position = CGPointMake(610, 642),
+      .size = CGSizeMake(96, 22)
+    };
+    CodexGoalStatus paired_status = CODEX_GOAL_UNKNOWN;
+    uint64_t paired_elapsed = 0;
+    bool paired_elapsed_known = false;
+    bool proximity_guard = select_codex_goal_state(
+        &aligned_scan,
+        &paired_status,
+        &paired_elapsed,
+        &paired_elapsed_known
+      )
+      && paired_status == CODEX_GOAL_BLOCKED
+      && paired_elapsed == 125
+      && paired_elapsed_known;
+
+    CodexGoalScanState token_only_scan = aligned_scan;
+    token_only_scan.duration_count = 0;
+    paired_status = CODEX_GOAL_UNKNOWN;
+    paired_elapsed_known = true;
+    bool token_progress_pairing = select_codex_goal_state(
+        &token_only_scan,
+        &paired_status,
+        NULL,
+        &paired_elapsed_known
+      )
+      && paired_status == CODEX_GOAL_BLOCKED
+      && !paired_elapsed_known;
+    token_only_scan.token_progress[0].position.y = 430;
+    token_progress_pairing = token_progress_pairing
+      && !select_codex_goal_state(&token_only_scan, NULL, NULL, NULL);
+
+    aligned_scan.durations[0].position.y = 430;
+    aligned_scan.token_progress_count = 0;
+    proximity_guard = proximity_guard
+      && !select_codex_goal_state(&aligned_scan, NULL, NULL, NULL);
+
+    CodexGoalScanState scan_limit = { 0 };
+    bool scan_truncation_guard = begin_codex_goal_scan_visit(
+        CODEX_GOAL_MAX_SCAN_DEPTH,
+        &scan_limit
+      )
+      && scan_limit.visited == 1
+      && !scan_limit.traversal_failed;
+    scan_limit.visited = CODEX_GOAL_MAX_VISITED_ELEMENTS;
+    scan_truncation_guard = scan_truncation_guard
+      && !begin_codex_goal_scan_visit(0, &scan_limit)
+      && scan_limit.traversal_failed;
+    scan_limit = (CodexGoalScanState) { 0 };
+    scan_truncation_guard = scan_truncation_guard
+      && !begin_codex_goal_scan_visit(CODEX_GOAL_MAX_SCAN_DEPTH + 1, &scan_limit)
+      && scan_limit.traversal_failed;
+
+    CodexGoalScanState overflow_scan = {
+      .status_count = CODEX_GOAL_MAX_STATUS_CANDIDATES
+    };
+    add_codex_goal_status_candidate(
+      &overflow_scan,
+      CODEX_GOAL_ACTIVE,
+      CGPointMake(12, 34),
+      CGSizeMake(56, 20)
+    );
+    bool candidate_overflow_guard = overflow_scan.traversal_failed
+      && overflow_scan.status_count == CODEX_GOAL_MAX_STATUS_CANDIDATES;
+    overflow_scan = (CodexGoalScanState) {
+      .duration_count = CODEX_GOAL_MAX_DURATION_CANDIDATES
+    };
+    add_codex_goal_duration_candidate(
+      &overflow_scan,
+      42,
+      CGPointMake(12, 34),
+      CGSizeMake(56, 20)
+    );
+    candidate_overflow_guard = candidate_overflow_guard
+      && overflow_scan.traversal_failed
+      && overflow_scan.duration_count == CODEX_GOAL_MAX_DURATION_CANDIDATES;
+    overflow_scan = (CodexGoalScanState) {
+      .token_progress_count = CODEX_GOAL_MAX_TOKEN_PROGRESS_CANDIDATES
+    };
+    add_codex_goal_token_progress_candidate(
+      &overflow_scan,
+      CGPointMake(12, 34),
+      CGSizeMake(56, 20)
+    );
+    candidate_overflow_guard = candidate_overflow_guard
+      && overflow_scan.traversal_failed
+      && overflow_scan.token_progress_count == CODEX_GOAL_MAX_TOKEN_PROGRESS_CANDIDATES;
+
+    printf(
+      "localized_status_mapping=%d duration_parser=%d token_progress_parser=%d "
+      "exact_label_guard=%d composer_geometry_guard=%d proximity_guard=%d "
+      "token_progress_pairing=%d scan_truncation_guard=%d "
+      "candidate_overflow_guard=%d\n",
+      mappings_passed ? 1 : 0,
+      durations_passed ? 1 : 0,
+      token_progress_parser_passed ? 1 : 0,
+      exact_label_guard ? 1 : 0,
+      geometry_guard ? 1 : 0,
+      proximity_guard ? 1 : 0,
+      token_progress_pairing ? 1 : 0,
+      scan_truncation_guard ? 1 : 0,
+      candidate_overflow_guard ? 1 : 0
+    );
+    return mappings_passed && durations_passed && token_progress_parser_passed
+      && exact_label_guard && geometry_guard && proximity_guard
+      && token_progress_pairing && scan_truncation_guard
+      && candidate_overflow_guard ? 0 : 1;
+  }
 }
 
 #define CODEX_QUEUE_MAX_HEADERS 128
@@ -1748,6 +2707,7 @@ typedef enum {
 
 typedef struct {
   bool fast_context;
+  bool standard_mode_context;
   bool speed_context;
   bool mentions_fast;
   bool mentions_standard;
@@ -1762,6 +2722,13 @@ typedef struct {
 
 typedef struct {
   CFArrayRef attributes;
+  AXUIElementRef intelligence_trigger;
+  unsigned intelligence_trigger_count;
+  CGPoint intelligence_trigger_position;
+  CGSize intelligence_trigger_size;
+  bool intelligence_trigger_expanded;
+  bool intelligence_trigger_expanded_known;
+  const char *reasoning_effort;
   AXUIElementRef control;
   CodexFastControlKind control_kind;
   int control_score;
@@ -1796,6 +2763,7 @@ enum {
   FAST_ATTR_ROLE_DESCRIPTION,
   FAST_ATTR_DOM_IDENTIFIER,
   FAST_ATTR_SELECTED,
+  FAST_ATTR_EXPANDED,
   FAST_ATTR_ENABLED,
   FAST_ATTR_HIDDEN,
   FAST_ATTR_POSITION,
@@ -1851,6 +2819,10 @@ static CodexFastTextSignals codex_fast_signals_from_string(CFTypeRef value) {
       || [normalized containsString:@"/fast"]
       || [normalized containsString:@"빠른 모드"]
       || [normalized containsString:@"고속 모드"];
+    signals.standard_mode_context = [normalized containsString:@"standard mode"]
+      || [normalized containsString:@"standard-mode"]
+      || [normalized containsString:@"standard 모드"]
+      || [normalized containsString:@"표준 모드"];
     signals.enable_action = codex_fast_text_contains_any(normalized, @[
       @"turn on", @"switch on", @"enable", @"activate",
       @"켜기", @"사용하기", @"활성화"
@@ -1895,6 +2867,7 @@ static void merge_codex_fast_signals(
   CodexFastTextSignals source
 ) {
   destination->fast_context |= source.fast_context;
+  destination->standard_mode_context |= source.standard_mode_context;
   destination->speed_context |= source.speed_context;
   destination->mentions_fast |= source.mentions_fast;
   destination->mentions_standard |= source.mentions_standard;
@@ -2065,6 +3038,29 @@ static void consider_codex_fast_option(
   }
 }
 
+static void consider_codex_intelligence_trigger(
+  CodexFastModeScan *scan,
+  AXUIElementRef element,
+  CGPoint position,
+  CGSize size,
+  bool expanded,
+  bool expanded_known,
+  const char *reasoning_effort
+) {
+  if (scan == NULL || element == NULL || reasoning_effort == NULL) return;
+  if (scan->intelligence_trigger == NULL) {
+    scan->intelligence_trigger = (AXUIElementRef)CFRetain(element);
+    scan->intelligence_trigger_count = 1;
+    scan->intelligence_trigger_position = position;
+    scan->intelligence_trigger_size = size;
+    scan->intelligence_trigger_expanded = expanded;
+    scan->intelligence_trigger_expanded_known = expanded_known;
+    scan->reasoning_effort = reasoning_effort;
+  } else if (!CFEqual(scan->intelligence_trigger, element)) {
+    scan->intelligence_trigger_count += 1;
+  }
+}
+
 static CodexFastModeValue codex_fast_semantic_value(
   CodexFastTextSignals signals
 ) {
@@ -2073,8 +3069,16 @@ static CodexFastModeValue codex_fast_semantic_value(
   // button's action label to infer the inverse current state.
   if (signals.explicit_on && !signals.explicit_off) return CODEX_FAST_MODE_ON;
   if (signals.explicit_off && !signals.explicit_on) return CODEX_FAST_MODE_OFF;
-  if (signals.disable_action && !signals.enable_action) return CODEX_FAST_MODE_ON;
-  if (signals.enable_action && !signals.disable_action) return CODEX_FAST_MODE_OFF;
+  if (signals.fast_context) {
+    if (signals.disable_action && !signals.enable_action) return CODEX_FAST_MODE_ON;
+    if (signals.enable_action && !signals.disable_action) return CODEX_FAST_MODE_OFF;
+  }
+  // "Enable standard mode" is shown only while Fast is currently enabled;
+  // its target is the inverse of "Enable fast mode".
+  if (signals.standard_mode_context) {
+    if (signals.enable_action && !signals.disable_action) return CODEX_FAST_MODE_ON;
+    if (signals.disable_action && !signals.enable_action) return CODEX_FAST_MODE_OFF;
+  }
   if (signals.speed_context && signals.mentions_fast && !signals.mentions_standard) {
     return CODEX_FAST_MODE_ON;
   }
@@ -2171,6 +3175,12 @@ static void collect_codex_fast_mode_controls(
     selected = true;
     has_selected = true;
   }
+  bool expanded = false;
+  bool has_expanded = codex_fast_batched_boolean(
+    values,
+    FAST_ATTR_EXPANDED,
+    &expanded
+  );
   bool boolean_value = false;
   bool has_boolean_value = codex_fast_batched_boolean(
     values,
@@ -2200,6 +3210,23 @@ static void collect_codex_fast_mode_controls(
   bool supports_press = actionable_role && !hidden && enabled
     && codex_accessibility_element_supports_press(element);
 
+  if ((is_button || is_popup) && !hidden && enabled && in_control_region
+      && supports_press) {
+    CodexIntelligenceTextState intelligence = { 0 };
+    collect_codex_intelligence_text_state(element, 0, &intelligence);
+    if (intelligence.model_context && intelligence.effort != NULL) {
+      consider_codex_intelligence_trigger(
+        scan,
+        element,
+        position,
+        size,
+        expanded,
+        has_expanded,
+        intelligence.effort
+      );
+    }
+  }
+
   if (is_option && (in_control_region || plausible_option)) {
     scan->available = true;
     CodexFastModeValue option = signals.exact_fast
@@ -2227,13 +3254,21 @@ static void collect_codex_fast_mode_controls(
   // A model or reasoning popup also lives in the composer. Never classify a
   // generic AXPopUpButton as the speed selector unless its own fixed metadata
   // names Speed/Fast/Standard.
-  bool selector = in_control_region && (
+  bool popup_control_region = scan->allow_popup_options && plausible_option;
+  bool selector = (in_control_region || popup_control_region) && (
     (is_popup && (signals.exact_speed || signals.speed_context
       || signals.fast_context || signals.exact_fast || signals.exact_standard))
-    || ((is_button || is_radio) && (signals.exact_speed || signals.speed_context))
+    || ((is_button || is_radio || (popup_control_region && is_menu_item))
+      && (signals.exact_speed || signals.speed_context))
   );
-  bool direct = in_control_region && (is_button || is_checkbox || is_radio)
+  bool compact_popup_toggle = popup_control_region
+    && (is_menu_item || is_checkbox)
+    && (signals.fast_context || signals.standard_mode_context)
+    && (signals.enable_action || signals.disable_action);
+  bool direct = (in_control_region || compact_popup_toggle)
+    && (is_button || is_checkbox || is_radio || compact_popup_toggle)
     && (signals.fast_context || signals.exact_fast) && !selector && !is_option;
+  if (compact_popup_toggle) direct = !selector && !is_option;
   CodexFastModeValue semantic_value = codex_fast_semantic_value(signals);
   if (selector) {
     scan->available = true;
@@ -2253,7 +3288,9 @@ static void collect_codex_fast_mode_controls(
   } else if (direct) {
     scan->available = true;
     CodexFastModeValue direct_value = semantic_value;
-    int value_score = semantic_value == CODEX_FAST_MODE_UNKNOWN ? 0 : 440;
+    int value_score = semantic_value == CODEX_FAST_MODE_UNKNOWN
+      ? 0
+      : compact_popup_toggle ? 520 : 440;
     if (direct_value == CODEX_FAST_MODE_UNKNOWN && has_selected) {
       direct_value = selected ? CODEX_FAST_MODE_ON : CODEX_FAST_MODE_OFF;
       value_score = 420;
@@ -2265,7 +3302,9 @@ static void collect_codex_fast_mode_controls(
     if (supports_press) {
       // Prefer a selector over an unknowable blind toggle, but prefer a direct
       // toggle when its current state is explicit.
-      int control_score = direct_value == CODEX_FAST_MODE_UNKNOWN ? 330 : 430;
+      int control_score = direct_value == CODEX_FAST_MODE_UNKNOWN
+        ? 330
+        : compact_popup_toggle ? 510 : 430;
       consider_codex_fast_control(
         scan,
         element,
@@ -2292,9 +3331,11 @@ static void collect_codex_fast_mode_controls(
 
 static void release_codex_fast_mode_scan(CodexFastModeScan *scan) {
   if (scan == NULL) return;
+  if (scan->intelligence_trigger != NULL) CFRelease(scan->intelligence_trigger);
   if (scan->control != NULL) CFRelease(scan->control);
   if (scan->on_option != NULL) CFRelease(scan->on_option);
   if (scan->off_option != NULL) CFRelease(scan->off_option);
+  scan->intelligence_trigger = NULL;
   scan->control = NULL;
   scan->on_option = NULL;
   scan->off_option = NULL;
@@ -2335,6 +3376,7 @@ static bool copy_codex_fast_mode_scan(
     kAXRoleDescriptionAttribute,
     CFSTR("AXDOMIdentifier"),
     kAXSelectedAttribute,
+    kAXExpandedAttribute,
     kAXEnabledAttribute,
     kAXHiddenAttribute,
     kAXPositionAttribute,
@@ -2355,6 +3397,13 @@ static bool copy_codex_fast_mode_scan(
   }
   *scan = (CodexFastModeScan) {
     .attributes = attributes,
+    .intelligence_trigger = NULL,
+    .intelligence_trigger_count = 0,
+    .intelligence_trigger_position = CGPointZero,
+    .intelligence_trigger_size = CGSizeZero,
+    .intelligence_trigger_expanded = false,
+    .intelligence_trigger_expanded_known = false,
+    .reasoning_effort = NULL,
     .control = NULL,
     .control_kind = CODEX_FAST_CONTROL_NONE,
     .control_score = 0,
@@ -2384,14 +3433,38 @@ static bool copy_codex_fast_mode_scan(
     scan
   );
   if (scan->value_conflict) scan->value = CODEX_FAST_MODE_UNKNOWN;
+  bool intelligence_anchored = scan->composer_input_found
+    && scan->intelligence_trigger != NULL
+    && scan->intelligence_trigger_count == 1
+    && codex_fast_control_is_near_composer(
+      scan->intelligence_trigger_position,
+      scan->intelligence_trigger_size,
+      scan->composer_input_position,
+      scan->composer_input_size
+    );
+  if (!intelligence_anchored) {
+    if (scan->intelligence_trigger != NULL) CFRelease(scan->intelligence_trigger);
+    scan->intelligence_trigger = NULL;
+    scan->intelligence_trigger_count = 0;
+    scan->reasoning_effort = NULL;
+  }
   bool composer_anchored = scan->composer_input_found
     && scan->control != NULL
     && scan->control_count == 1
-    && codex_fast_control_is_near_composer(
-      scan->control_position,
-      scan->control_size,
-      scan->composer_input_position,
-      scan->composer_input_size
+    && (
+      codex_fast_control_is_near_composer(
+        scan->control_position,
+        scan->control_size,
+        scan->composer_input_position,
+        scan->composer_input_size
+      )
+      || (include_popup_options && intelligence_anchored
+        && codex_fast_option_geometry_is_plausible(
+          scan->control_position,
+          scan->control_size,
+          scan->window_origin,
+          scan->window_size
+        ))
     );
   if (!composer_anchored) {
     if (scan->control != NULL) CFRelease(scan->control);
@@ -2421,9 +3494,107 @@ static const char *codex_fast_mode_value_name(CodexFastModeValue value) {
       : "unknown";
 }
 
+static bool perform_codex_accessibility_press(AXUIElementRef element);
+
+static bool codex_intelligence_trigger_expanded(
+  AXUIElementRef trigger,
+  bool *expanded_out
+) {
+  if (trigger == NULL || expanded_out == NULL) return false;
+  CFTypeRef value = NULL;
+  AXError error = AXUIElementCopyAttributeValue(trigger, kAXExpandedAttribute, &value);
+  bool known = error == kAXErrorSuccess && value != NULL
+    && CFGetTypeID(value) == CFBooleanGetTypeID();
+  if (known) *expanded_out = CFBooleanGetValue((CFBooleanRef)value);
+  if (value != NULL) CFRelease(value);
+  return known;
+}
+
+static void close_codex_intelligence_popover_if_opened(AXUIElementRef trigger) {
+  if (trigger == NULL || !codex_is_frontmost()) return;
+  bool expanded = false;
+  if (codex_intelligence_trigger_expanded(trigger, &expanded)) {
+    if (expanded) perform_codex_accessibility_press(trigger);
+    return;
+  }
+
+  // Chromium normally exposes AXExpanded. If an older build omits it, press
+  // the trigger only while an anchored speed control proves the popover is
+  // still visible; this avoids reopening a menu that closed after selection.
+  CodexFastModeScan scan = { 0 };
+  bool popup_visible = copy_codex_fast_mode_scan(true, &scan)
+    && scan.intelligence_trigger != NULL
+    && scan.control != NULL
+    && scan.control_count == 1;
+  release_codex_fast_mode_scan(&scan);
+  if (popup_visible) perform_codex_accessibility_press(trigger);
+}
+
+static bool copy_codex_fast_mode_scan_with_intelligence_fallback(
+  CodexFastModeScan *scan,
+  AXUIElementRef *opened_trigger_out
+) {
+  if (scan == NULL) return false;
+  if (opened_trigger_out != NULL) *opened_trigger_out = NULL;
+
+  CodexFastModeScan shallow = { 0 };
+  if (!copy_codex_fast_mode_scan(false, &shallow)) return false;
+  if (shallow.value != CODEX_FAST_MODE_UNKNOWN
+      || shallow.intelligence_trigger == NULL
+      || shallow.intelligence_trigger_count != 1) {
+    *scan = shallow;
+    return true;
+  }
+
+  AXUIElementRef trigger = (AXUIElementRef)CFRetain(shallow.intelligence_trigger);
+  bool expanded = shallow.intelligence_trigger_expanded;
+  bool expanded_known = shallow.intelligence_trigger_expanded_known;
+  if (!expanded_known) {
+    expanded_known = codex_intelligence_trigger_expanded(trigger, &expanded);
+  }
+  bool opened_here = !(expanded_known && expanded);
+  if (opened_here && !perform_codex_accessibility_press(trigger)) {
+    CFRelease(trigger);
+    *scan = shallow;
+    return true;
+  }
+  release_codex_fast_mode_scan(&shallow);
+
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.85;
+  CodexFastModeScan last = { 0 };
+  bool have_last = false;
+  do {
+    CodexFastModeScan candidate = { 0 };
+    if (copy_codex_fast_mode_scan(true, &candidate)) {
+      if (have_last) release_codex_fast_mode_scan(&last);
+      last = candidate;
+      have_last = true;
+      if (last.value != CODEX_FAST_MODE_UNKNOWN || last.available) break;
+    }
+    usleep(45000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+
+  if (!have_last) {
+    if (opened_here) close_codex_intelligence_popover_if_opened(trigger);
+    CFRelease(trigger);
+    return false;
+  }
+  *scan = last;
+  if (opened_here && opened_trigger_out != NULL) {
+    *opened_trigger_out = trigger;
+  } else {
+    CFRelease(trigger);
+  }
+  return true;
+}
+
 static int print_codex_fast_mode_state(void) {
   CodexFastModeScan scan = { 0 };
-  bool scanned = copy_codex_fast_mode_scan(false, &scan);
+  AXUIElementRef opened_trigger = NULL;
+  bool scanned = copy_codex_fast_mode_scan_with_intelligence_fallback(
+    &scan,
+    &opened_trigger
+  );
   CodexFastModeValue value = scanned ? scan.value : CODEX_FAST_MODE_UNKNOWN;
   printf(
     "state=%s available=%d confidence=%d visited=%u\n",
@@ -2432,10 +3603,45 @@ static int print_codex_fast_mode_state(void) {
     scanned ? scan.value_score : 0,
     scanned ? scan.visited : 0
   );
+  close_codex_intelligence_popover_if_opened(opened_trigger);
+  if (opened_trigger != NULL) CFRelease(opened_trigger);
   release_codex_fast_mode_scan(&scan);
   // Known on and off states are both successful queries. Unknown remains a
   // distinct exit so callers never silently render a stale toggle state.
   return value == CODEX_FAST_MODE_UNKNOWN ? 2 : 0;
+}
+
+static int print_codex_composer_state(void) {
+  CodexFastModeScan scan = { 0 };
+  AXUIElementRef opened_trigger = NULL;
+  bool scanned = copy_codex_fast_mode_scan_with_intelligence_fallback(
+    &scan,
+    &opened_trigger
+  );
+  const char *reasoning = scanned && scan.reasoning_effort != NULL
+    ? scan.reasoning_effort
+    : "unknown";
+  const char *service_tier = scanned && scan.value == CODEX_FAST_MODE_ON
+    ? "priority"
+    : scanned && scan.value == CODEX_FAST_MODE_OFF
+      ? "default"
+      : "unknown";
+  bool reasoning_available = strcmp(reasoning, "unknown") != 0;
+  bool service_tier_available = strcmp(service_tier, "unknown") != 0;
+  printf(
+    "reasoning=%s service_tier=%s available=%d reasoning_available=%d service_tier_available=%d confidence=%d visited=%u\n",
+    reasoning,
+    service_tier,
+    reasoning_available || service_tier_available ? 1 : 0,
+    reasoning_available ? 1 : 0,
+    service_tier_available ? 1 : 0,
+    scanned ? scan.value_score : 0,
+    scanned ? scan.visited : 0
+  );
+  close_codex_intelligence_popover_if_opened(opened_trigger);
+  if (opened_trigger != NULL) CFRelease(opened_trigger);
+  release_codex_fast_mode_scan(&scan);
+  return reasoning_available || service_tier_available ? 0 : 2;
 }
 
 static CodexFastAction codex_fast_action_for_state(
@@ -2471,10 +3677,16 @@ static CodexFastModeValue wait_for_codex_fast_mode_value(
   CodexFastModeValue last = CODEX_FAST_MODE_UNKNOWN;
   do {
     CodexFastModeScan scan = { 0 };
-    if (!copy_codex_fast_mode_scan(false, &scan)) return CODEX_FAST_MODE_UNKNOWN;
+    AXUIElementRef opened_trigger = NULL;
+    if (!copy_codex_fast_mode_scan_with_intelligence_fallback(
+          &scan,
+          &opened_trigger
+        )) return CODEX_FAST_MODE_UNKNOWN;
     last = scan.value;
     if (confidence_out != NULL) *confidence_out = scan.value_score;
     if (visited_out != NULL) *visited_out = scan.visited;
+    close_codex_intelligence_popover_if_opened(opened_trigger);
+    if (opened_trigger != NULL) CFRelease(opened_trigger);
     release_codex_fast_mode_scan(&scan);
     if (last == requested) return last;
     usleep(60000);
@@ -2516,7 +3728,11 @@ static int set_codex_fast_mode(CodexFastModeValue requested) {
 
   for (unsigned attempt = 0; attempt < 2; attempt += 1) {
     CodexFastModeScan scan = { 0 };
-    if (!copy_codex_fast_mode_scan(false, &scan)) break;
+    AXUIElementRef opened_trigger = NULL;
+    if (!copy_codex_fast_mode_scan_with_intelligence_fallback(
+          &scan,
+          &opened_trigger
+        )) break;
     observed = scan.value;
     confidence = scan.value_score;
     visited = scan.visited;
@@ -2531,6 +3747,8 @@ static int set_codex_fast_mode(CodexFastModeValue requested) {
       exact_option_available
     );
     if (action == CODEX_FAST_ACTION_NONE) {
+      close_codex_intelligence_popover_if_opened(opened_trigger);
+      if (opened_trigger != NULL) CFRelease(opened_trigger);
       release_codex_fast_mode_scan(&scan);
       printf(
         "requested=%s state=%s changed=%d verified=1 available=%d attempts=%u confidence=%d visited=%u\n",
@@ -2545,6 +3763,8 @@ static int set_codex_fast_mode(CodexFastModeValue requested) {
       return 0;
     }
     if (action == CODEX_FAST_ACTION_UNAVAILABLE) {
+      close_codex_intelligence_popover_if_opened(opened_trigger);
+      if (opened_trigger != NULL) CFRelease(opened_trigger);
       release_codex_fast_mode_scan(&scan);
       break;
     }
@@ -2572,6 +3792,8 @@ static int set_codex_fast_mode(CodexFastModeValue requested) {
       }
     }
     release_codex_fast_mode_scan(&scan);
+    close_codex_intelligence_popover_if_opened(opened_trigger);
+    if (opened_trigger != NULL) CFRelease(opened_trigger);
     if (!acted) break;
     changed = true;
     action_attempts += 1;
@@ -2639,6 +3861,12 @@ static int codex_fast_mode_selftest(void) {
   CodexFastTextSignals disabled = codex_fast_signals_from_string(
     CFSTR("Fast mode disabled")
   );
+  CodexFastTextSignals enable_standard = codex_fast_signals_from_string(
+    CFSTR("Enable standard mode")
+  );
+  CodexFastTextSignals korean_enable_standard = codex_fast_signals_from_string(
+    CFSTR("Standard 모드 활성화")
+  );
   CodexFastTextSignals breakfast = codex_fast_signals_from_string(
     CFSTR("Breakfast discussion")
   );
@@ -2660,6 +3888,13 @@ static int codex_fast_mode_selftest(void) {
     && !breakfast.speed_context
     && !breakfast.exact_fast;
   bool split_speed_value = codex_fast_semantic_value(speed) == CODEX_FAST_MODE_ON;
+  CodexFastTextSignals standard_speed = codex_fast_signals_from_string(
+    CFSTR("Speed Standard")
+  );
+  bool compact_target_inversion = codex_fast_semantic_value(enable_standard)
+      == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(korean_enable_standard) == CODEX_FAST_MODE_ON
+    && codex_fast_semantic_value(standard_speed) == CODEX_FAST_MODE_OFF;
   bool idempotent_plan = codex_fast_action_for_state(
     CODEX_FAST_MODE_ON,
     CODEX_FAST_MODE_ON,
@@ -2717,10 +3952,11 @@ static int codex_fast_mode_selftest(void) {
     CGSizeMake(600, 120)
   );
   printf(
-    "localized_labels=%d exact_context_only=%d split_speed_value=%d idempotent_plan=%d known_direct_toggle=%d unknown_direct_rejected=%d unknown_selector_exact=%d exact_option_beats_direct=%d composer_geometry=%d body_rejected=%d composer_anchored=%d foreign_panel_rejected=%d\n",
+    "localized_labels=%d exact_context_only=%d split_speed_value=%d compact_target_inversion=%d idempotent_plan=%d known_direct_toggle=%d unknown_direct_rejected=%d unknown_selector_exact=%d exact_option_beats_direct=%d composer_geometry=%d body_rejected=%d composer_anchored=%d foreign_panel_rejected=%d\n",
     localized_labels ? 1 : 0,
     exact_context_only ? 1 : 0,
     split_speed_value ? 1 : 0,
+    compact_target_inversion ? 1 : 0,
     idempotent_plan ? 1 : 0,
     known_direct_toggle ? 1 : 0,
     unknown_direct_rejected ? 1 : 0,
@@ -2732,6 +3968,7 @@ static int codex_fast_mode_selftest(void) {
     foreign_panel_rejected ? 1 : 0
   );
   return localized_labels && exact_context_only && split_speed_value
+    && compact_target_inversion
     && idempotent_plan && known_direct_toggle && unknown_direct_rejected
     && unknown_selector_exact && exact_option_beats_direct
     && composer_control && body_rejected
@@ -4516,8 +5753,10 @@ int main(int argc, char **argv) {
     return voice_release_retry_selftest();
   }
   if (strcmp(argv[1], "reasoning-state-selftest") == 0) return reasoning_state_selftest();
+  if (strcmp(argv[1], "goal-state-selftest") == 0) return goal_state_selftest();
   if (strcmp(argv[1], "fast-mode-selftest") == 0) return codex_fast_mode_selftest();
   if (strcmp(argv[1], "fast-mode-state") == 0) return print_codex_fast_mode_state();
+  if (strcmp(argv[1], "codex-composer-state") == 0) return print_codex_composer_state();
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) return voice_up() ? 0 : 1;
   else if (strcmp(argv[1], "send") == 0) tap_key(KEY_RETURN, 0);
@@ -4556,6 +5795,7 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "editable-element-info") == 0) return print_editable_element_info();
   else if (strcmp(argv[1], "selected-element-info") == 0) return print_selected_element_info();
   else if (strcmp(argv[1], "codex-reasoning-state") == 0) return print_codex_reasoning_state();
+  else if (strcmp(argv[1], "codex-goal-state") == 0) return print_codex_goal_state();
   else if (strcmp(argv[1], "codex-queue-state") == 0) return print_codex_queue_state();
   else if (strcmp(argv[1], "codex-stop-dictation") == 0) {
     return stop_codex_composer_dictation_if_visible() ? 0 : 1;

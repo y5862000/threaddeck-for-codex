@@ -16,6 +16,12 @@ const REASONING_EFFORT_VALUES = new Set([
   "max",
   "ultra"
 ]);
+const SERVICE_TIER_ALIASES = new Map([
+  ["default", "default"],
+  ["standard", "default"],
+  ["priority", "priority"],
+  ["fast", "priority"]
+]);
 
 const REMOTE_ACTIVITY_VERB_GROUPS = [
   [/^(?:planning|designing|defining|formulating|outlining|proposing|prioritizing|scheduling|specifying|clarifying)$/, { kind: "think", label: "계획 중" }],
@@ -33,6 +39,11 @@ const REMOTE_ACTIVITY_VERB_GROUPS = [
 function normalizedReasoningEffort(value) {
   const normalized = String(value ?? "").trim().toLowerCase();
   return REASONING_EFFORT_VALUES.has(normalized) ? normalized : null;
+}
+
+function normalizedServiceTier(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return SERVICE_TIER_ALIASES.get(normalized) ?? null;
 }
 
 function remoteTurnStatus(value) {
@@ -367,22 +378,122 @@ function parseCodexReasoningState(output) {
   return normalizedReasoningEffort(effort);
 }
 
-function reasoningEffortForRemoteThread(thread, lifecycle, efforts) {
-  const summaryEffort = normalizedReasoningEffort(thread.reasoningEffort);
-  if (summaryEffort) return summaryEffort;
-  const observed = efforts.get(thread.id);
-  const observedEffort = normalizedReasoningEffort(observed?.effort);
-  if (!observedEffort) return null;
+function parseCodexComposerState(output) {
+  const text = String(output ?? "");
+  const reasoning = text.match(
+    /(?:^|\s)(?:reasoning|effort)=(none|minimal|low|medium|high|xhigh|max|ultra|unknown)(?:\s|$)/i
+  )?.[1];
+  const serviceTier = text.match(
+    /(?:^|\s)service_tier=(priority|default|fast|standard|unknown)(?:\s|$)/i
+  )?.[1];
+  const available = text.match(/(?:^|\s)available=([01])(?:\s|$)/)?.[1] === "1";
+  const reasoningAvailableMatch = text.match(
+    /(?:^|\s)reasoning_available=([01])(?:\s|$)/
+  )?.[1];
+  const serviceTierAvailableMatch = text.match(
+    /(?:^|\s)service_tier_available=([01])(?:\s|$)/
+  )?.[1];
+  const reasoningEffort = normalizedReasoningEffort(reasoning);
+  const normalizedTier = normalizedServiceTier(serviceTier);
+  return {
+    reasoningEffort,
+    serviceTier: normalizedTier,
+    available,
+    reasoningAvailable: reasoningAvailableMatch === undefined
+      ? reasoningEffort !== null
+      : reasoningAvailableMatch === "1",
+    serviceTierAvailable: serviceTierAvailableMatch === undefined
+      ? normalizedTier !== null
+      : serviceTierAvailableMatch === "1"
+  };
+}
+
+function remoteComposerObservationTurnsMatch(observed, lifecycle) {
+  if (!observed || !lifecycle) return false;
+  const currentTurnId = lifecycle.latestTurnId ?? null;
+  if (observed.turnId && currentTurnId) return observed.turnId === currentTurnId;
+  return Number.isFinite(observed.turnStartedAtMs)
+    && Number.isFinite(lifecycle.startedAtMs)
+    && Math.abs(observed.turnStartedAtMs - lifecycle.startedAtMs)
+      <= REMOTE_REASONING_TURN_TOLERANCE_MS;
+}
+
+function recordRemoteComposerStateObservation(
+  thread,
+  lifecycle,
+  state,
+  observedAtMs,
+  observations
+) {
+  if (!UUID_PATTERN.test(thread?.id ?? "")
+      || !(observations instanceof Map)
+      || !Number.isFinite(observedAtMs)
+      || !lifecycle
+      || (!lifecycle.latestTurnId && !Number.isFinite(lifecycle.startedAtMs))) {
+    return false;
+  }
+  const reasoningEffort = state?.reasoningAvailable === false
+    ? null
+    : normalizedReasoningEffort(state?.reasoningEffort ?? state?.effort);
+  const serviceTier = state?.serviceTierAvailable === false
+    ? null
+    : normalizedServiceTier(state?.serviceTier);
+  if (!reasoningEffort && !serviceTier) return false;
+  if (Number.isFinite(lifecycle.startedAtMs)
+      && observedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < lifecycle.startedAtMs) {
+    return false;
+  }
+
+  const candidateTurn = {
+    turnId: lifecycle.latestTurnId ?? null,
+    turnStartedAtMs: Number.isFinite(lifecycle.startedAtMs)
+      ? lifecycle.startedAtMs
+      : null
+  };
+  const previous = observations.get(thread.id) ?? null;
+  const sameTurn = remoteComposerObservationTurnsMatch(previous, lifecycle);
+  if (sameTurn && Number.isFinite(previous?.observedAtMs)
+      && observedAtMs < previous.observedAtMs) return false;
+
+  const next = {
+    ...candidateTurn,
+    reasoningEffort: reasoningEffort
+      ?? (sameTurn ? normalizedReasoningEffort(previous?.reasoningEffort ?? previous?.effort) : null),
+    serviceTier: serviceTier
+      ?? (sameTurn ? normalizedServiceTier(previous?.serviceTier) : null),
+    observedAtMs
+  };
+  observations.set(thread.id, next);
+  return true;
+}
+
+function composerStateForRemoteThread(thread, lifecycle, observations) {
+  const explicitReasoning = normalizedReasoningEffort(thread?.reasoningEffort);
+  const explicitTier = normalizedServiceTier(thread?.serviceTier);
+  if (!thread?.id || !(observations instanceof Map)) {
+    return { reasoningEffort: explicitReasoning, serviceTier: explicitTier };
+  }
+  const observed = observations.get(thread.id) ?? null;
+  if (!remoteComposerObservationTurnsMatch(observed, lifecycle)) {
+    return { reasoningEffort: explicitReasoning, serviceTier: explicitTier };
+  }
   if (Number.isFinite(lifecycle?.startedAtMs)
       && observed.observedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < lifecycle.startedAtMs) {
-    return null;
+    return { reasoningEffort: explicitReasoning, serviceTier: explicitTier };
   }
-  if (Number.isFinite(lifecycle?.startedAtMs)
-      && Number.isFinite(observed.turnStartedAtMs)
-      && Math.abs(observed.turnStartedAtMs - lifecycle.startedAtMs) > REMOTE_REASONING_TURN_TOLERANCE_MS) {
-    return null;
-  }
-  return observedEffort;
+  return {
+    reasoningEffort: explicitReasoning
+      ?? normalizedReasoningEffort(observed.reasoningEffort ?? observed.effort),
+    serviceTier: explicitTier ?? normalizedServiceTier(observed.serviceTier)
+  };
+}
+
+function reasoningEffortForRemoteThread(thread, lifecycle, efforts) {
+  return composerStateForRemoteThread(thread, lifecycle, efforts).reasoningEffort;
+}
+
+function serviceTierForRemoteThread(thread, lifecycle, observations) {
+  return composerStateForRemoteThread(thread, lifecycle, observations).serviceTier;
 }
 
 function observeRemoteRuntimeEnd(thread, lifecycle, nowMs = Date.now(), observations) {
@@ -465,6 +576,7 @@ function deriveRemoteStatus(thread, options) {
     nowMs = Date.now(),
     lifecycle: suppliedLifecycle,
     reasoningEfforts,
+    composerStates,
     runtimeObservations,
     activities
   } = options;
@@ -472,8 +584,13 @@ function deriveRemoteStatus(thread, options) {
   const lifecycle = suppliedLifecycle ?? null;
   const startedAtMs = Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null;
   const runtimeEnd = observeRemoteRuntimeEnd(thread, lifecycle, nowMs, runtimeObservations);
-  const reasoningEffort = reasoningEffortForRemoteThread(thread, lifecycle, reasoningEfforts);
-  const serviceTier = typeof thread.serviceTier === "string" ? thread.serviceTier : "default";
+  const composerState = composerStateForRemoteThread(
+    thread,
+    lifecycle,
+    composerStates instanceof Map ? composerStates : reasoningEfforts
+  );
+  const reasoningEffort = composerState.reasoningEffort;
+  const serviceTier = composerState.serviceTier;
   const observedActivity = remoteWorkingActivity(thread, lifecycle, nowMs, activities)
     ?? { kind: "command", label: "원격 작업" };
 
@@ -571,6 +688,7 @@ module.exports = {
   REMOTE_REASONING_SUMMARY_MAX_LENGTH,
   REASONING_EFFORT_VALUES,
   normalizedReasoningEffort,
+  normalizedServiceTier,
   uuidV7TimestampMs,
   remoteTurnStatus,
   classifyRemoteReasoningSummary,
@@ -581,7 +699,11 @@ module.exports = {
   remoteWorkingActivity,
   applyRemoteLifecycleLogLine,
   parseCodexReasoningState,
+  parseCodexComposerState,
+  recordRemoteComposerStateObservation,
+  composerStateForRemoteThread,
   reasoningEffortForRemoteThread,
+  serviceTierForRemoteThread,
   observeRemoteRuntimeEnd,
   deriveRemoteStatus
 };
