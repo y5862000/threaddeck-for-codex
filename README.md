@@ -77,7 +77,7 @@ The bundled profile contains three pages. You can rearrange the supplied actions
 - **Green completion pulse:** every visible ThreadDeck-owned key receives the first completion frame together; the matching task then pulses longer and more strongly.
 - **Queue-advance pulse:** when Codex starts the next queued follow-up, the reduced queue count is acknowledged as another completed turn.
 
-For an explicitly pinned remote task, ThreadDeck reconstructs the latest turn's start from Codex's UUIDv7 turn ID and freezes the timer at the remote summary's server-side update time. Reasoning intensity is accepted only from the exact focused task's visible composer setting (or explicit remote metadata); if Codex does not expose it, the track stays empty instead of assuming Medium.
+For an explicitly pinned remote task, ThreadDeck reconstructs the latest turn's start from Codex's UUIDv7 turn ID and freezes the timer only at an explicit terminal lifecycle marker or a confirmed `active` → `notLoaded` transition observed live. Remote-summary update timestamps are used for ordering, never as completion times; if no trustworthy end boundary is available after a cold start, the duration stays unknown instead of showing a fabricated short value. Reasoning intensity is accepted only from the exact focused task's visible composer setting (or explicit remote metadata); if Codex does not expose it, the track stays empty instead of assuming Medium.
 
 ## Quick start
 

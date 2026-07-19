@@ -22,7 +22,7 @@ It:
 - connects to Stream Deck through the localhost plugin WebSocket;
 - merges pinned and recent local SQLite tasks with only explicitly pinned cached remote summaries from Codex JSON state, deduplicating by conversation ID;
 - normalizes working, completed, queued, error, and idle states;
-- tracks start/end timestamps and freezes completed durations;
+- reconstructs remote starts from UUIDv7 turn IDs and freezes ends only from explicit lifecycle markers or confirmed live runtime transitions, never summary recency timestamps;
 - tracks the active Desktop session so closed temporary Side Chats do not reappear as ordinary tasks;
 - renders every ThreadDeck-owned 144 × 144 key as SVG;
 - animates active reasoning cues, queue-advance acknowledgements, and completion pulses;

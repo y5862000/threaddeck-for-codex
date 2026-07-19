@@ -115,6 +115,8 @@ const SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES = 64 * 1024 * 1024;
 const REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES = 32 * 1024 * 1024;
 const REMOTE_REASONING_PROBE_CACHE_MS = 5_000;
 const REMOTE_REASONING_TURN_TOLERANCE_MS = 5_000;
+const REMOTE_RUNTIME_TERMINAL_CONFIRM_MS = 1_200;
+const REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS = 10_000;
 const REASONING_EFFORT_VALUES = new Set([
   "none",
   "minimal",
@@ -288,6 +290,7 @@ const sideChatCloseLogOffsets = new Map();
 const remoteLifecycleCache = new Map();
 const remoteLifecycleLogOffsets = new Map();
 const remoteReasoningEffortByThreadId = new Map();
+const remoteRuntimeObservationByThreadId = new Map();
 const queueStateByThreadId = new Map();
 let remoteReasoningProbe = { threadId: null, checkedAtMs: 0 };
 
@@ -2213,16 +2216,27 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
         && nextStartedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.startedAtMs) {
       return false;
     }
+    const latestTurnId = Object.hasOwn(next, "latestTurnId")
+      ? next.latestTurnId
+      : previous?.latestTurnId ?? null;
+    const turnChanged = Boolean(
+      previous?.latestTurnId
+      && latestTurnId
+      && previous.latestTurnId !== latestTurnId
+    );
     lifecycles.set(threadId, {
       status: next.status ?? previous?.status ?? "idle",
       startedAtMs: nextStartedAtMs,
-      endedAtMs: Object.hasOwn(next, "endedAtMs") ? next.endedAtMs : previous?.endedAtMs ?? null,
-      latestTurnId: Object.hasOwn(next, "latestTurnId")
-        ? next.latestTurnId
-        : previous?.latestTurnId ?? null,
+      endedAtMs: Object.hasOwn(next, "endedAtMs")
+        ? next.endedAtMs
+        : turnChanged ? null : previous?.endedAtMs ?? null,
+      latestTurnId,
+      lastActivityAtMs: Object.hasOwn(next, "lastActivityAtMs")
+        ? next.lastActivityAtMs
+        : turnChanged ? null : previous?.lastActivityAtMs ?? null,
       terminalObservedAtMs: Object.hasOwn(next, "terminalObservedAtMs")
         ? next.terminalObservedAtMs
-        : previous?.terminalObservedAtMs ?? null,
+        : turnChanged ? null : previous?.terminalObservedAtMs ?? null,
       observedAtMs: Math.max(timestampMs, previous?.observedAtMs ?? 0)
     });
     return true;
@@ -2234,14 +2248,15 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
     const status = remoteTurnStatus(line.match(/latestTurnStatus=([^ ]+)/i)?.[1]);
     const startedAtMs = uuidV7TimestampMs(turnId);
     if (!threadId || !turnId || !status || !Number.isFinite(startedAtMs)) return false;
-    const terminal = ["completed", "stopped", "error"].includes(status);
     const resumed = {
       status,
       startedAtMs,
-      latestTurnId: turnId,
-      terminalObservedAtMs: terminal ? timestampMs : null
+      latestTurnId: turnId
     };
-    if (status === "working") resumed.endedAtMs = null;
+    if (status === "working") {
+      resumed.endedAtMs = null;
+      resumed.lastActivityAtMs = timestampMs;
+    }
     return update(threadId, resumed);
   }
 
@@ -2252,6 +2267,7 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
       startedAtMs: timestampMs,
       endedAtMs: null,
       latestTurnId: null,
+      lastActivityAtMs: timestampMs,
       terminalObservedAtMs: null
     });
   }
@@ -2266,6 +2282,7 @@ function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
       startedAtMs,
       endedAtMs: null,
       latestTurnId: turnId,
+      lastActivityAtMs: timestampMs,
       terminalObservedAtMs: null
     });
   }
@@ -2385,15 +2402,95 @@ function reasoningEffortForRemoteThread(thread, lifecycle) {
   return observedEffort;
 }
 
-function remoteStatusForThread(thread) {
+function observeRemoteRuntimeEnd(
+  thread,
+  lifecycle,
+  nowMs = Date.now(),
+  observations = remoteRuntimeObservationByThreadId
+) {
+  const startedAtMs = Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null;
+  if (!thread?.id || !Number.isFinite(startedAtMs)) {
+    if (thread?.id) observations.delete(thread.id);
+    return { endedAtMs: null, inactiveSinceMs: null, pending: false, wasActive: false };
+  }
+
+  const turnId = lifecycle?.latestTurnId ?? null;
+  const existing = observations.get(thread.id) ?? null;
+  const sameTurn = existing
+    && (
+      turnId && existing.turnId
+        ? turnId === existing.turnId
+        : Math.abs(existing.turnStartedAtMs - startedAtMs) <= REMOTE_REASONING_TURN_TOLERANCE_MS
+    );
+  const observationGapMs = Number.isFinite(existing?.lastObservedAtMs)
+    ? nowMs - existing.lastObservedAtMs
+    : Number.POSITIVE_INFINITY;
+  const continuousObservation = observationGapMs >= 0
+    && observationGapMs <= REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS;
+  const previous = sameTurn
+    && (continuousObservation || Number.isFinite(existing?.endedAtMs))
+    ? existing
+    : null;
+  const runtimeType = String(thread.threadRuntimeStatus?.type ?? "notLoaded");
+
+  if (runtimeType === "active") {
+    const next = {
+      turnId,
+      turnStartedAtMs: startedAtMs,
+      wasActive: true,
+      inactiveSinceMs: null,
+      endedAtMs: null,
+      runtimeType,
+      lastObservedAtMs: nowMs
+    };
+    observations.set(thread.id, next);
+    return { ...next, pending: false };
+  }
+
+  if (!previous?.wasActive) {
+    const next = {
+      turnId,
+      turnStartedAtMs: startedAtMs,
+      wasActive: false,
+      inactiveSinceMs: null,
+      endedAtMs: null,
+      runtimeType,
+      lastObservedAtMs: nowMs
+    };
+    observations.set(thread.id, next);
+    return { ...next, pending: false };
+  }
+
+  const inactiveSinceMs = Number.isFinite(previous.inactiveSinceMs)
+    ? previous.inactiveSinceMs
+    : nowMs;
+  const endedAtMs = Number.isFinite(previous.endedAtMs)
+    ? previous.endedAtMs
+    : nowMs - inactiveSinceMs >= REMOTE_RUNTIME_TERMINAL_CONFIRM_MS
+      ? inactiveSinceMs
+      : null;
+  const next = {
+    turnId,
+    turnStartedAtMs: startedAtMs,
+    wasActive: true,
+    inactiveSinceMs,
+    endedAtMs,
+    runtimeType,
+    lastObservedAtMs: nowMs
+  };
+  observations.set(thread.id, next);
+  return { ...next, pending: !Number.isFinite(endedAtMs) };
+}
+
+function remoteStatusForThread(
+  thread,
+  nowMs = Date.now(),
+  runtimeObservations = remoteRuntimeObservationByThreadId
+) {
   const runtimeStatus = thread.threadRuntimeStatus ?? { type: "notLoaded" };
   const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
   const startedAtMs = Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null;
-  const summaryEndMs = Number.isFinite(thread.updatedAtMs)
-    && Number.isFinite(startedAtMs)
-    && thread.updatedAtMs >= startedAtMs
-    ? thread.updatedAtMs
-    : null;
+  const runtimeEnd = observeRemoteRuntimeEnd(thread, lifecycle, nowMs, runtimeObservations);
   const reasoningEffort = reasoningEffortForRemoteThread(thread, lifecycle);
   const serviceTier = typeof thread.serviceTier === "string" ? thread.serviceTier : "default";
 
@@ -2425,10 +2522,19 @@ function remoteStatusForThread(thread) {
     };
   }
 
-  // The remote summary's updatedAt is the server-side latest-turn update. It
-  // provides the actual end boundary, while UUIDv7 gives the turn start even
-  // after the remote host has disconnected or the Desktop app has resumed.
-  if (Number.isFinite(startedAtMs) && lifecycle?.status === "working" && !summaryEndMs) {
+  const lifecycleTerminal = ["completed", "stopped", "error"].includes(lifecycle?.status);
+  const completionEvidence = lifecycleTerminal
+    || Number.isFinite(runtimeEnd.endedAtMs)
+    || (Boolean(thread.hasUnreadTurn) && runtimeStatus.type !== "active");
+
+  // A remote summary's updatedAt is a recency/cache timestamp and can remain
+  // near turn start while the remote task keeps working for many minutes. A
+  // transient non-active sample also needs confirmation before it freezes the
+  // timer; returning to active cancels that candidate, while a long observation
+  // gap is treated as a cold start instead of inventing an end at reappearance.
+  if (Number.isFinite(startedAtMs)
+      && lifecycle?.status === "working"
+      && (!completionEvidence || runtimeEnd.pending)) {
     return {
       status: "working",
       startedAtMs,
@@ -2438,17 +2544,20 @@ function remoteStatusForThread(thread) {
       activity: { kind: "command", label: "원격 작업" }
     };
   }
-  if (Number.isFinite(startedAtMs)
-      && (summaryEndMs || ["completed", "stopped", "error"].includes(lifecycle?.status))) {
+  if (Number.isFinite(startedAtMs) && completionEvidence) {
     const status = lifecycle?.status === "stopped"
       ? "stopped"
       : lifecycle?.status === "error"
         ? "error"
         : "completed";
-    const endedAtMs = summaryEndMs
-      ?? lifecycle?.endedAtMs
-      ?? lifecycle?.terminalObservedAtMs
-      ?? null;
+    const preferredEndMs = [
+      lifecycle?.endedAtMs,
+      runtimeEnd.endedAtMs,
+      lifecycle?.terminalObservedAtMs
+    ].find(Number.isFinite) ?? null;
+    const endedAtMs = Number.isFinite(preferredEndMs)
+      ? Math.max(preferredEndMs, lifecycle?.lastActivityAtMs ?? startedAtMs)
+      : null;
     return {
       status,
       startedAtMs,
@@ -2724,11 +2833,13 @@ async function readRemoteThreadRows() {
         const title = typeof summary?.title === "string" ? summary.title.trim() : "";
         if (!UUID_PATTERN.test(id ?? "") || !hostId || hostId === "local" || !title) continue;
 
-        const updatedAt = Number(summary?.recencyAt ?? summary?.updatedAt ?? 0);
-        const createdAt = Number(summary?.createdAt ?? updatedAt);
-        const updatedAtMs = updatedAt > 100_000_000_000 ? updatedAt : updatedAt * 1000;
+        const recencyAt = Number(summary?.recencyAt ?? summary?.updatedAt ?? 0);
+        const updatedAt = Number(summary?.updatedAt ?? recencyAt);
+        const createdAt = Number(summary?.createdAt ?? recencyAt);
+        const recencyAtMs = recencyAt > 100_000_000_000 ? recencyAt : recencyAt * 1000;
+        const summaryUpdatedAtMs = updatedAt > 100_000_000_000 ? updatedAt : updatedAt * 1000;
         const existing = byId.get(id);
-        if (existing && threadRecencyMs(existing) >= updatedAtMs) {
+        if (existing && threadRecencyMs(existing) >= recencyAtMs) {
           continue;
         }
         byId.set(id, {
@@ -2738,9 +2849,9 @@ async function readRemoteThreadRows() {
           title,
           cwd: typeof summary?.cwd === "string" ? summary.cwd : "",
           rollout_path: null,
-          recency_at: updatedAt,
-          updated_at: Number(summary?.updatedAt ?? updatedAt),
-          updatedAtMs,
+          recency_at: recencyAt,
+          updated_at: updatedAt,
+          summaryUpdatedAtMs,
           createdAtMs: createdAt > 100_000_000_000 ? createdAt : createdAt * 1000,
           hasUnreadTurn: Boolean(summary?.hasUnreadTurn),
           threadRuntimeStatus: summary?.threadRuntimeStatus ?? { type: "notLoaded" },
@@ -4074,6 +4185,7 @@ function verifyRemoteLifecyclePolicy() {
   const startConfigMs = startedAtMs - 192;
   const reasoningObservedMs = startedAtMs + 3_200;
   const endedAtMs = startedAtMs + 9 * 60_000 + 22_000;
+  const misleadingSummaryUpdatedAtMs = startedAtMs + 1_000;
   const lifecycles = new Map();
   applyRemoteLifecycleLogLine(
     `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${threadId}`,
@@ -4086,6 +4198,7 @@ function verifyRemoteLifecyclePolicy() {
   const parsed = lifecycles.get(threadId);
   remoteLifecycleCache.clear();
   remoteReasoningEffortByThreadId.clear();
+  remoteRuntimeObservationByThreadId.clear();
   remoteLifecycleCache.set(threadId, parsed);
   remoteReasoningEffortByThreadId.set(threadId, {
     effort: "high",
@@ -4093,23 +4206,29 @@ function verifyRemoteLifecyclePolicy() {
     turnStartedAtMs: startedAtMs
   });
 
+  const runtimeObservations = new Map();
   const active = remoteStatusForThread({
     id: threadId,
     remote: true,
-    updatedAtMs: startedAtMs - 10_000,
+    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
     threadRuntimeStatus: { type: "active", activeFlags: [] },
     reasoningEffort: null,
     serviceTier: "default"
-  });
+  }, startedAtMs + 10_000, runtimeObservations);
+
+  applyRemoteLifecycleLogLine(
+    `${new Date(endedAtMs).toISOString()} info [desktop-notifications] show turn-complete threadId=${threadId}`,
+    remoteLifecycleCache
+  );
   const completed = remoteStatusForThread({
     id: threadId,
     remote: true,
-    updatedAtMs: endedAtMs,
-    threadRuntimeStatus: { type: "idle" },
+    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
+    threadRuntimeStatus: { type: "notLoaded" },
     hasUnreadTurn: true,
     reasoningEffort: null,
     serviceTier: "default"
-  });
+  }, endedAtMs + 100, runtimeObservations);
 
   applyRemoteLifecycleLogLine(
     `${new Date(endedAtMs + 2_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=interrupted`,
@@ -4118,11 +4237,177 @@ function verifyRemoteLifecyclePolicy() {
   const stopped = remoteStatusForThread({
     id: threadId,
     remote: true,
-    updatedAtMs: endedAtMs,
-    threadRuntimeStatus: { type: "idle" },
+    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
+    threadRuntimeStatus: { type: "notLoaded" },
     reasoningEffort: null,
     serviceTier: "default"
+  }, endedAtMs + 2_000, runtimeObservations);
+  applyRemoteLifecycleLogLine(
+    `${new Date(endedAtMs + 5 * 60_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=completed`,
+    remoteLifecycleCache
+  );
+  applyRemoteLifecycleLogLine(
+    `${new Date(endedAtMs + 10 * 60_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=completed`,
+    remoteLifecycleCache
+  );
+  const repeatedResumePreservesFrozenEnd = remoteLifecycleCache.get(threadId)?.endedAtMs === endedAtMs
+    && remoteLifecycleCache.get(threadId)?.terminalObservedAtMs === endedAtMs;
+
+  const transitionThreadId = "019f0000-0000-7000-8000-000000000003";
+  const transitionTurnId = "019f77d5-d319-7000-8000-000000000004";
+  const transitionStartMs = uuidV7TimestampMs(transitionTurnId);
+  const transitionEndMs = transitionStartMs + 70_000;
+  remoteLifecycleCache.set(transitionThreadId, {
+    status: "working",
+    startedAtMs: transitionStartMs,
+    endedAtMs: null,
+    latestTurnId: transitionTurnId,
+    lastActivityAtMs: transitionStartMs + 30_000,
+    terminalObservedAtMs: null,
+    observedAtMs: transitionStartMs + 30_000
   });
+  const transitionObservations = new Map();
+  remoteStatusForThread({
+    id: transitionThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "active", activeFlags: [] }
+  }, transitionStartMs + 40_000, transitionObservations);
+  const transientInactive = remoteStatusForThread({
+    id: transitionThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "notLoaded" }
+  }, transitionStartMs + 50_000, transitionObservations);
+  const recoveredActive = remoteStatusForThread({
+    id: transitionThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "active", activeFlags: [] }
+  }, transitionStartMs + 50_500, transitionObservations);
+  remoteStatusForThread({
+    id: transitionThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "active", activeFlags: [] }
+  }, transitionEndMs - 5_000, transitionObservations);
+  const pendingTerminal = remoteStatusForThread({
+    id: transitionThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "notLoaded" }
+  }, transitionEndMs, transitionObservations);
+  const observedTerminal = remoteStatusForThread({
+    id: transitionThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "notLoaded" }
+  }, transitionEndMs + REMOTE_RUNTIME_TERMINAL_CONFIRM_MS, transitionObservations);
+  const runtimeTransitionRecovered = transientInactive.status === "working"
+    && recoveredActive.status === "working"
+    && pendingTerminal.status === "working"
+    && observedTerminal.status === "completed"
+    && observedTerminal.endedAtMs === transitionEndMs
+    && timingLabel(observedTerminal, transitionEndMs) === "01:10";
+
+  const coldThreadId = "019f0000-0000-7000-8000-000000000005";
+  remoteLifecycleCache.set(coldThreadId, {
+    status: "working",
+    startedAtMs,
+    endedAtMs: null,
+    latestTurnId: turnId,
+    lastActivityAtMs: startedAtMs + 5 * 60_000,
+    terminalObservedAtMs: null,
+    observedAtMs: startedAtMs + 5 * 60_000
+  });
+  const coldCompleted = remoteStatusForThread({
+    id: coldThreadId,
+    remote: true,
+    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
+    threadRuntimeStatus: { type: "notLoaded" },
+    hasUnreadTurn: true
+  }, endedAtMs, new Map());
+  const coldStartAvoidsFabricatedDuration = coldCompleted.status === "completed"
+    && coldCompleted.endedAtMs === null
+    && timingLabel(coldCompleted, endedAtMs) === "--:--";
+
+  const staleObservationThreadId = "019f0000-0000-7000-8000-000000000007";
+  remoteLifecycleCache.set(staleObservationThreadId, {
+    status: "working",
+    startedAtMs,
+    endedAtMs: null,
+    latestTurnId: turnId,
+    lastActivityAtMs: startedAtMs + 5 * 60_000,
+    terminalObservedAtMs: null,
+    observedAtMs: startedAtMs + 5 * 60_000
+  });
+  const staleObservations = new Map();
+  remoteStatusForThread({
+    id: staleObservationThreadId,
+    remote: true,
+    threadRuntimeStatus: { type: "active", activeFlags: [] }
+  }, startedAtMs + 10_000, staleObservations);
+  const staleObservationReappeared = remoteStatusForThread({
+    id: staleObservationThreadId,
+    remote: true,
+    threadRuntimeStatus: { type: "notLoaded" },
+    hasUnreadTurn: true
+  }, startedAtMs + 10_000 + REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS + 60_000, staleObservations);
+  const staleObservationConfirmed = remoteStatusForThread({
+    id: staleObservationThreadId,
+    remote: true,
+    threadRuntimeStatus: { type: "notLoaded" },
+    hasUnreadTurn: true
+  }, startedAtMs + 10_000 + REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS + 60_000
+    + REMOTE_RUNTIME_TERMINAL_CONFIRM_MS, staleObservations);
+  const staleRuntimeObservationIgnored = staleObservationReappeared.status === "completed"
+    && staleObservationReappeared.endedAtMs === null
+    && staleObservationConfirmed.status === "completed"
+    && staleObservationConfirmed.endedAtMs === null
+    && timingLabel(staleObservationConfirmed, endedAtMs) === "--:--";
+
+  const rolloverThreadId = "019f0000-0000-7000-8000-000000000006";
+  const previousTurnId = "019f77c3-ca44-7000-8000-000000000007";
+  const previousStartMs = uuidV7TimestampMs(previousTurnId);
+  const previousEndMs = previousStartMs + 60_000;
+  const rolloverLifecycles = new Map([[
+    rolloverThreadId,
+    {
+      status: "completed",
+      startedAtMs: previousStartMs,
+      endedAtMs: previousEndMs,
+      latestTurnId: previousTurnId,
+      lastActivityAtMs: previousStartMs + 30_000,
+      terminalObservedAtMs: previousEndMs,
+      observedAtMs: previousEndMs
+    }
+  ]]);
+  const rolloverEndMs = transitionStartMs + 90_000;
+  applyRemoteLifecycleLogLine(
+    `${new Date(rolloverEndMs).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${rolloverThreadId} latestTurnId=${transitionTurnId} latestTurnStatus=completed`,
+    rolloverLifecycles
+  );
+  const firstRolloverLifecycle = rolloverLifecycles.get(rolloverThreadId);
+  applyRemoteLifecycleLogLine(
+    `${new Date(rolloverEndMs + 5 * 60_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${rolloverThreadId} latestTurnId=${transitionTurnId} latestTurnStatus=completed`,
+    rolloverLifecycles
+  );
+  const rolloverLifecycle = rolloverLifecycles.get(rolloverThreadId);
+  remoteLifecycleCache.set(rolloverThreadId, rolloverLifecycle);
+  const rolloverCompleted = remoteStatusForThread({
+    id: rolloverThreadId,
+    remote: true,
+    summaryUpdatedAtMs: transitionStartMs + 1_000,
+    threadRuntimeStatus: { type: "notLoaded" }
+  }, rolloverEndMs + 100, new Map());
+  const resumeTerminalDoesNotInventEnd = firstRolloverLifecycle?.endedAtMs === null
+    && firstRolloverLifecycle?.terminalObservedAtMs === null
+    && rolloverLifecycle?.endedAtMs === null
+    && rolloverLifecycle?.lastActivityAtMs === null
+    && rolloverLifecycle?.terminalObservedAtMs === null
+    && rolloverCompleted.status === "completed"
+    && rolloverCompleted.endedAtMs === null
+    && timingLabel(rolloverCompleted, rolloverEndMs) === "--:--";
 
   remoteReasoningEffortByThreadId.set(threadId, {
     effort: "medium",
@@ -4146,14 +4431,21 @@ function verifyRemoteLifecyclePolicy() {
   const passed = Number.isFinite(startedAtMs)
     && parsed?.status === "working"
     && parsed.startedAtMs === startedAtMs
+    && parsed.lastActivityAtMs === reasoningObservedMs
     && active.status === "working"
     && active.startedAtMs === startedAtMs
     && active.reasoningEffort === "high"
     && completed.status === "completed"
     && completed.endedAtMs === endedAtMs
     && timingLabel(completed, endedAtMs) === "09:22"
+    && completed.endedAtMs !== misleadingSummaryUpdatedAtMs
     && stopped.status === "stopped"
     && stopped.startedAtMs === startedAtMs
+    && runtimeTransitionRecovered
+    && coldStartAvoidsFabricatedDuration
+    && staleRuntimeObservationIgnored
+    && repeatedResumePreservesFrozenEnd
+    && resumeTerminalDoesNotInventEnd
     && staleEffortRejected
     && summaryEffortPreferred
     && focusedWindowParsed
@@ -4165,6 +4457,13 @@ function verifyRemoteLifecyclePolicy() {
     uuidStartRecovered: parsed?.startedAtMs === startedAtMs,
     activeTimingRecovered: active.startedAtMs === startedAtMs,
     completedDuration: timingLabel(completed, endedAtMs),
+    misleadingSummaryIgnored: completed.endedAtMs !== misleadingSummaryUpdatedAtMs,
+    runtimeTransitionRecovered,
+    transientInactiveIgnored: transientInactive.status === "working" && recoveredActive.status === "working",
+    coldStartAvoidsFabricatedDuration,
+    staleRuntimeObservationIgnored,
+    repeatedResumePreservesFrozenEnd,
+    resumeTerminalDoesNotInventEnd,
     stoppedStatusRecovered: stopped.status === "stopped",
     staleEffortRejected,
     summaryEffortPreferred,
@@ -4173,6 +4472,7 @@ function verifyRemoteLifecyclePolicy() {
   }));
   remoteLifecycleCache.clear();
   remoteReasoningEffortByThreadId.clear();
+  remoteRuntimeObservationByThreadId.clear();
   if (!passed) process.exitCode = 1;
 }
 
