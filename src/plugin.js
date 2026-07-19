@@ -705,7 +705,6 @@ function threadHeader(accent, status, statusLabel, activity, pulsing = false, re
     return `
   <rect x="9" y="8" width="126" height="28" rx="14" fill="${THEME.raised}"/>
   <rect x="9" y="8" width="126" height="28" rx="14" fill="${THEME.green}" fill-opacity="${fillOpacity}" stroke="${THEME.green}" stroke-opacity="${strokeOpacity}"/>
-  ${fast ? `<path data-mode="fast" d="M27 12L20 23H26L24 32L34 19H28L31 12Z" fill="${THEME.text}" fill-opacity=".9"/>` : ""}
   <path d="M61 22L68 28L83 16" fill="none" stroke="${THEME.green}" stroke-width="${checkWidth}" stroke-linecap="round" stroke-linejoin="round"/>
   <path d="M61 22L68 28L83 16" fill="none" stroke="${THEME.text}" stroke-opacity="${brightCheckOpacity}" stroke-width="${checkWidth}" stroke-linecap="round" stroke-linejoin="round"/>`;
   }
@@ -4902,7 +4901,9 @@ function renderCompletedTaskKey(outputPath, mode = "dark") {
     endedAtMs: DEMO_EPOCH_MS - 10 * 60_000,
     activity: { kind: "complete", label: "작업 완료" },
     reasoningEffort: "high",
-    serviceTier: "default",
+    // Exercise the deliberate completed-card exception: the turn used Fast,
+    // but the rendered terminal card reserves the header for its check mark.
+    serviceTier: "priority",
     queueCount: 0
   };
   const resolvedOutput = path.resolve(outputPath);
@@ -6325,19 +6326,29 @@ async function verifyVoiceSubmissionPolicy() {
 }
 
 async function verifyInteractionPolicy() {
-  const fastStatuses = ["working", "completed", "stopped", "idle", "error"];
+  const fastStatuses = ["working", "stopped", "idle", "error"];
   const activity = { kind: "think", label: "생각 중" };
-  const fastBadgeAllStates = fastStatuses.every((status) => threadHeader(
+  const fastBadgeNonCompletedStates = fastStatuses.every((status) => threadHeader(
     THEME.green,
     status,
-    status === "completed" ? "완료" : "대기",
+    "대기",
     activity,
     status === "working",
     "xhigh",
     "priority",
-    status === "completed" ? { strength: 0 } : null
+    null
   ).includes('data-mode="fast"'));
-  const standardHasNoFastBadge = fastStatuses.every((status) => !threadHeader(
+  const completedHidesFastBadge = !threadHeader(
+    THEME.green,
+    "completed",
+    "완료",
+    { kind: "complete", label: "작업 완료" },
+    false,
+    "xhigh",
+    "priority",
+    { strength: 0 }
+  ).includes('data-mode="fast"');
+  const standardHasNoFastBadge = [...fastStatuses, "completed"].every((status) => !threadHeader(
     THEME.green,
     status,
     status === "completed" ? "완료" : "대기",
@@ -7216,7 +7227,8 @@ async function verifyInteractionPolicy() {
     && cancelledSameTargetWasAborted
     && !interleavedCreationResult;
 
-  const passed = fastBadgeAllStates
+  const passed = fastBadgeNonCompletedStates
+    && completedHidesFastBadge
     && standardHasNoFastBadge
     && knownTitleAmbiguityDetected
     && ambiguousTitleUsesStrictIdentity
@@ -7257,7 +7269,8 @@ async function verifyInteractionPolicy() {
     && cancelledSameTargetDoesNotSwallowRetry;
   console.log(JSON.stringify({
     passed,
-    fastBadgeAllStates,
+    fastBadgeNonCompletedStates,
+    completedHidesFastBadge,
     standardHasNoFastBadge,
     knownTitleAmbiguityDetected,
     ambiguousTitleUsesStrictIdentity,

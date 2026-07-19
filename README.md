@@ -123,7 +123,7 @@ The Media page includes Stream Deck, Music, Chrome, and Codex launchers built wi
 | Example | Meaning |
 |---|---|
 | <img src="docs/media/working-task-key.png" width="104" alt="Working task key"> | The header shows the current phase. The pin precedes the title, the timer updates every second, the track reflects trustworthy reasoning intensity, and the lightning cue marks fast service. An amber `+N` is the observed queued-follow-up count. |
-| <img src="docs/media/completed-task-key.png" width="104" alt="Completed task key"> | The check and frozen timer mean the latest observed turn completed. A lightning cue remains visible when that turn used fast service. The final duration is never rewritten by a later resume observation. |
+| <img src="docs/media/completed-task-key.png" width="104" alt="Completed task key"> | The check and frozen timer mean the latest observed turn completed. Completed cards hide the fast-service lightning cue so the check remains the single status signal. The final duration is never rewritten by a later resume observation. |
 | <img src="docs/media/quota-key.png" width="104" alt="Weekly quota key"> | Optional remaining weekly capacity from CodexBar. The last good value appears immediately during page changes and survives a transient refresh failure. |
 | <img src="docs/media/side-chat-key.png" width="104" alt="Side Chat key"> | A workflow action using the same light/dark visual system as task cards. |
 
