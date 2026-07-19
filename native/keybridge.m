@@ -3720,11 +3720,9 @@ static bool copy_codex_fast_mode_scan_with_intelligence_fallback(
 
 static int print_codex_fast_mode_state(void) {
   CodexFastModeScan scan = { 0 };
-  AXUIElementRef opened_trigger = NULL;
-  bool scanned = copy_codex_fast_mode_scan_with_intelligence_fallback(
-    &scan,
-    &opened_trigger
-  );
+  // This command is polled after navigation. A state read must never activate
+  // the model picker; only an explicit physical Fast action may open it.
+  bool scanned = copy_codex_fast_mode_scan(false, &scan);
   CodexFastModeValue value = scanned ? scan.value : CODEX_FAST_MODE_UNKNOWN;
   printf(
     "state=%s available=%d confidence=%d visited=%u\n",
@@ -3733,8 +3731,6 @@ static int print_codex_fast_mode_state(void) {
     scanned ? scan.value_score : 0,
     scanned ? scan.visited : 0
   );
-  close_codex_intelligence_popover_if_opened(opened_trigger);
-  if (opened_trigger != NULL) CFRelease(opened_trigger);
   release_codex_fast_mode_scan(&scan);
   // Known on and off states are both successful queries. Unknown remains a
   // distinct exit so callers never silently render a stale toggle state.
@@ -3743,11 +3739,10 @@ static int print_codex_fast_mode_state(void) {
 
 static int print_codex_composer_state(void) {
   CodexFastModeScan scan = { 0 };
-  AXUIElementRef opened_trigger = NULL;
-  bool scanned = copy_codex_fast_mode_scan_with_intelligence_fallback(
-    &scan,
-    &opened_trigger
-  );
+  // Keep passive refresh visually inert. The compact trigger exposes the
+  // reasoning label, while speed is merged from exact task metadata by the
+  // plugin until a user-requested Fast toggle verifies a newer value.
+  bool scanned = copy_codex_fast_mode_scan(false, &scan);
   const char *reasoning = scanned && scan.reasoning_effort != NULL
     ? scan.reasoning_effort
     : "unknown";
@@ -3768,8 +3763,6 @@ static int print_codex_composer_state(void) {
     scanned ? scan.value_score : 0,
     scanned ? scan.visited : 0
   );
-  close_codex_intelligence_popover_if_opened(opened_trigger);
-  if (opened_trigger != NULL) CFRelease(opened_trigger);
   release_codex_fast_mode_scan(&scan);
   return reasoning_available || service_tier_available ? 0 : 2;
 }

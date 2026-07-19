@@ -44,6 +44,7 @@ const {
   composerStateForRemoteThread,
   deriveRemoteStatus,
   normalizedReasoningEffort,
+  normalizedServiceTier,
   observeRemoteRuntimeEnd: observeRemoteRuntimeEndInStore,
   parseCodexComposerState,
   recordRemoteComposerStateObservation,
@@ -1153,24 +1154,41 @@ function fastModeSvg(state = fastModeState, activeThreadId = primaryThreadId) {
   const enabled = confirmed && state.enabled;
   const unavailable = state?.available === false;
   const failed = Boolean(state?.failed);
-  const accent = enabled ? THEME.green : failed ? THEME.amber : THEME.muted;
-  const label = enabled
-    ? "FAST ON"
+  const status = enabled
+    ? "on"
     : confirmed
-      ? "FAST OFF"
+      ? "off"
       : unavailable
-        ? "사용 불가"
+        ? "unavailable"
         : failed
-          ? "상태 확인"
-          : "확인 필요";
-  const boltPath = "M78 28L48 76H68L60 116L98 62H77L87 28Z";
+          ? "error"
+          : "unknown";
+  const warningLabel = unavailable
+    ? "사용 불가"
+    : failed
+      ? "상태 오류"
+      : confirmed
+        ? ""
+        : "확인 필요";
+  const warning = Boolean(warningLabel);
+  const accent = enabled ? THEME.green : warning ? THEME.amber : THEME.muted;
+  // Keep one sharp apex instead of closing the path across a horizontal top
+  // edge. The old silhouette looked cropped even though it was inside the
+  // viewBox. Normal states use the full key; warnings reserve the bottom row
+  // for actionable text.
+  const boltPath = warning
+    ? "M80 20L50 70H68L60 108L98 58H78Z"
+    : "M83 15L42 80H66L56 130L105 59H80Z";
   const bolt = enabled
     ? `<path data-mode="fast" d="${boltPath}" fill="${accent}"/>`
-    : `<path data-mode="fast" d="${boltPath}" fill="none" stroke="${accent}" stroke-width="5" stroke-linejoin="round"/>`;
+    : `<path data-mode="fast" d="${boltPath}" fill="none" stroke="${accent}" stroke-width="5" stroke-linecap="round" stroke-linejoin="round"/>`;
+  const warningText = warning
+    ? `<rect x="25" y="113" width="94" height="22" rx="11" fill="${THEME.raised}"/>
+    <text x="72" y="129" fill="${accent}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" text-anchor="middle">${escapeXml(warningLabel)}</text>`
+    : "";
   return shell(accent, `
-    ${bolt}
-    <rect x="25" y="113" width="94" height="22" rx="11" fill="${THEME.raised}"/>
-    <text x="72" y="129" fill="${enabled ? THEME.green : THEME.textSecondary}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" text-anchor="middle">${escapeXml(label)}</text>`);
+    <g data-fast-state="${status}">${bolt}</g>
+    ${warningText}`);
 }
 
 function sideChatSvg() {
@@ -2581,7 +2599,10 @@ async function waitForThreadFocused(thread, options = {}) {
 function parseFastModeState(output) {
   const text = String(output ?? "");
   const state = text.match(/(?:^|\s)state=(on|off|unknown)(?:\s|$)/i)?.[1]?.toLowerCase() ?? null;
-  const available = text.match(/(?:^|\s)available=([01])(?:\s|$)/i)?.[1] ?? null;
+  const availableMatch = text.match(/(?:^|\s)available=([01])(?:\s|$)/i)?.[1] ?? null;
+  const serviceTierAvailableMatch = text.match(
+    /(?:^|\s)service_tier_available=([01])(?:\s|$)/i
+  )?.[1] ?? null;
   const composerState = parseCodexComposerState(text);
   const enabled = state === "on"
     ? true
@@ -2592,14 +2613,66 @@ function parseFastModeState(output) {
         : composerState.serviceTier === "default"
           ? false
           : null;
-  const speedAvailable = available === null
-    ? composerState.serviceTierAvailable
-    : available === "1";
-  if (typeof enabled !== "boolean" && !state) return null;
+  // `available` on codex-composer-state means either reasoning or speed was
+  // readable. Do not mistake a readable effort label for a readable Fast
+  // state. The compact picker intentionally hides its bolt from Accessibility.
+  const speedAvailable = typeof enabled === "boolean"
+    ? serviceTierAvailableMatch === null
+      ? availableMatch === null || availableMatch === "1"
+      : serviceTierAvailableMatch === "1"
+    : state === "unknown" && availableMatch !== null
+      ? availableMatch === "1"
+      : null;
+  const composerEnvelope = /(?:^|\s)(?:reasoning|effort|service_tier|reasoning_available|service_tier_available)=/i
+    .test(text);
+  if (!state && !composerEnvelope) return null;
   return {
     enabled,
-    available: Boolean(speedAvailable),
+    available: speedAvailable,
     reasoningEffort: composerState.reasoningEffort
+  };
+}
+
+function fastModeStateFromThread(thread, fallback = null) {
+  const threadId = thread?.id ?? null;
+  const fallbackMatches = Boolean(threadId)
+    && fallback?.threadId === threadId
+    && typeof fallback.enabled === "boolean";
+  const fallbackReasoning = fallback?.threadId === threadId
+    ? normalizedReasoningEffort(fallback?.reasoningEffort)
+    : null;
+  const serviceTier = normalizedServiceTier(thread?.serviceTier);
+  const metadataEnabled = serviceTier ? isFastServiceTier(serviceTier) : null;
+  const enabled = fallbackMatches ? fallback.enabled : metadataEnabled;
+  return {
+    threadId,
+    enabled,
+    available: typeof enabled === "boolean"
+      ? fallbackMatches ? fallback.available ?? true : true
+      : null,
+    reasoningEffort: fallbackReasoning ?? normalizedReasoningEffort(thread?.reasoningEffort),
+    failed: false
+  };
+}
+
+function mergeFastModeObservation(thread, observed, previous = fastModeState) {
+  const threadId = thread?.id ?? previous?.threadId ?? null;
+  if (typeof observed?.enabled === "boolean") {
+    return {
+      threadId,
+      ...observed,
+      available: observed.available ?? true
+    };
+  }
+  const fallback = fastModeStateFromThread(thread, previous);
+  return {
+    threadId,
+    enabled: fallback.enabled,
+    available: typeof fallback.enabled === "boolean"
+      ? fallback.available
+      : observed?.available ?? null,
+    reasoningEffort: normalizedReasoningEffort(observed?.reasoningEffort)
+      ?? fallback.reasoningEffort
   };
 }
 
@@ -2667,8 +2740,9 @@ function refreshFastMode(options = {}) {
           throw new Error("Codex current task was not focused");
         }
       }
-      const state = await queryFastModeState(options);
+      const observed = await queryFastModeState(options);
       if (primaryThreadId !== threadId || fastModeRevision !== revision) return false;
+      const state = mergeFastModeObservation(thread, observed, fastModeState);
       if (options.preserveConfirmedOnUnavailable
           && (!state.available || typeof state.enabled !== "boolean")
           && fastModeState.threadId === threadId
@@ -2777,7 +2851,9 @@ function toggleFastMode(context, options = {}) {
         fastModeState = { threadId, ...confirmed, failed: false };
         applyFocusedRemoteComposerState(thread, confirmed);
         renderFastModeContexts();
-        feedback(context, "success", confirmed.enabled ? "FAST 켬" : "FAST 끔");
+        // The verified icon itself is the success acknowledgement. Keep text
+        // overlays for actionable failures instead of restating on/off.
+        clearFeedback(context);
         return true;
       } catch (error) {
         if (primaryThreadId === threadId) {
@@ -2844,7 +2920,7 @@ function toggleFastMode(context, options = {}) {
       fastModeState = { threadId, ...confirmed, failed: false };
       applyFocusedRemoteComposerState(thread, confirmed);
       renderFastModeContexts();
-      feedback(context, "success", targetEnabled ? "FAST 켬" : "FAST 끔");
+      clearFeedback(context);
       return true;
     } catch (confirmationError) {
       const error = setError ?? confirmationError;
@@ -3373,10 +3449,10 @@ async function refreshVisibleRemoteComposerState(threads, queueWindows, nowMs = 
   const alreadyProbed = remoteComposerProbe.threadId === thread.id
     && remoteComposerProbe.turnKey === turnKey;
   if (!shouldProbeRemoteComposerState(cachedState, alreadyProbed)) return cachedState;
-  // The fallback must briefly open Codex's model popover because the closed
-  // trigger hides the speed marker from Accessibility. Probe only once per
-  // exact remote turn; task switches and explicit Fast presses do their own
-  // verified read and update this same turn-scoped cache.
+  // The compact picker exposes reasoning but hides its speed bolt from
+  // Accessibility. This is a passive probe: it never opens the picker. Probe
+  // only once per exact remote turn and preserve any exact cached speed until
+  // an explicit Fast press or lifecycle metadata supplies a newer value.
   remoteComposerProbe = { threadId: thread.id, turnKey };
   try {
     const { stdout } = await execFileAsync(KEY_BRIDGE, ["codex-composer-state"], {
@@ -4157,12 +4233,7 @@ function rememberVerifiedThread(thread, options = {}) {
   };
   if (changed || fastModeState.threadId !== thread.id) {
     fastModeRevision += 1;
-    fastModeState = {
-      threadId: thread.id,
-      enabled: null,
-      available: null,
-      failed: false
-    };
+    fastModeState = fastModeStateFromThread(primaryThreadRow);
   }
   if (options.promote !== false) {
     renderThreadContexts();
@@ -4672,12 +4743,7 @@ async function refreshThreads(feedbackContext, options = {}) {
         renderThreadContexts();
         if (fastModeState.threadId !== primaryThreadId) {
           fastModeRevision += 1;
-          fastModeState = {
-            threadId: primaryThreadId,
-            enabled: null,
-            available: null,
-            failed: false
-          };
+          fastModeState = fastModeStateFromThread(nextCurrentThread ?? primaryThreadRow);
           renderStaticContexts();
           void refreshFastMode();
         }
@@ -7866,6 +7932,14 @@ async function verifyInteractionPolicy() {
   });
   const offExitIsConfirmedState = parsedOffState.enabled === false
     && parsedOffState.available === true;
+  const passiveComposerState = await queryFastModeState({
+    stateProbe: async () => ({
+      stdout: "reasoning=max service_tier=unknown available=1 reasoning_available=1 service_tier_available=0 confidence=0 visited=812\n"
+    })
+  });
+  const passiveComposerReadDoesNotClaimSpeed = passiveComposerState.enabled === null
+    && passiveComposerState.available === null
+    && passiveComposerState.reasoningEffort === "max";
 
   const fastContext = "interaction-fast-mode";
   contexts.set(fastContext, ACTIONS.fastMode);
@@ -7878,6 +7952,48 @@ async function verifyInteractionPolicy() {
     available: true,
     failed: false
   };
+  const metadataFastState = fastModeStateFromThread({
+    ...localThreadB,
+    reasoningEffort: "max",
+    serviceTier: "priority"
+  });
+  const taskMetadataRestoresFastWithoutMenu = metadataFastState.threadId === localThreadB.id
+    && metadataFastState.enabled === true
+    && metadataFastState.available === true
+    && metadataFastState.reasoningEffort === "max";
+  const fastOnVisual = fastModeSvg({
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    failed: false
+  }, localThreadB.id);
+  const fastOffVisual = fastModeSvg({
+    threadId: localThreadB.id,
+    enabled: false,
+    available: true,
+    failed: false
+  }, localThreadB.id);
+  const fastUnavailableVisual = fastModeSvg({
+    threadId: localThreadB.id,
+    enabled: null,
+    available: false,
+    failed: false
+  }, localThreadB.id);
+  const fastFailedVisual = fastModeSvg({
+    threadId: localThreadB.id,
+    enabled: null,
+    available: null,
+    failed: true
+  }, localThreadB.id);
+  const fastModeVisualsAreIconFirst = fastOnVisual.includes('data-fast-state="on"')
+    && fastOffVisual.includes('data-fast-state="off"')
+    && !fastOnVisual.includes("FAST ON")
+    && !fastOffVisual.includes("FAST OFF")
+    && !fastOnVisual.includes("<text")
+    && !fastOffVisual.includes("<text")
+    && fastUnavailableVisual.includes("사용 불가")
+    && fastFailedVisual.includes("상태 오류")
+    && fastOnVisual.includes('M83 15L42 80H66L56 130L105 59H80Z');
   let resolveFastNavigation;
   const fastNavigationGate = new Promise((resolve) => { resolveFastNavigation = resolve; });
   activeDeepLinkNavigation = {
@@ -7922,7 +8038,7 @@ async function verifyInteractionPolicy() {
     && fastSetTargetCorrect
     && fastModeState.threadId === localThreadB.id
     && fastModeState.enabled === true
-    && fastModeSvg().includes("FAST ON");
+    && fastModeSvg().includes('data-fast-state="on"');
 
   let timeoutRecoveryStateProbes = 0;
   const fastTimeoutAfterApplyRecovers = await toggleFastMode(fastContext, {
@@ -7988,15 +8104,15 @@ async function verifyInteractionPolicy() {
     quiet: true,
     stateProbe: async () => ({ stdout: "state=unknown available=0 source=composer\n" })
   });
-  const unknownFastRefreshWasRecorded = fastModeState.enabled === null
-    && fastModeState.available === false;
+  const passiveUnknownFastRefreshPreservesConfirmedState = fastModeState.enabled === true
+    && fastModeState.available === true;
   await refreshFastMode({
     threadId: localThreadB.id,
     quiet: true,
-    stateProbe: async () => ({ stdout: "state=on available=1 source=composer\n" })
+    stateProbe: async () => ({ stdout: "state=off available=1 source=composer\n" })
   });
-  const fastRefreshRecoversWithoutPageReentry = unknownFastRefreshWasRecorded
-    && fastModeState.enabled === true
+  const fastRefreshRecoversWithoutPageReentry = passiveUnknownFastRefreshPreservesConfirmedState
+    && fastModeState.enabled === false
     && fastModeState.available === true;
 
   activeDeepLinkNavigation = null;
@@ -8265,6 +8381,9 @@ async function verifyInteractionPolicy() {
     && postDispatchResumeRaceReassertsPause
     && wrongTargetCannotSubmit
     && offExitIsConfirmedState
+    && passiveComposerReadDoesNotClaimSpeed
+    && taskMetadataRestoresFastWithoutMenu
+    && fastModeVisualsAreIconFirst
     && fastToggleWaitedForNavigation
     && fastToggleIsCoalescedAndConfirmed
     && fastSetTimeoutIsReconciled
@@ -8318,11 +8437,15 @@ async function verifyInteractionPolicy() {
     postDispatchResumeRaceReassertsPause,
     wrongTargetCannotSubmit,
     offExitIsConfirmedState,
+    passiveComposerReadDoesNotClaimSpeed,
+    taskMetadataRestoresFastWithoutMenu,
+    fastModeVisualsAreIconFirst,
     fastToggleWaitedForNavigation,
     fastToggleIsCoalescedAndConfirmed,
     fastSetTimeoutIsReconciled,
     singleShotFastToggleUsesOneNativeAction,
     staleFastRefreshCannotOverwriteToggle,
+    passiveUnknownFastRefreshPreservesConfirmedState,
     fastRefreshRecoversWithoutPageReentry,
     navigationWaitsForFastToggle,
     composerCreatingActionsWaitForFastToggle,
@@ -8451,7 +8574,14 @@ function runSelectedMode() {
 }
 
 function main() {
-  ensureKeyBridgeExecutable(KEY_BRIDGE);
+  const renderingOnly = Boolean(
+    demoOutput
+    || demoLightOutput
+    || completedKeyOutput
+    || demoAnimationDirectory
+    || gestureAnimationDirectory
+  );
+  if (!renderingOnly) ensureKeyBridgeExecutable(KEY_BRIDGE);
   installShutdownHandlers();
   runSelectedMode();
 }
