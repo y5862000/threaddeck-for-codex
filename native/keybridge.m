@@ -755,6 +755,205 @@ static bool string_fingerprint(CFTypeRef value, size_t *length, uint64_t *hash) 
   return *length > 0;
 }
 
+static bool copy_element_position(AXUIElementRef element, CGPoint *position);
+static bool copy_element_size(AXUIElementRef element, CGSize *size);
+static bool element_is_hidden(AXUIElementRef element);
+
+typedef struct {
+  const char *effort;
+  int score;
+  unsigned visited;
+  CGPoint window_origin;
+  CGSize window_size;
+} CodexReasoningState;
+
+static const char *reasoning_effort_from_accessibility_string(
+  CFTypeRef value,
+  bool *has_context
+) {
+  if (has_context != NULL) *has_context = false;
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return NULL;
+  NSString *text = [(__bridge NSString *)value lowercaseString];
+  if (text.length == 0) return NULL;
+  bool context = [text containsString:@"reasoning"]
+    || [text containsString:@"effort"]
+    || [text containsString:@"thinking"]
+    || [text containsString:@"추론 강도"];
+  if (has_context != NULL) *has_context = context;
+
+  // Check the compound values first so "extra high" cannot collapse to
+  // "high". Only fixed UI vocabulary is returned; arbitrary AX text never
+  // leaves this helper.
+  if ([text containsString:@"ultra"] || [text containsString:@"울트라"]) return "ultra";
+  if ([text containsString:@"extra high"] || [text containsString:@"xhigh"]
+      || [text containsString:@"매우 높음"]) return "xhigh";
+  if ([text containsString:@"maximum"] || [text containsString:@" max"]
+      || [text hasPrefix:@"max"] || [text containsString:@"최대"]) return "max";
+  if ([text containsString:@"minimal"] || [text containsString:@"최소한"]
+      || [text containsString:@"최소"]) return "minimal";
+  if ([text containsString:@"medium"] || [text containsString:@"중간"]) return "medium";
+  if ([text containsString:@"high"] || [text containsString:@"높음"]) return "high";
+  if ([text containsString:@"light"] || [text containsString:@" low"]
+      || [text hasPrefix:@"low"] || [text containsString:@"낮음"]) return "low";
+  if ([text containsString:@"none"] || [text containsString:@"없음"]) return "none";
+  return NULL;
+}
+
+static void collect_codex_reasoning_state(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexReasoningState *state
+) {
+  if (element == NULL || state == NULL || depth > 28 || state->visited >= 6000) return;
+  state->visited += 1;
+  if (element_is_hidden(element)) return;
+
+  CFTypeRef role_value = NULL;
+  AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role_value);
+  bool is_button = role_value != NULL && CFGetTypeID(role_value) == CFStringGetTypeID()
+    && (CFEqual(role_value, kAXButtonRole)
+      || CFEqual(role_value, kAXPopUpButtonRole)
+      || CFEqual(role_value, kAXRadioButtonRole));
+  bool is_slider = role_value != NULL && CFGetTypeID(role_value) == CFStringGetTypeID()
+    && CFEqual(role_value, kAXSliderRole);
+  if (role_value != NULL) CFRelease(role_value);
+
+  CGPoint position = CGPointZero;
+  CGSize size = CGSizeZero;
+  bool visible_geometry = copy_element_position(element, &position)
+    && copy_element_size(element, &size)
+    && size.width > 1
+    && size.height > 1
+    && position.x + size.width >= state->window_origin.x
+    && position.x <= state->window_origin.x + state->window_size.width
+    && position.y + size.height >= state->window_origin.y
+    && position.y <= state->window_origin.y + state->window_size.height;
+  bool composer_region = visible_geometry
+    && position.x >= state->window_origin.x + state->window_size.width * 0.25
+    && position.y >= state->window_origin.y + state->window_size.height * 0.62
+    && size.width <= 320
+    && size.height <= 56;
+
+  CFStringRef attributes[] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    CFSTR("AXDOMIdentifier")
+  };
+  for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyAttributeValue(element, attributes[index], &value) != kAXErrorSuccess
+        || value == NULL) {
+      if (value != NULL) CFRelease(value);
+      continue;
+    }
+    bool has_context = false;
+    const char *effort = reasoning_effort_from_accessibility_string(value, &has_context);
+    if (effort != NULL) {
+      // A task title or chat message can contain words such as "reasoning" or
+      // "high". Accept contextual labels only from an actual composer control
+      // (or a slider) so arbitrary task content can never become the reported
+      // effort value.
+      int score = has_context && ((is_button && composer_region) || is_slider)
+        ? 120
+        : is_slider
+          ? 100
+          : is_button && composer_region
+            ? 80
+            : 0;
+      if (score > state->score) {
+        state->effort = effort;
+        state->score = score;
+      }
+    }
+    CFRelease(value);
+  }
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value) != kAXErrorSuccess
+      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  CFIndex count = CFArrayGetCount(children);
+  for (CFIndex index = 0; index < count; index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_codex_reasoning_state((AXUIElementRef)child, depth + 1, state);
+    }
+  }
+  CFRelease(children_value);
+}
+
+static int print_codex_reasoning_state(void) {
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) return 1;
+  AXUIElementSetMessagingTimeout(application, 0.8);
+
+  CFTypeRef window_value = NULL;
+  if (AXUIElementCopyAttributeValue(application, kAXFocusedWindowAttribute, &window_value) != kAXErrorSuccess
+      || window_value == NULL || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
+    if (window_value != NULL) CFRelease(window_value);
+    CFRelease(application);
+    return 1;
+  }
+  AXUIElementRef window = (AXUIElementRef)window_value;
+  CGPoint origin = CGPointZero;
+  CGSize size = CGSizeZero;
+  if (!copy_element_position(window, &origin) || !copy_element_size(window, &size)) {
+    CFRelease(window_value);
+    CFRelease(application);
+    return 1;
+  }
+  CodexReasoningState state = {
+    .effort = NULL,
+    .score = 0,
+    .visited = 0,
+    .window_origin = origin,
+    .window_size = size
+  };
+  collect_codex_reasoning_state(window, 0, &state);
+  printf(
+    "effort=%s confidence=%d visited=%u\n",
+    state.effort != NULL ? state.effort : "unknown",
+    state.score,
+    state.visited
+  );
+  CFRelease(window_value);
+  CFRelease(application);
+  return state.effort != NULL ? 0 : 1;
+}
+
+static int reasoning_state_selftest(void) {
+  struct {
+    NSString *text;
+    const char *expected;
+  } cases[] = {
+    { @"Reasoning effort Extra high", "xhigh" },
+    { @"추론 강도 매우 높음", "xhigh" },
+    { @"추론 강도 최대", "max" },
+    { @"Reasoning effort Light", "low" },
+    { @"추론 강도 울트라", "ultra" }
+  };
+  bool passed = true;
+  for (size_t index = 0; index < sizeof(cases) / sizeof(cases[0]); index += 1) {
+    bool has_context = false;
+    const char *actual = reasoning_effort_from_accessibility_string(
+      (__bridge CFStringRef)cases[index].text,
+      &has_context
+    );
+    if (!has_context || actual == NULL || strcmp(actual, cases[index].expected) != 0) {
+      passed = false;
+      break;
+    }
+  }
+  printf("localized_effort_mapping=%d\n", passed ? 1 : 0);
+  return passed ? 0 : 1;
+}
+
 #define CODEX_QUEUE_MAX_HEADERS 128
 #define CODEX_QUEUE_MAX_BUTTONS 512
 
@@ -965,7 +1164,14 @@ static int print_codex_queue_state(void) {
       .window_size = size
     };
     collect_codex_queue_descendants(window, 0, &state);
-    printf("window\t%ld\n", (long)window_index);
+    CFTypeRef focused_value = NULL;
+    bool focused = false;
+    if (AXUIElementCopyAttributeValue(window, kAXFocusedAttribute, &focused_value) == kAXErrorSuccess
+        && focused_value != NULL && CFGetTypeID(focused_value) == CFBooleanGetTypeID()) {
+      focused = CFBooleanGetValue((CFBooleanRef)focused_value);
+    }
+    if (focused_value != NULL) CFRelease(focused_value);
+    printf("window\t%ld\t%d\n", (long)window_index, focused ? 1 : 0);
     for (unsigned index = 0; index < state.header_count; index += 1) {
       printf(
         "header\t%zu:%016llx\n",
@@ -1814,6 +2020,7 @@ int main(int argc, char **argv) {
     printf("layout_independent_down=%d physical_release_up=%d\n", down ? 1 : 0, up ? 1 : 0);
     return down && up ? 0 : 1;
   }
+  if (strcmp(argv[1], "reasoning-state-selftest") == 0) return reasoning_state_selftest();
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) voice_up();
   else if (strcmp(argv[1], "send") == 0) tap_key(KEY_RETURN, 0);
@@ -1840,6 +2047,7 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "focused-element-info") == 0) return print_focused_element_info();
   else if (strcmp(argv[1], "editable-element-info") == 0) return print_editable_element_info();
   else if (strcmp(argv[1], "selected-element-info") == 0) return print_selected_element_info();
+  else if (strcmp(argv[1], "codex-reasoning-state") == 0) return print_codex_reasoning_state();
   else if (strcmp(argv[1], "codex-queue-state") == 0) return print_codex_queue_state();
   else if (strcmp(argv[1], "codex-stop-dictation") == 0) {
     return stop_codex_composer_dictation_if_visible() ? 0 : 1;

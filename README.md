@@ -77,6 +77,8 @@ The bundled profile contains three pages. You can rearrange the supplied actions
 - **Green completion pulse:** every visible ThreadDeck-owned key receives the first completion frame together; the matching task then pulses longer and more strongly.
 - **Queue-advance pulse:** when Codex starts the next queued follow-up, the reduced queue count is acknowledged as another completed turn.
 
+For an explicitly pinned remote task, ThreadDeck reconstructs the latest turn's start from Codex's UUIDv7 turn ID and freezes the timer at the remote summary's server-side update time. Reasoning intensity is accepted only from the exact focused task's visible composer setting (or explicit remote metadata); if Codex does not expose it, the track stays empty instead of assuming Medium.
+
 ## Quick start
 
 ### Requirements
@@ -145,12 +147,12 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 
 | Source | Access | Purpose |
 |---|---|---|
-| Codex files and Desktop logs under `~/.codex` | Read-only | Local and cached remote task titles, hosts, pins, status, activity, timing, service metadata, and temporary Side Chat lifecycle. |
+| Codex files under `~/.codex` and Codex Desktop logs | Read-only | Local and cached remote task titles, hosts, pins, status, activity, timing, service metadata, and temporary Side Chat lifecycle. |
 | CodexBar CLI | Child process, optional | Weekly remaining quota only. |
 | Stream Deck plugin WebSocket | Localhost | Receives key events and sends rendered key images. |
-| macOS Accessibility / Core Audio | Local system APIs | Keyboard shortcuts, media keys, push-to-talk audio handling, and a privacy-preserving count of visible Codex queue actions. |
+| macOS Accessibility / Core Audio | Local system APIs | Keyboard shortcuts, media keys, push-to-talk audio handling, the focused composer's fixed reasoning-level enum, and a privacy-preserving count of visible Codex queue actions. |
 
-Queue detection and remote task selection compare title fingerprints inside the native helper. Remote titles are passed to Codex search through stdin, not command-line arguments. Queued message text is never returned, logged, or stored. ThreadDeck never writes to Codex databases or session files. Read [SECURITY.md](SECURITY.md) before attaching logs or screenshots to an issue.
+Queue detection, focused-task matching, and remote task selection compare title fingerprints inside the native helper. Remote titles are passed to Codex search through stdin, not command-line arguments. Queued message text and arbitrary accessibility text are never returned, logged, or stored. ThreadDeck never writes to Codex databases or session files. Read [SECURITY.md](SECURITY.md) before attaching logs or screenshots to an issue.
 
 ## Fully open source
 

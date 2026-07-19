@@ -109,6 +109,19 @@ const APP_SERVER_SESSION_CACHE_MS = 5_000;
 const APP_SERVER_START_TOLERANCE_MS = 5_000;
 const DESKTOP_LOG_PATH_CACHE_MS = 5_000;
 const SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES = 64 * 1024 * 1024;
+const REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES = 32 * 1024 * 1024;
+const REMOTE_REASONING_PROBE_CACHE_MS = 5_000;
+const REMOTE_REASONING_TURN_TOLERANCE_MS = 5_000;
+const REASONING_EFFORT_VALUES = new Set([
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+  "ultra"
+]);
 const QUEUED_MESSAGE_DELETE_LABELS = [
   "대기열에 있는 메시지 삭제",
   "Delete queued message"
@@ -211,6 +224,7 @@ const refreshResilienceContractMode = process.argv.includes("--verify-refresh-re
 const threadSelectionContractMode = process.argv.includes("--verify-thread-selection");
 const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
 const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
+const remoteLifecycleContractMode = process.argv.includes("--verify-remote-lifecycle");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
@@ -268,7 +282,11 @@ const sideChatParentById = new Map();
 const sideChatLifecycleCache = new Map();
 const closedSideChatAtMs = new Map();
 const sideChatCloseLogOffsets = new Map();
+const remoteLifecycleCache = new Map();
+const remoteLifecycleLogOffsets = new Map();
+const remoteReasoningEffortByThreadId = new Map();
 const queueStateByThreadId = new Map();
+let remoteReasoningProbe = { threadId: null, checkedAtMs: 0 };
 
 function send(message) {
   if (socket?.readyState === WebSocket.OPEN) {
@@ -402,6 +420,11 @@ function isFastServiceTier(value) {
   return ["fast", "priority"].includes(String(value ?? "").toLowerCase());
 }
 
+function normalizedReasoningEffort(value) {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return REASONING_EFFORT_VALUES.has(normalized) ? normalized : null;
+}
+
 function reasoningEffortProgress(value) {
   const progress = {
     none: 0,
@@ -413,7 +436,10 @@ function reasoningEffortProgress(value) {
     max: 0.88,
     ultra: 1
   };
-  return progress[String(value ?? "").toLowerCase()] ?? 0.41;
+  // Missing remote metadata must not masquerade as Medium. An empty track is
+  // deliberately distinct until Codex exposes or ThreadDeck observes the
+  // task's real composer setting.
+  return progress[normalizedReasoningEffort(value)] ?? 0;
 }
 
 function reasoningEffortAppearance(value) {
@@ -1634,7 +1660,12 @@ function parseCodexQueueWindows(output) {
   for (const line of String(output ?? "").split(/\r?\n/)) {
     const [kind, value, rawCount] = line.split("\t");
     if (kind === "window") {
-      current = { index: Number(value), headers: new Set(), buttons: new Map() };
+      current = {
+        index: Number(value),
+        focused: rawCount === "1",
+        headers: new Set(),
+        buttons: new Map()
+      };
       windows.push(current);
     } else if (kind === "header" && current && value) {
       current.headers.add(value);
@@ -2101,6 +2132,294 @@ async function readLatestDesktopLogPath(nowMs = Date.now()) {
   return (await readCurrentDesktopLogPaths(nowMs))[0] ?? null;
 }
 
+function remoteTurnStatus(value) {
+  const status = String(value ?? "").toLowerCase();
+  if (["inprogress", "in_progress", "running", "active"].includes(status)) return "working";
+  if (["completed", "complete", "succeeded", "success"].includes(status)) return "completed";
+  if (["interrupted", "cancelled", "canceled", "aborted", "stopped"].includes(status)) return "stopped";
+  if (["failed", "error"].includes(status)) return "error";
+  return null;
+}
+
+function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
+  if (typeof line !== "string" || !line) return false;
+  const timestampMs = Date.parse(line.slice(0, 24));
+  if (!Number.isFinite(timestampMs)) return false;
+
+  const update = (threadId, next) => {
+    if (!UUID_PATTERN.test(threadId ?? "")) return false;
+    const previous = lifecycles.get(threadId);
+    if (previous && timestampMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.observedAtMs) return false;
+    const nextStartedAtMs = Number.isFinite(next.startedAtMs)
+      ? next.startedAtMs
+      : previous?.startedAtMs ?? null;
+    if (previous && Number.isFinite(previous.startedAtMs)
+        && Number.isFinite(nextStartedAtMs)
+        && nextStartedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.startedAtMs) {
+      return false;
+    }
+    lifecycles.set(threadId, {
+      status: next.status ?? previous?.status ?? "idle",
+      startedAtMs: nextStartedAtMs,
+      endedAtMs: Object.hasOwn(next, "endedAtMs") ? next.endedAtMs : previous?.endedAtMs ?? null,
+      latestTurnId: Object.hasOwn(next, "latestTurnId")
+        ? next.latestTurnId
+        : previous?.latestTurnId ?? null,
+      terminalObservedAtMs: Object.hasOwn(next, "terminalObservedAtMs")
+        ? next.terminalObservedAtMs
+        : previous?.terminalObservedAtMs ?? null,
+      observedAtMs: Math.max(timestampMs, previous?.observedAtMs ?? 0)
+    });
+    return true;
+  };
+
+  if (line.includes("maybe_resume_success")) {
+    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnId = line.match(/latestTurnId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const status = remoteTurnStatus(line.match(/latestTurnStatus=([^ ]+)/i)?.[1]);
+    const startedAtMs = uuidV7TimestampMs(turnId);
+    if (!threadId || !turnId || !status || !Number.isFinite(startedAtMs)) return false;
+    const terminal = ["completed", "stopped", "error"].includes(status);
+    const resumed = {
+      status,
+      startedAtMs,
+      latestTurnId: turnId,
+      terminalObservedAtMs: terminal ? timestampMs : null
+    };
+    if (status === "working") resumed.endedAtMs = null;
+    return update(threadId, resumed);
+  }
+
+  if (line.includes("Reasoning summary turn-start config resolved")) {
+    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    return update(threadId, {
+      status: "working",
+      startedAtMs: timestampMs,
+      endedAtMs: null,
+      latestTurnId: null,
+      terminalObservedAtMs: null
+    });
+  }
+
+  if (line.includes("Reasoning summary") && line.includes("turnId=")) {
+    const threadId = line.match(/threadId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
+    const startedAtMs = uuidV7TimestampMs(turnId);
+    if (!threadId || !turnId || !Number.isFinite(startedAtMs)) return false;
+    return update(threadId, {
+      status: "working",
+      startedAtMs,
+      endedAtMs: null,
+      latestTurnId: turnId,
+      terminalObservedAtMs: null
+    });
+  }
+
+  if (line.includes("[desktop-notifications] show turn-complete")) {
+    const threadId = line.match(/(?:conversationId|threadId)=([0-9a-f-]{36})/i)?.[1] ?? null;
+    return update(threadId, {
+      status: "completed",
+      endedAtMs: timestampMs,
+      terminalObservedAtMs: timestampMs
+    });
+  }
+  return false;
+}
+
+async function refreshRemoteLifecyclesFromLogs(nowMs = Date.now()) {
+  let paths;
+  try {
+    paths = await readCurrentDesktopLogPaths(nowMs);
+  } catch {
+    return remoteLifecycleCache;
+  }
+  const files = [];
+  for (const filePath of paths) {
+    try {
+      const stat = await fs.stat(filePath);
+      files.push({ filePath, stat });
+    } catch {
+      // A rotated log can disappear between discovery and inspection.
+    }
+  }
+  files.sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs);
+  const activePaths = new Set(files.map(({ filePath }) => filePath));
+
+  for (const { filePath, stat } of files) {
+    const previousSize = remoteLifecycleLogOffsets.get(filePath);
+    const start = Number.isFinite(previousSize) && previousSize <= stat.size
+      ? Math.max(0, previousSize - 1024)
+      : Math.max(0, stat.size - REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES);
+    if (start >= stat.size) continue;
+    try {
+      const length = stat.size - start;
+      const handle = await fs.open(filePath, "r");
+      const buffer = Buffer.alloc(length);
+      try {
+        await handle.read(buffer, 0, length, start);
+      } finally {
+        await handle.close();
+      }
+      const lines = buffer.toString("utf8").split(/\r?\n/);
+      if (start > 0) lines.shift();
+      for (const line of lines) applyRemoteLifecycleLogLine(line);
+      remoteLifecycleLogOffsets.set(filePath, stat.size);
+    } catch {
+      // Preserve the last parsed lifecycle while a Desktop log rotates.
+    }
+  }
+  for (const filePath of remoteLifecycleLogOffsets.keys()) {
+    if (!activePaths.has(filePath)) remoteLifecycleLogOffsets.delete(filePath);
+  }
+  return remoteLifecycleCache;
+}
+
+function parseCodexReasoningState(output) {
+  const effort = String(output ?? "").match(/(?:^|\s)effort=(none|minimal|low|medium|high|xhigh|max|ultra)(?:\s|$)/i)?.[1];
+  return normalizedReasoningEffort(effort);
+}
+
+async function refreshVisibleRemoteReasoningEffort(threads, queueWindows, nowMs = Date.now()) {
+  const focusedWindow = queueWindows.find((window) => window.focused)
+    ?? (queueWindows.length === 1 ? queueWindows[0] : null);
+  const focusedThread = focusedWindow ? matchQueueWindowThread(focusedWindow, threads) : null;
+  // Only bind a composer value when the focused window header identifies the
+  // exact remote task. A recent click is not enough: navigation can fail while
+  // leaving a local composer's controls on screen.
+  const thread = focusedThread?.remote ? focusedThread : null;
+  if (!thread?.id) return null;
+  if (remoteReasoningProbe.threadId === thread.id
+      && nowMs - remoteReasoningProbe.checkedAtMs < REMOTE_REASONING_PROBE_CACHE_MS) {
+    return remoteReasoningEffortByThreadId.get(thread.id)?.effort ?? null;
+  }
+  remoteReasoningProbe = { threadId: thread.id, checkedAtMs: nowMs };
+  try {
+    const { stdout } = await execFileAsync(KEY_BRIDGE, ["codex-reasoning-state"], {
+      timeout: 1800,
+      maxBuffer: 4096
+    });
+    const effort = parseCodexReasoningState(stdout);
+    if (!effort) return null;
+    const lifecycle = remoteLifecycleCache.get(thread.id);
+    remoteReasoningEffortByThreadId.set(thread.id, {
+      effort,
+      observedAtMs: nowMs,
+      turnStartedAtMs: Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null
+    });
+    return effort;
+  } catch {
+    return remoteReasoningEffortByThreadId.get(thread.id)?.effort ?? null;
+  }
+}
+
+function reasoningEffortForRemoteThread(thread, lifecycle) {
+  const summaryEffort = normalizedReasoningEffort(thread.reasoningEffort);
+  if (summaryEffort) return summaryEffort;
+  const observed = remoteReasoningEffortByThreadId.get(thread.id);
+  const observedEffort = normalizedReasoningEffort(observed?.effort);
+  if (!observedEffort) return null;
+  if (Number.isFinite(lifecycle?.startedAtMs)
+      && observed.observedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < lifecycle.startedAtMs) {
+    return null;
+  }
+  if (Number.isFinite(lifecycle?.startedAtMs)
+      && Number.isFinite(observed.turnStartedAtMs)
+      && Math.abs(observed.turnStartedAtMs - lifecycle.startedAtMs) > REMOTE_REASONING_TURN_TOLERANCE_MS) {
+    return null;
+  }
+  return observedEffort;
+}
+
+function remoteStatusForThread(thread) {
+  const runtimeStatus = thread.threadRuntimeStatus ?? { type: "notLoaded" };
+  const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
+  const startedAtMs = Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null;
+  const summaryEndMs = Number.isFinite(thread.updatedAtMs)
+    && Number.isFinite(startedAtMs)
+    && thread.updatedAtMs >= startedAtMs
+    ? thread.updatedAtMs
+    : null;
+  const reasoningEffort = reasoningEffortForRemoteThread(thread, lifecycle);
+  const serviceTier = typeof thread.serviceTier === "string" ? thread.serviceTier : "default";
+
+  if (runtimeStatus.type === "active") {
+    const flags = Array.isArray(runtimeStatus.activeFlags) ? runtimeStatus.activeFlags : [];
+    const waitingOnApproval = flags.includes("waitingOnApproval");
+    const waitingOnUserInput = flags.includes("waitingOnUserInput");
+    return {
+      status: "working",
+      startedAtMs,
+      endedAtMs: null,
+      reasoningEffort,
+      serviceTier,
+      activity: waitingOnApproval
+        ? { kind: "request", label: "원격 승인 대기" }
+        : waitingOnUserInput
+          ? { kind: "request", label: "원격 입력 대기" }
+          : { kind: "command", label: "원격 작업" }
+    };
+  }
+  if (runtimeStatus.type === "systemError") {
+    return {
+      status: "error",
+      startedAtMs,
+      endedAtMs: null,
+      reasoningEffort,
+      serviceTier,
+      activity: { kind: "error", label: "원격 오류" }
+    };
+  }
+
+  // The remote summary's updatedAt is the server-side latest-turn update. It
+  // provides the actual end boundary, while UUIDv7 gives the turn start even
+  // after the remote host has disconnected or the Desktop app has resumed.
+  if (Number.isFinite(startedAtMs) && lifecycle?.status === "working" && !summaryEndMs) {
+    return {
+      status: "working",
+      startedAtMs,
+      endedAtMs: null,
+      reasoningEffort,
+      serviceTier,
+      activity: { kind: "command", label: "원격 작업" }
+    };
+  }
+  if (Number.isFinite(startedAtMs)
+      && (summaryEndMs || ["completed", "stopped", "error"].includes(lifecycle?.status))) {
+    const status = lifecycle?.status === "stopped"
+      ? "stopped"
+      : lifecycle?.status === "error"
+        ? "error"
+        : "completed";
+    const endedAtMs = summaryEndMs
+      ?? lifecycle?.endedAtMs
+      ?? lifecycle?.terminalObservedAtMs
+      ?? null;
+    return {
+      status,
+      startedAtMs,
+      endedAtMs,
+      reasoningEffort,
+      serviceTier,
+      activity: status === "stopped"
+        ? { kind: "stopped", label: "원격 작업 중단" }
+        : status === "error"
+          ? { kind: "error", label: "원격 오류" }
+          : { kind: "complete", label: thread.hasUnreadTurn ? "원격 완료 확인" : "원격 작업 종료" }
+    };
+  }
+  return {
+    status: "idle",
+    startedAtMs: null,
+    endedAtMs: null,
+    reasoningEffort,
+    serviceTier,
+    activity: {
+      kind: thread.hasUnreadTurn ? "answer" : "idle",
+      label: thread.hasUnreadTurn ? "원격 확인 필요" : "원격 열기"
+    }
+  };
+}
+
 async function refreshClosedSideChatsFromLogs(threads) {
   if (threads.length === 0) return;
   const candidateIds = new Set(threads.map((thread) => thread.id));
@@ -2352,8 +2671,9 @@ async function readRemoteThreadRows() {
 
         const updatedAt = Number(summary?.recencyAt ?? summary?.updatedAt ?? 0);
         const createdAt = Number(summary?.createdAt ?? updatedAt);
+        const updatedAtMs = updatedAt > 100_000_000_000 ? updatedAt : updatedAt * 1000;
         const existing = byId.get(id);
-        if (existing && threadRecencyMs(existing) >= (updatedAt > 100_000_000_000 ? updatedAt : updatedAt * 1000)) {
+        if (existing && threadRecencyMs(existing) >= updatedAtMs) {
           continue;
         }
         byId.set(id, {
@@ -2365,9 +2685,13 @@ async function readRemoteThreadRows() {
           rollout_path: null,
           recency_at: updatedAt,
           updated_at: Number(summary?.updatedAt ?? updatedAt),
+          updatedAtMs,
           createdAtMs: createdAt > 100_000_000_000 ? createdAt : createdAt * 1000,
           hasUnreadTurn: Boolean(summary?.hasUnreadTurn),
           threadRuntimeStatus: summary?.threadRuntimeStatus ?? { type: "notLoaded" },
+          reasoningEffort: normalizedReasoningEffort(summary?.reasoningEffort)
+            ?? normalizedReasoningEffort(summary?.latestReasoningEffort),
+          serviceTier: typeof summary?.serviceTier === "string" ? summary.serviceTier : "default",
           workspaceKind: summary?.workspaceKind ?? "project"
         });
       }
@@ -2569,47 +2893,7 @@ async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
 }
 
 async function statusForThread(thread, activeThreadIds) {
-  if (thread.remote) {
-    const runtimeStatus = thread.threadRuntimeStatus ?? { type: "notLoaded" };
-    if (runtimeStatus.type === "active") {
-      const flags = Array.isArray(runtimeStatus.activeFlags) ? runtimeStatus.activeFlags : [];
-      const waitingOnApproval = flags.includes("waitingOnApproval");
-      const waitingOnUserInput = flags.includes("waitingOnUserInput");
-      return {
-        status: "working",
-        startedAtMs: null,
-        endedAtMs: null,
-        reasoningEffort: null,
-        serviceTier: "default",
-        activity: waitingOnApproval
-          ? { kind: "request", label: "원격 승인 대기" }
-          : waitingOnUserInput
-            ? { kind: "request", label: "원격 입력 대기" }
-            : { kind: "command", label: "원격 작업" }
-      };
-    }
-    if (runtimeStatus.type === "systemError") {
-      return {
-        status: "error",
-        startedAtMs: null,
-        endedAtMs: null,
-        reasoningEffort: null,
-        serviceTier: "default",
-        activity: { kind: "error", label: "원격 오류" }
-      };
-    }
-    return {
-      status: "idle",
-      startedAtMs: null,
-      endedAtMs: null,
-      reasoningEffort: null,
-      serviceTier: "default",
-      activity: {
-        kind: thread.hasUnreadTurn ? "answer" : "idle",
-        label: thread.hasUnreadTurn ? "원격 확인 필요" : "원격 열기"
-      }
-    };
-  }
+  if (thread.remote) return remoteStatusForThread(thread);
   const isActive = activeThreadIds.has(thread.id);
   if (!thread.rollout_path) return {
     status: isActive ? "working" : "idle",
@@ -2707,6 +2991,11 @@ async function readTopThreads() {
   const selection = selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds);
   const { selected, byId } = selection;
   mostRecentThreadId = selection.mostRecentId;
+  const [queueWindows] = await Promise.all([
+    queueWindowsPromise,
+    refreshRemoteLifecyclesFromLogs()
+  ]);
+  await refreshVisibleRemoteReasoningEffort(selected, queueWindows);
 
   const persistentThreads = selected.filter((thread) => !thread.ephemeral);
   const persistentLifecycles = await Promise.all(
@@ -2743,7 +3032,7 @@ async function readTopThreads() {
         : parentLifecycle?.serviceTier ?? "default"
     };
   });
-  return applyQueueState(hydratedThreads, await queueWindowsPromise);
+  return applyQueueState(hydratedThreads, queueWindows);
 }
 
 async function readSystemAppearance() {
@@ -3718,6 +4007,115 @@ function verifyThreadSelectionPolicy() {
   if (!passed) process.exitCode = 1;
 }
 
+function verifyRemoteLifecyclePolicy() {
+  const threadId = "019f0000-0000-7000-8000-000000000001";
+  const turnId = "019f77d5-d319-7000-8000-000000000002";
+  const startedAtMs = uuidV7TimestampMs(turnId);
+  const startConfigMs = startedAtMs - 192;
+  const reasoningObservedMs = startedAtMs + 3_200;
+  const endedAtMs = startedAtMs + 9 * 60_000 + 22_000;
+  const lifecycles = new Map();
+  applyRemoteLifecycleLogLine(
+    `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${threadId}`,
+    lifecycles
+  );
+  applyRemoteLifecycleLogLine(
+    `${new Date(reasoningObservedMs).toISOString()} info [electron-message-handler] Reasoning summary item threadId=${threadId} turnId=${turnId}`,
+    lifecycles
+  );
+  const parsed = lifecycles.get(threadId);
+  remoteLifecycleCache.clear();
+  remoteReasoningEffortByThreadId.clear();
+  remoteLifecycleCache.set(threadId, parsed);
+  remoteReasoningEffortByThreadId.set(threadId, {
+    effort: "high",
+    observedAtMs: reasoningObservedMs,
+    turnStartedAtMs: startedAtMs
+  });
+
+  const active = remoteStatusForThread({
+    id: threadId,
+    remote: true,
+    updatedAtMs: startedAtMs - 10_000,
+    threadRuntimeStatus: { type: "active", activeFlags: [] },
+    reasoningEffort: null,
+    serviceTier: "default"
+  });
+  const completed = remoteStatusForThread({
+    id: threadId,
+    remote: true,
+    updatedAtMs: endedAtMs,
+    threadRuntimeStatus: { type: "idle" },
+    hasUnreadTurn: true,
+    reasoningEffort: null,
+    serviceTier: "default"
+  });
+
+  applyRemoteLifecycleLogLine(
+    `${new Date(endedAtMs + 2_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=interrupted`,
+    remoteLifecycleCache
+  );
+  const stopped = remoteStatusForThread({
+    id: threadId,
+    remote: true,
+    updatedAtMs: endedAtMs,
+    threadRuntimeStatus: { type: "idle" },
+    reasoningEffort: null,
+    serviceTier: "default"
+  });
+
+  remoteReasoningEffortByThreadId.set(threadId, {
+    effort: "medium",
+    observedAtMs: startedAtMs - REMOTE_REASONING_TURN_TOLERANCE_MS - 1,
+    turnStartedAtMs: startedAtMs - 60_000
+  });
+  const staleEffortRejected = reasoningEffortForRemoteThread(
+    { id: threadId, reasoningEffort: null },
+    remoteLifecycleCache.get(threadId)
+  ) === null;
+  const summaryEffortPreferred = reasoningEffortForRemoteThread(
+    { id: threadId, reasoningEffort: "max" },
+    remoteLifecycleCache.get(threadId)
+  ) === "max";
+  const queueWindows = parseCodexQueueWindows("window\t2\t1\nend\nwindow\t3\t0\nend\n");
+  const focusedWindowParsed = queueWindows.length === 2
+    && queueWindows[0].index === 2
+    && queueWindows[0].focused
+    && !queueWindows[1].focused;
+
+  const passed = Number.isFinite(startedAtMs)
+    && parsed?.status === "working"
+    && parsed.startedAtMs === startedAtMs
+    && active.status === "working"
+    && active.startedAtMs === startedAtMs
+    && active.reasoningEffort === "high"
+    && completed.status === "completed"
+    && completed.endedAtMs === endedAtMs
+    && timingLabel(completed, endedAtMs) === "09:22"
+    && stopped.status === "stopped"
+    && stopped.startedAtMs === startedAtMs
+    && staleEffortRejected
+    && summaryEffortPreferred
+    && focusedWindowParsed
+    && parseCodexReasoningState("effort=ultra confidence=120 visited=800") === "ultra"
+    && parseCodexReasoningState("effort=unknown confidence=0 visited=800") === null
+    && reasoningEffortProgress(null) === 0;
+  console.log(JSON.stringify({
+    passed,
+    uuidStartRecovered: parsed?.startedAtMs === startedAtMs,
+    activeTimingRecovered: active.startedAtMs === startedAtMs,
+    completedDuration: timingLabel(completed, endedAtMs),
+    stoppedStatusRecovered: stopped.status === "stopped",
+    staleEffortRejected,
+    summaryEffortPreferred,
+    focusedWindowParsed,
+    unknownEffortProgress: reasoningEffortProgress(null)
+  }));
+  remoteLifecycleCache.clear();
+  remoteReasoningEffortByThreadId.clear();
+  if (!passed) process.exitCode = 1;
+}
+
 async function verifyUsageCachePolicy() {
   const weeklyContext = "usage-cache-weekly";
   socket = { readyState: WebSocket.OPEN, send() {} };
@@ -3925,6 +4323,8 @@ if (completionContractMode) {
     console.error(error);
     process.exitCode = 1;
   });
+} else if (remoteLifecycleContractMode) {
+  verifyRemoteLifecyclePolicy();
 } else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
   if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
   else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
