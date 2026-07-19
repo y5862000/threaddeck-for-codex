@@ -5,6 +5,7 @@ import process from "node:process";
 const root = path.resolve(import.meta.dirname, "..");
 const checkedRoots = [
   "src",
+  "test",
   "native",
   "profiles/source",
   "com.yechan.threaddeck.sdPlugin"

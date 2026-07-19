@@ -7,6 +7,93 @@ const os = require("node:os");
 const path = require("node:path");
 const { promisify } = require("node:util");
 
+const {
+  compactLine,
+  isInternalAmbientTitle,
+  normalizeTitle,
+  stringFingerprint,
+  titleFingerprints,
+  titleVariants,
+  titleVisualWidth,
+  wrapTitle
+} = require("./text");
+const {
+  comparableTextInputStates,
+  parseTextInputState,
+  sameTextInputState,
+  voiceDraftReturnedToBaseline
+} = require("./text-input");
+const {
+  UUID_PATTERN,
+  threadRecencyMs,
+  timingLabel: formatTimingLabel,
+  uuidV7TimestampMs
+} = require("./time");
+const {
+  applyRemoteActivityLogLine: applyRemoteActivityLogLineToStore,
+  applyRemoteLifecycleLogLine: applyRemoteLifecycleLogLineToStore,
+  deriveRemoteStatus,
+  normalizedReasoningEffort,
+  observeRemoteRuntimeEnd: observeRemoteRuntimeEndInStore,
+  parseCodexReasoningState,
+  reasoningEffortForRemoteThread: reasoningEffortForRemoteThreadInStore,
+} = require("./remote-state");
+const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
+const { parseCodexQueueWindows, queueCountForWindow } = require("./queue-state");
+const {
+  canContinueLogCursor,
+  consumeLogBytes,
+  logFileIdentity,
+  nextLogBoundary
+} = require("./log-lines");
+const {
+  pinnedThreadIdsFromState,
+  promptHistoryFromState,
+  remoteThreadRowsFromState
+} = require("./codex-state");
+const { consumeLifecycleLines } = require("./local-lifecycle");
+const {
+  ACTIONS,
+  APP_SERVER_SESSION_CACHE_MS,
+  APP_SERVER_START_TOLERANCE_MS,
+  COMPLETION_OBSERVATION_OVERLAP_MS,
+  COMPLETION_STARTUP_GRACE_MS,
+  DEFAULT_PROFILE_PAGE_COUNT,
+  DESKTOP_LOG_PATH_CACHE_MS,
+  DISTRIBUTED_PROFILE_NAME,
+  GLOBAL_COMPLETION_FRAME_INTERVAL_MS,
+  GLOBAL_COMPLETION_GROUP_COUNT,
+  GLOBAL_COMPLETION_PULSE_DURATION_MS,
+  MEDIA_COMMAND_BY_ACTION,
+  PAGE_DIRECTION_BY_ACTION,
+  QUEUE_ZERO_CONFIRM_MS,
+  SEND_LONG_PRESS_MS,
+  SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES,
+  SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS,
+  SIDE_CHAT_TARGET_LOG_TAIL_BYTES,
+  SIDE_CHAT_TARGET_REFRESH_DELAYS_MS,
+  THREAD_ACTIONS,
+  THREAD_COMPLETION_PULSE_DURATION_MS,
+  THREAD_COUNT,
+  THREAD_REFRESH_ERROR_STATE,
+  THREAD_REFRESH_RETRY_DELAYS_MS,
+  THREAD_REFRESH_STARTUP_ERROR_FAILURES,
+  THREAD_SLOT_BY_ACTION,
+  THREAD_VOICE_FOCUS_PREP_LEAD_MS,
+  THREAD_VOICE_FOCUS_SETTLE_MS,
+  THREAD_VOICE_LONG_PRESS_MS,
+  VOICE_AUTO_SUBMIT_STABLE_MS,
+  VOICE_COMPLETE_DISPLAY_MS,
+  VOICE_ERROR_DISPLAY_MS,
+  VOICE_START_VERIFY_MS,
+  VOICE_SUBMIT_VERIFY_DELAYS_MS,
+  VOICE_TARGET_OPEN_HINT_MS,
+  VOICE_TEXT_PROBE_INTERVAL_MS,
+  VOICE_TRANSCRIPTION_POLL_INTERVAL_MS,
+  VOICE_TRANSCRIPTION_STABLE_MS,
+  VOICE_TRANSCRIPTION_TIMEOUT_MS
+} = require("./config");
+
 const execFileAsync = promisify(execFile);
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
@@ -42,125 +129,10 @@ function resolveCodexBar() {
 
 const CODEXBAR = resolveCodexBar();
 
-const ACTIONS = {
-  weekly: "com.yechan.threaddeck.weekly",
-  thread1: "com.yechan.threaddeck.thread1",
-  thread2: "com.yechan.threaddeck.thread2",
-  thread3: "com.yechan.threaddeck.thread3",
-  thread4: "com.yechan.threaddeck.thread4",
-  thread5: "com.yechan.threaddeck.thread5",
-  thread6: "com.yechan.threaddeck.thread6",
-  thread7: "com.yechan.threaddeck.thread7",
-  thread8: "com.yechan.threaddeck.thread8",
-  sideChat: "com.yechan.threaddeck.sidechat",
-  newThread: "com.yechan.threaddeck.newthread",
-  voice: "com.yechan.threaddeck.voice",
-  send: "com.yechan.threaddeck.send",
-  appSwitch: "com.yechan.threaddeck.appswitch",
-  mediaPrevious: "com.yechan.threaddeck.media.previous",
-  mediaRewind: "com.yechan.threaddeck.media.rewind",
-  mediaPlayPause: "com.yechan.threaddeck.media.playpause",
-  mediaForward: "com.yechan.threaddeck.media.forward",
-  mediaMute: "com.yechan.threaddeck.media.mute",
-  mediaVolumeDown: "com.yechan.threaddeck.media.volumedown",
-  mediaVolumeUp: "com.yechan.threaddeck.media.volumeup",
-  mediaNext: "com.yechan.threaddeck.media.next",
-  pagePrevious: "com.yechan.threaddeck.page.previous",
-  pageNext: "com.yechan.threaddeck.page.next"
-};
-
-const THREAD_ACTIONS = [
-  ACTIONS.thread1,
-  ACTIONS.thread2,
-  ACTIONS.thread3,
-  ACTIONS.thread4,
-  ACTIONS.thread5,
-  ACTIONS.thread6,
-  ACTIONS.thread7,
-  ACTIONS.thread8
-];
-const THREAD_COUNT = THREAD_ACTIONS.length;
-const THREAD_COMPLETION_PULSE_DURATION_MS = 5200;
-const THREAD_REFRESH_RETRY_DELAYS_MS = [120, 360];
-const THREAD_REFRESH_STARTUP_ERROR_FAILURES = 3;
-const GLOBAL_COMPLETION_PULSE_DURATION_MS = 2600;
-const GLOBAL_COMPLETION_FRAME_INTERVAL_MS = 80;
-const GLOBAL_COMPLETION_GROUP_COUNT = 2;
-const COMPLETION_STARTUP_GRACE_MS = 15_000;
-const COMPLETION_OBSERVATION_OVERLAP_MS = 1_500;
-const SEND_LONG_PRESS_MS = 600;
-const THREAD_VOICE_LONG_PRESS_MS = 550;
-const THREAD_VOICE_FOCUS_PREP_LEAD_MS = 200;
-const THREAD_VOICE_FOCUS_SETTLE_MS = 60;
 const REMOTE_APP_ACTIVATION_SETTLE_MS = 80;
 const REMOTE_APP_ACTIVATION_RETRY_MS = 180;
-const VOICE_TRANSCRIPTION_POLL_INTERVAL_MS = 100;
-const VOICE_TEXT_PROBE_INTERVAL_MS = 200;
-const VOICE_TRANSCRIPTION_STABLE_MS = 450;
-const VOICE_TRANSCRIPTION_TIMEOUT_MS = 20_000;
-const VOICE_AUTO_SUBMIT_STABLE_MS = 750;
-const VOICE_SUBMIT_VERIFY_DELAYS_MS = [180, 280, 440];
-const VOICE_START_VERIFY_MS = 1_500;
-const VOICE_COMPLETE_DISPLAY_MS = 900;
-const VOICE_ERROR_DISPLAY_MS = 1_300;
-const VOICE_TARGET_OPEN_HINT_MS = 120_000;
-const QUEUE_ZERO_CONFIRM_MS = 1_200;
-const SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS = 8_000;
-const SIDE_CHAT_TARGET_REFRESH_DELAYS_MS = [180, 500, 1_000, 1_800, 3_000, 4_800];
-const SIDE_CHAT_TARGET_LOG_TAIL_BYTES = 2 * 1024 * 1024;
-const APP_SERVER_SESSION_CACHE_MS = 5_000;
-const APP_SERVER_START_TOLERANCE_MS = 5_000;
-const DESKTOP_LOG_PATH_CACHE_MS = 5_000;
-const SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES = 64 * 1024 * 1024;
 const REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES = 32 * 1024 * 1024;
 const REMOTE_REASONING_PROBE_CACHE_MS = 5_000;
-const REMOTE_REASONING_TURN_TOLERANCE_MS = 5_000;
-const REMOTE_RUNTIME_TERMINAL_CONFIRM_MS = 1_200;
-const REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS = 10_000;
-const REMOTE_ACTIVITY_STALE_MS = 120_000;
-const REMOTE_REASONING_SUMMARY_MAX_LENGTH = 8_192;
-const REASONING_EFFORT_VALUES = new Set([
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-  "ultra"
-]);
-const QUEUED_MESSAGE_DELETE_LABELS = [
-  "대기열에 있는 메시지 삭제",
-  "Delete queued message"
-];
-const QUEUED_MESSAGE_ACTION_LABELS = [
-  "대기열에 있는 메시지 액션",
-  "Queued message actions"
-];
-const THREAD_REFRESH_ERROR_STATE = Object.freeze({
-  title: "상태를 읽지 못함",
-  status: "error",
-  pinned: false,
-  activity: { kind: "error", label: "상태 확인" }
-});
-const THREAD_SLOT_BY_ACTION = new Map(THREAD_ACTIONS.map((action, index) => [action, index]));
-const MEDIA_COMMAND_BY_ACTION = new Map([
-  [ACTIONS.mediaPrevious, "media-previous"],
-  [ACTIONS.mediaRewind, "media-rewind"],
-  [ACTIONS.mediaPlayPause, "media-play-pause"],
-  [ACTIONS.mediaForward, "media-forward"],
-  [ACTIONS.mediaMute, "media-mute"],
-  [ACTIONS.mediaVolumeDown, "media-volume-down"],
-  [ACTIONS.mediaVolumeUp, "media-volume-up"],
-  [ACTIONS.mediaNext, "media-next"]
-]);
-const PAGE_DIRECTION_BY_ACTION = new Map([
-  [ACTIONS.pagePrevious, -1],
-  [ACTIONS.pageNext, 1]
-]);
-const DISTRIBUTED_PROFILE_NAME = "profiles/threaddeck-neo";
-const DEFAULT_PROFILE_PAGE_COUNT = 3;
-const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 // Use fonts already supplied by macOS. The public plugin intentionally does
 // not redistribute proprietary font files.
 const FONT_STACK = "'.AppleSystemUIFont', 'SF Pro Display', 'SF Pro Text', 'Apple SD Gothic Neo', 'Helvetica Neue', Helvetica, Arial, sans-serif";
@@ -228,10 +200,8 @@ const registerEvent = argument("-registerEvent");
 const snapshotMode = process.argv.includes("--snapshot");
 const completionContractMode = process.argv.includes("--verify-completion");
 const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
-const threadSelectionContractMode = process.argv.includes("--verify-thread-selection");
 const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
 const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
-const remoteLifecycleContractMode = process.argv.includes("--verify-remote-lifecycle");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
@@ -251,6 +221,7 @@ const voiceStateByContext = new Map();
 const voiceStateResetAtMs = new Map();
 const voiceTranscriptionByContext = new Map();
 const voiceTargetThreadByContext = new Map();
+const voiceSessionIdByContext = new Map();
 const voiceStartVerificationTimers = new Map();
 const sendPressStartedAt = new Map();
 const sendLongPressTimers = new Map();
@@ -279,18 +250,20 @@ let lastOpenedThreadId = null;
 let lastOpenedThreadAtMs = null;
 let knownSideChatIds = new Set();
 let pendingSideChatTarget = null;
+let nextVoiceSessionId = 0;
 let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
 let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
 let accessibilityTrustCache = { checkedAtMs: 0, trusted: null };
 let pinnedIdsCache = [];
 let remoteThreadRowsCache = [];
+let sideChatRowsCache = [];
 let sideChatSessionStartMs = null;
 const sideChatParentById = new Map();
 const sideChatLifecycleCache = new Map();
 const closedSideChatAtMs = new Map();
 const sideChatCloseLogOffsets = new Map();
 const remoteLifecycleCache = new Map();
-const remoteLifecycleLogOffsets = new Map();
+const remoteLifecycleLogCursors = new Map();
 const remoteReasoningEffortByThreadId = new Map();
 const remoteRuntimeObservationByThreadId = new Map();
 const remoteActivityByThreadId = new Map();
@@ -378,25 +351,6 @@ function escapeXml(value) {
     .replaceAll("'", "&apos;");
 }
 
-function compactLine(value, maxWidth = 9.4) {
-  const graphemes = Array.from(new Intl.Segmenter("ko", { granularity: "grapheme" }).segment(String(value ?? "")), (part) => part.segment);
-  let width = 0;
-  const shown = [];
-  for (const grapheme of graphemes) {
-    const nextWidth = visualWidth(grapheme);
-    if (shown.length > 0 && width + nextWidth > maxWidth) break;
-    shown.push(grapheme);
-    width += nextWidth;
-  }
-  if (shown.length < graphemes.length) {
-    while (shown.length > 0 && width + 0.75 > maxWidth) {
-      width -= visualWidth(shown.pop());
-    }
-    shown.push("…");
-  }
-  return shown.join("").trim();
-}
-
 function detailedActivityLabel(activity) {
   const kind = typeof activity === "string" ? "idle" : activity?.kind;
   const fallbacks = {
@@ -427,11 +381,6 @@ function detailedActivityLabel(activity) {
 
 function isFastServiceTier(value) {
   return ["fast", "priority"].includes(String(value ?? "").toLowerCase());
-}
-
-function normalizedReasoningEffort(value) {
-  const normalized = String(value ?? "").trim().toLowerCase();
-  return REASONING_EFFORT_VALUES.has(normalized) ? normalized : null;
 }
 
 function reasoningEffortProgress(value) {
@@ -1163,40 +1112,6 @@ function runKeyBridgeWithInput(command, args, input, timeoutMs = 6000) {
   });
 }
 
-function parseTextInputState(command, output) {
-  const focusedMatch = output.match(/^(\d+)\t([0-9a-f]{16})$/i);
-  if (command === "focused-text-state" && focusedMatch) {
-    return {
-      source: "focused",
-      candidates: 1,
-      length: Number(focusedMatch[1]),
-      hash: focusedMatch[2].toLowerCase()
-    };
-  }
-  const aggregateMatch = output.match(/^(\d+)\t(\d+)\t([0-9a-f]{16})$/i);
-  if (command === "editable-text-state" && aggregateMatch) {
-    return {
-      source: "aggregate",
-      candidates: Number(aggregateMatch[1]),
-      length: Number(aggregateMatch[2]),
-      hash: aggregateMatch[3].toLowerCase()
-    };
-  }
-  return null;
-}
-
-function sameTextInputState(left, right) {
-  return Boolean(left && right)
-    && left.source === right.source
-    && left.candidates === right.candidates
-    && left.length === right.length
-    && left.hash === right.hash;
-}
-
-function comparableTextInputStates(left, right) {
-  return Boolean(left && right) && left.source === right.source;
-}
-
 function textInputStateSync() {
   for (const command of ["focused-text-state", "editable-text-state"]) {
     try {
@@ -1240,6 +1155,19 @@ function cancelVoiceTranscription(context, resetVisual = false) {
   voiceTranscriptionByContext.delete(context);
   voiceStateResetAtMs.delete(context);
   if (resetVisual || voiceTargetThreadByContext.has(context)) setVoiceVisualState(context, "idle");
+}
+
+function claimVoiceSession(context) {
+  // Codex exposes one global composer and one push-to-talk shortcut. Starting
+  // a hold from any key therefore supersedes every earlier transcription or
+  // submit, even when Stream Deck assigned those keys different contexts.
+  for (const previousContext of voiceSessionIdByContext.keys()) {
+    if (previousContext !== context) cancelVoiceTranscription(previousContext, true);
+  }
+  voiceSessionIdByContext.clear();
+  const sessionId = ++nextVoiceSessionId;
+  voiceSessionIdByContext.set(context, sessionId);
+  return sessionId;
 }
 
 function bindPendingVoiceContextsToThread(threadId, nowMs = Date.now()) {
@@ -1330,18 +1258,12 @@ function resolveVoiceTargetThreadId(nowMs = Date.now()) {
   return mostRecentThreadId && visibleIds.has(mostRecentThreadId) ? mostRecentThreadId : null;
 }
 
-function voiceSubmissionStillCurrent(context, targetThreadId) {
+function voiceSubmissionStillCurrent(context, targetThreadId, sessionId) {
   return contexts.has(context)
     && voiceStateByContext.get(context) === "submitting"
-    && voiceTargetThreadByContext.get(context) === targetThreadId;
-}
-
-function voiceDraftReturnedToBaseline(current, tracker) {
-  if (!current || !tracker?.lastObserved) return false;
-  if (tracker.baseline && sameTextInputState(current, tracker.baseline)) return true;
-  return comparableTextInputStates(current, tracker.lastObserved)
-    && tracker.lastObserved.length > 0
-    && current.length === 0;
+    && voiceTargetThreadByContext.get(context) === targetThreadId
+    && Number.isInteger(sessionId)
+    && voiceSessionIdByContext.get(context) === sessionId;
 }
 
 async function waitForVoiceDraftReset(context, targetThreadId, tracker, options = {}) {
@@ -1352,7 +1274,7 @@ async function waitForVoiceDraftReset(context, targetThreadId, tracker, options 
   let stableResetObservations = 0;
   for (const delayMs of delays) {
     await sleep(delayMs);
-    if (!voiceSubmissionStillCurrent(context, targetThreadId)) return false;
+    if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return false;
     const current = stateReader();
     if (voiceDraftReturnedToBaseline(current, tracker)) return true;
     const changedAfterSubmit = comparableTextInputStates(current, tracker.lastObserved)
@@ -1386,12 +1308,12 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
   try {
     await openApp();
     await sleep(140);
-    if (!voiceSubmissionStillCurrent(context, targetThreadId)) return;
+    if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
 
     const clickedSubmit = bridge("codex-submit-composer", null, { quiet: true });
     let confirmed = clickedSubmit
       && await waitForDraftReset(context, targetThreadId, tracker, options);
-    if (!confirmed && voiceSubmissionStillCurrent(context, targetThreadId)) {
+    if (!confirmed && voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) {
       // The explicit button is preferred, but Codex can rebuild the composer
       // between transcription and submission. Refocus the draft and retry with
       // Return, then verify the draft actually cleared before showing success.
@@ -1402,7 +1324,7 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
       }
       confirmed = await waitForDraftReset(context, targetThreadId, tracker, options);
     }
-    if (!voiceSubmissionStillCurrent(context, targetThreadId)) return;
+    if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
     if (!confirmed) {
       failVoiceTranscription(context);
       console.error("Codex dictated message submission could not be confirmed");
@@ -1411,8 +1333,10 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
     setVoiceVisualState(context, "sent", VOICE_COMPLETE_DISPLAY_MS);
     scheduleRefresh();
   } catch (error) {
-    failVoiceTranscription(context);
-    console.error(`Could not submit dictated Codex message: ${error?.message ?? "unknown error"}`);
+    if (voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) {
+      failVoiceTranscription(context);
+      console.error(`Could not submit dictated Codex message: ${error?.message ?? "unknown error"}`);
+    }
   }
 }
 
@@ -1586,23 +1510,42 @@ function resumeMediaAfterVoiceSync() {
   voiceSuspendedMediaPids.clear();
 }
 
+function supersedeHeldVoiceSync(context, bridge = runKeyBridgeSync) {
+  const previousContexts = [...voiceHeldContexts].filter((heldContext) => heldContext !== context);
+  if (previousContexts.length === 0) return false;
+
+  // The Codex push-to-talk shortcut and composer are global. A second key
+  // cannot safely share the physical hold with the first key because either
+  // release order could then attribute the transcript to the wrong task.
+  voiceHeldContexts.clear();
+  for (const previousContext of previousContexts) clearVoiceStartVerification(previousContext);
+  bridge("voice-up", previousContexts.at(-1));
+  return true;
+}
+
 function beginVoiceHoldSync(context, options = {}) {
   if (voiceHeldContexts.has(context)) return true;
+  const bridge = options.bridge ?? runKeyBridgeSync;
+  const stateReader = options.stateReader ?? textInputStateSync;
+  const pauseMedia = options.pauseMedia ?? pauseMediaForVoiceSync;
+  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoiceSync;
+  supersedeHeldVoiceSync(context, bridge);
   cancelVoiceTranscription(context);
   voiceStateByContext.delete(context);
+  const sessionId = claimVoiceSession(context);
   const targetThreadId = options.targetThreadId ?? resolveVoiceTargetThreadId();
   if (targetThreadId) voiceTargetThreadByContext.set(context, targetThreadId);
   // Start with the composer focused so both the baseline and the final
   // transcript come from the same accessibility element.
   if (!options.composerAlreadyFocused) {
-    runKeyBridgeSync("codex-focus-composer", null, { quiet: true });
+    bridge("codex-focus-composer", null, { quiet: true });
   }
-  let baseline = textInputStateSync();
+  let baseline = stateReader();
   if (!baseline && options.composerAlreadyFocused) {
     // The prepared focus can become stale if Codex replaces the composer DOM
     // during the final navigation frame. Retry only in that exceptional case.
-    runKeyBridgeSync("codex-focus-composer", null, { quiet: true });
-    baseline = textInputStateSync();
+    bridge("codex-focus-composer", null, { quiet: true });
+    baseline = stateReader();
   }
   voiceTranscriptionByContext.set(context, {
     baseline,
@@ -1611,12 +1554,13 @@ function beginVoiceHoldSync(context, options = {}) {
     lastProbeAtMs: null,
     releasedAtMs: null,
     autoSubmit: Boolean(options.autoSubmit),
-    targetThreadId: targetThreadId ?? null
+    targetThreadId: targetThreadId ?? null,
+    sessionId
   });
   if (voiceHeldContexts.size === 0) {
-    pauseMediaForVoiceSync(context);
-    if (!runKeyBridgeSync("voice-down", context)) {
-      resumeMediaAfterVoiceSync();
+    pauseMedia(context);
+    if (!bridge("voice-down", context)) {
+      resumeMedia();
       failVoiceTranscription(context);
       return false;
     }
@@ -1631,12 +1575,15 @@ function beginVoiceHoldSync(context, options = {}) {
   return true;
 }
 
-function endVoiceHoldSync(context, trackTranscription = true) {
+function endVoiceHoldSync(context, trackTranscription = true, options = {}) {
+  const bridge = options.bridge ?? runKeyBridgeSync;
+  const stateReader = options.stateReader ?? textInputStateSync;
+  const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoiceSync;
   clearVoiceStartVerification(context);
   if (!voiceHeldContexts.delete(context)) return;
   if (voiceHeldContexts.size > 0) return;
-  const released = runKeyBridgeSync("voice-up", context);
-  resumeMediaAfterVoiceSync();
+  const released = bridge("voice-up", context);
+  resumeMedia();
   if (!trackTranscription) {
     cancelVoiceTranscription(context, true);
     return;
@@ -1646,15 +1593,17 @@ function endVoiceHoldSync(context, trackTranscription = true) {
     return;
   }
   const tracker = voiceTranscriptionByContext.get(context) ?? {
-    baseline: textInputStateSync(),
+    baseline: stateReader(),
     lastObserved: null,
     stableSinceMs: null,
     lastProbeAtMs: null,
     releasedAtMs: null,
     autoSubmit: false,
-    targetThreadId: voiceTargetThreadByContext.get(context) ?? null
+    targetThreadId: voiceTargetThreadByContext.get(context) ?? null,
+    sessionId: voiceSessionIdByContext.get(context) ?? ++nextVoiceSessionId
   };
-  if (!tracker.baseline) tracker.baseline = textInputStateSync();
+  voiceSessionIdByContext.set(context, tracker.sessionId);
+  if (!tracker.baseline) tracker.baseline = stateReader();
   tracker.lastObserved = tracker.baseline;
   tracker.stableSinceMs = null;
   tracker.lastProbeAtMs = null;
@@ -1674,6 +1623,7 @@ function releaseVoiceKeysSync() {
   voiceStateByContext.clear();
   voiceStateResetAtMs.clear();
   voiceTargetThreadByContext.clear();
+  voiceSessionIdByContext.clear();
   for (const timer of voiceStartVerificationTimers.values()) clearTimeout(timer);
   voiceStartVerificationTimers.clear();
   for (const state of threadPressByContext.values()) {
@@ -1681,63 +1631,6 @@ function releaseVoiceKeysSync() {
   }
   threadPressByContext.clear();
   resumeMediaAfterVoiceSync();
-}
-
-function normalizeTitle(value) {
-  const title = String(value ?? "")
-    .replace(/^\[\d+\]\s*user:\s*/i, "")
-    .replace(/<[^>]+>/g, " ")
-    .replace(/[\r\n\t]+/g, " ")
-    .replace(/\s+/g, " ")
-    .trim();
-  return title || "제목 없는 작업";
-}
-
-function stringFingerprint(value) {
-  const bytes = Buffer.from(String(value ?? ""), "utf8");
-  let hash = 0xcbf29ce484222325n;
-  for (const byte of bytes) {
-    hash ^= BigInt(byte);
-    hash = BigInt.asUintN(64, hash * 0x100000001b3n);
-  }
-  return `${bytes.length}:${hash.toString(16).padStart(16, "0")}`;
-}
-
-function titleVariants(value) {
-  const title = String(value ?? "");
-  return new Set([title, title.normalize("NFC"), title.normalize("NFD")]);
-}
-
-function titleFingerprints(value) {
-  return new Set([...titleVariants(value)].map(stringFingerprint));
-}
-
-const QUEUED_MESSAGE_DELETE_FINGERPRINTS = new Set(QUEUED_MESSAGE_DELETE_LABELS.map(stringFingerprint));
-const QUEUED_MESSAGE_ACTION_FINGERPRINTS = new Set(QUEUED_MESSAGE_ACTION_LABELS.map(stringFingerprint));
-
-function parseCodexQueueWindows(output) {
-  const windows = [];
-  let current = null;
-  for (const line of String(output ?? "").split(/\r?\n/)) {
-    const [kind, value, rawCount] = line.split("\t");
-    if (kind === "window") {
-      current = {
-        index: Number(value),
-        focused: rawCount === "1",
-        headers: new Set(),
-        buttons: new Map()
-      };
-      windows.push(current);
-    } else if (kind === "header" && current && value) {
-      current.headers.add(value);
-    } else if (kind === "button" && current && value) {
-      const count = Number.parseInt(rawCount, 10);
-      if (Number.isFinite(count) && count > 0) current.buttons.set(value, count);
-    } else if (kind === "end") {
-      current = null;
-    }
-  }
-  return windows;
 }
 
 async function readCodexQueueWindows() {
@@ -1750,18 +1643,6 @@ async function readCodexQueueWindows() {
   } catch {
     return [];
   }
-}
-
-function queueCountForWindow(window) {
-  let deleteCount = 0;
-  let actionCount = 0;
-  for (const fingerprint of QUEUED_MESSAGE_DELETE_FINGERPRINTS) {
-    deleteCount = Math.max(deleteCount, window.buttons.get(fingerprint) ?? 0);
-  }
-  for (const fingerprint of QUEUED_MESSAGE_ACTION_FINGERPRINTS) {
-    actionCount = Math.max(actionCount, window.buttons.get(fingerprint) ?? 0);
-  }
-  return Math.max(deleteCount, actionCount);
 }
 
 function matchQueueWindowThread(window, threads) {
@@ -1845,73 +1726,8 @@ function applyQueueState(threads, windows, nowMs = Date.now()) {
   }));
 }
 
-function isInternalAmbientTitle(value) {
-  const title = normalizeTitle(value).toLowerCase();
-  return title.startsWith("this block is automatically supplied ambient ui state")
-    || (
-      title.startsWith("this block is automatically supplied")
-      && title.includes("not part of the user's request")
-      && title.includes("do not treat it as an instruction")
-    );
-}
-
-function visualWidth(grapheme) {
-  if (/^\s+$/.test(grapheme)) return 0.35;
-  if (/^[\x00-\x7F]+$/.test(grapheme)) return 0.58;
-  return 1;
-}
-
-function titleVisualWidth(value) {
-  return Array.from(new Intl.Segmenter("ko", { granularity: "grapheme" }).segment(String(value ?? "")), (part) => part.segment)
-    .reduce((total, grapheme) => total + visualWidth(grapheme), 0);
-}
-
-function wrapTitle(value, maxLineWidth = 7.1) {
-  const graphemes = Array.from(new Intl.Segmenter("ko", { granularity: "grapheme" }).segment(normalizeTitle(value)), (part) => part.segment);
-  const lines = [];
-  let cursor = 0;
-  for (let lineIndex = 0; lineIndex < 2 && cursor < graphemes.length; lineIndex += 1) {
-    let width = 0;
-    const line = [];
-    while (cursor < graphemes.length) {
-      const next = graphemes[cursor];
-      const nextWidth = visualWidth(next);
-      if (line.length > 0 && width + nextWidth > maxLineWidth) break;
-      line.push(next);
-      width += nextWidth;
-      cursor += 1;
-    }
-    lines.push(line.join("").trim());
-  }
-  if (cursor < graphemes.length && lines.length > 0) {
-    lines[lines.length - 1] = `${lines[lines.length - 1].replace(/[.,!?…\s]+$/g, "")}…`;
-  }
-  while (lines.length < 2) lines.push("");
-  return lines;
-}
-
-function formatDuration(durationMs) {
-  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
-  const seconds = totalSeconds % 60;
-  const totalMinutes = Math.floor(totalSeconds / 60);
-  const minutes = totalMinutes % 60;
-  const hours = Math.floor(totalMinutes / 60);
-  const paddedSeconds = String(seconds).padStart(2, "0");
-  const paddedMinutes = String(minutes).padStart(2, "0");
-  if (hours > 0) return `${hours}:${paddedMinutes}:${paddedSeconds}`;
-  return `${String(totalMinutes).padStart(2, "0")}:${paddedSeconds}`;
-}
-
 function timingLabel(thread, nowMs = renderTimeMs()) {
-  if (!Number.isFinite(thread?.startedAtMs)) {
-    if (["working", "completed", "stopped"].includes(thread?.status)) return "--:--";
-    return "열기";
-  }
-  const endMs = thread.status === "working" ? nowMs : thread.endedAtMs;
-  if (!Number.isFinite(endMs) || endMs < thread.startedAtMs) return "--:--";
-  const duration = formatDuration(endMs - thread.startedAtMs);
-  if (["working", "completed", "stopped"].includes(thread.status)) return duration;
-  return "열기";
+  return formatTimingLabel(thread, nowMs);
 }
 
 function queueBadgeSvg(thread) {
@@ -2031,11 +1847,14 @@ async function readUsage() {
   return codex.usage;
 }
 
-async function readPinnedIds() {
+async function readGlobalStateSnapshot() {
+  return JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
+}
+
+async function readPinnedIds(globalStatePromise = readGlobalStateSnapshot()) {
   try {
-    const state = JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
-    const ids = Array.isArray(state?.["pinned-thread-ids"]) ? state["pinned-thread-ids"] : [];
-    pinnedIdsCache = [...new Set(ids.filter((id) => UUID_PATTERN.test(id)))];
+    const state = await globalStatePromise;
+    pinnedIdsCache = pinnedThreadIdsFromState(state);
     return [...pinnedIdsCache];
   } catch {
     // Codex can rewrite the JSON state while this poll is reading it. Keep the
@@ -2043,20 +1862,6 @@ async function readPinnedIds() {
     // single frame.
     return [...pinnedIdsCache];
   }
-}
-
-function uuidV7TimestampMs(id) {
-  if (!UUID_PATTERN.test(id)) return null;
-  const compact = id.replaceAll("-", "").toLowerCase();
-  if (compact[12] !== "7") return null;
-  const timestampMs = Number.parseInt(compact.slice(0, 12), 16);
-  return Number.isFinite(timestampMs) ? timestampMs : null;
-}
-
-function threadRecencyMs(thread) {
-  const raw = Number(thread?.recency_at ?? thread?.updated_at ?? 0);
-  if (!Number.isFinite(raw) || raw <= 0) return 0;
-  return raw > 100_000_000_000 ? raw : raw * 1000;
 }
 
 async function readAppServerSessionStartMs(nowMs = Date.now()) {
@@ -2088,6 +1893,7 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
 
   if (Number.isFinite(startedAtMs) && startedAtMs !== sideChatSessionStartMs) {
     sideChatSessionStartMs = startedAtMs;
+    sideChatRowsCache = [];
     sideChatParentById.clear();
     sideChatLifecycleCache.clear();
     closedSideChatAtMs.clear();
@@ -2097,15 +1903,19 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
   return startedAtMs;
 }
 
-async function readEphemeralSideChats(persistentRows, parentId) {
+async function readEphemeralSideChats(
+  persistentRows,
+  parentId,
+  globalStatePromise = null
+) {
   const sessionStartedAtMs = await readAppServerSessionStartMs();
   if (!Number.isFinite(sessionStartedAtMs)) return [];
+  const persistentIds = new Set(persistentRows.map((row) => row.id));
 
   try {
-    const state = JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
-    const promptHistory = state?.["electron-persisted-atom-state"]?.["prompt-history"];
-    if (!promptHistory || typeof promptHistory !== "object") return [];
-    const persistentIds = new Set(persistentRows.map((row) => row.id));
+    const state = await (globalStatePromise ?? readGlobalStateSnapshot());
+    const promptHistory = promptHistoryFromState(state);
+    if (!promptHistory) return sideChatRowsCache.filter((thread) => !persistentIds.has(thread.id));
     const sideChats = [];
 
     for (const [id, prompts] of Object.entries(promptHistory)) {
@@ -2140,9 +1950,10 @@ async function readEphemeralSideChats(persistentRows, parentId) {
     // entry while Codex rewrites the state file. Keep lifecycle/close memory
     // for the lifetime of the app-server session so a closed side chat cannot
     // flash back into the list after one transient read.
-    return sideChats.sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+    sideChatRowsCache = sideChats.sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+    return [...sideChatRowsCache];
   } catch {
-    return [];
+    return sideChatRowsCache.filter((thread) => !persistentIds.has(thread.id));
   }
 }
 
@@ -2193,300 +2004,12 @@ async function readLatestDesktopLogPath(nowMs = Date.now()) {
   return (await readCurrentDesktopLogPaths(nowMs))[0] ?? null;
 }
 
-function remoteTurnStatus(value) {
-  const status = String(value ?? "").toLowerCase();
-  if (["inprogress", "in_progress", "running", "active"].includes(status)) return "working";
-  if (["completed", "complete", "succeeded", "success"].includes(status)) return "completed";
-  if (["interrupted", "cancelled", "canceled", "aborted", "stopped"].includes(status)) return "stopped";
-  if (["failed", "error"].includes(status)) return "error";
-  return null;
-}
-
-const REMOTE_ACTIVITY_VERB_GROUPS = [
-  [/^(?:planning|designing|defining|formulating|outlining|proposing|prioritizing|scheduling|specifying|clarifying)$/, { kind: "think", label: "계획 중" }],
-  [/^(?:analyzing|assessing|evaluating|identifying|diagnosing|investigating|comparing|examining|tracing)$/, { kind: "think", label: "분석 중" }],
-  [/^(?:implementing|adding|updating|fixing|refactoring|inserting|appending|applying|replacing|patching|modifying|reordering)$/, { kind: "edit", label: "구현 중" }],
-  [/^(?:optimizing|improving|enhancing)$/, { kind: "edit", label: "개선 중" }],
-  [/^(?:adjusting|refining)$/, { kind: "edit", label: "조정 중" }],
-  [/^(?:testing|verifying|validating|checking|confirming|auditing|benchmarking)$/, { kind: "inspect", label: "검증 중" }],
-  [/^(?:searching|researching|browsing|locating)$/, { kind: "search", label: "검색 중" }],
-  [/^(?:inspecting|reviewing|exploring|reading|extracting)$/, { kind: "inspect", label: "확인 중" }],
-  [/^(?:running|executing|building|compiling|installing|deploying|packaging|training|simulating|staging)$/, { kind: "command", label: "실행 중" }],
-  [/^(?:summarizing|documenting|reporting|finalizing|preparing|drafting|explaining|completing)$/, { kind: "answer", label: "정리 중" }]
-];
-
-function classifyRemoteReasoningSummary(value) {
-  const cleaned = String(value ?? "")
-    .replace(/[*_`#]/g, "")
-    .replace(/^[-–—:;,.\s]+/, "")
-    .replace(/\s+/g, " ")
-    .trim();
-  if (!cleaned) return { kind: "think", label: "생각 중" };
-  const verb = cleaned.toLowerCase().match(/^[a-z]+/)?.[0] ?? null;
-  const verbGroup = verb
-    ? REMOTE_ACTIVITY_VERB_GROUPS.find(([pattern]) => pattern.test(verb))
-    : null;
-  if (verbGroup) {
-    return { ...verbGroup[1] };
-  }
-  if (/(계획|설계|정의|구상|우선순위)/.test(cleaned)) return { kind: "think", label: "계획 중" };
-  if (/(분석|평가|진단|비교|원인 파악|조사)/.test(cleaned)) return { kind: "think", label: "분석 중" };
-  if (/(구현|수정|개선|추가|리팩터|적용)/.test(cleaned)) return { kind: "edit", label: "구현 중" };
-  if (/(검증|테스트|확인|감사|벤치마크)/.test(cleaned)) return { kind: "inspect", label: "검증 중" };
-  if (/(검색|자료 찾|리서치|탐색)/.test(cleaned)) return { kind: "search", label: "검색 중" };
-  if (/(검토|읽기|살펴|점검)/.test(cleaned)) return { kind: "inspect", label: "확인 중" };
-  if (/(실행|빌드|배포|설치|훈련|시뮬레이션)/.test(cleaned)) return { kind: "command", label: "실행 중" };
-  if (/(요약|정리|문서|보고|마무리)/.test(cleaned)) return { kind: "answer", label: "정리 중" };
-  return { kind: "think", label: "생각 중" };
-}
-
-function remoteReasoningActivityFromLogLine(line) {
-  if (!line.includes("Reasoning summary item completed")) return null;
-  const raw = line.match(/\ssummary=(.*?)(?=\ssummaryPartCount=\d+\b)/)?.[1] ?? null;
-  if (raw === null || raw.length > REMOTE_REASONING_SUMMARY_MAX_LENGTH) return null;
-  let summaries;
-  try {
-    summaries = JSON.parse(raw);
-  } catch {
-    return null;
-  }
-  if (!Array.isArray(summaries)) return null;
-  const latest = [...summaries].reverse().find((item) => typeof item === "string" && item.trim());
-  return latest ? classifyRemoteReasoningSummary(latest) : null;
-}
-
-function remoteActivityTurnsMatch(left, right) {
-  if (!left || !right) return false;
-  if (left.turnId && right.turnId) return left.turnId === right.turnId;
-  return Number.isFinite(left.turnStartedAtMs)
-    && Number.isFinite(right.turnStartedAtMs)
-    && Math.abs(left.turnStartedAtMs - right.turnStartedAtMs) <= REMOTE_REASONING_TURN_TOLERANCE_MS;
-}
-
 function applyRemoteActivityLogLine(line, activities = remoteActivityByThreadId) {
-  if (typeof line !== "string" || !line) return false;
-  const timestampMs = Date.parse(line.slice(0, 24));
-  if (!Number.isFinite(timestampMs)) return false;
-
-  const store = (threadId, next) => {
-    if (!UUID_PATTERN.test(threadId ?? "")) return false;
-    const previous = activities.get(threadId) ?? null;
-    if (previous && timestampMs <= previous.observedAtMs) return false;
-    const turnStartedAtMs = Number.isFinite(next.turnStartedAtMs)
-      ? next.turnStartedAtMs
-      : previous?.turnStartedAtMs ?? null;
-    if (previous
-        && Number.isFinite(previous.turnStartedAtMs)
-        && Number.isFinite(turnStartedAtMs)
-        && turnStartedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.turnStartedAtMs) {
-      return false;
-    }
-    const candidate = {
-      turnId: Object.hasOwn(next, "turnId") ? next.turnId : previous?.turnId ?? null,
-      turnStartedAtMs,
-      activity: Object.hasOwn(next, "activity") ? next.activity : previous?.activity ?? null,
-      observedAtMs: timestampMs,
-      terminal: Boolean(next.terminal),
-      authoritativeTurnStart: Boolean(next.authoritativeTurnStart),
-      supersededTurnId: next.authoritativeTurnStart
-        ? previous?.turnId ?? previous?.supersededTurnId ?? null
-        : null
-    };
-    if (previous?.authoritativeTurnStart
-        && previous.supersededTurnId
-        && candidate.turnId === previous.supersededTurnId) return false;
-    const sameTurn = remoteActivityTurnsMatch(previous, candidate);
-    const newerTurn = previous
-      && Number.isFinite(previous.turnStartedAtMs)
-      && Number.isFinite(candidate.turnStartedAtMs)
-      && candidate.turnStartedAtMs > previous.turnStartedAtMs;
-    if (previous?.turnId && candidate.turnId
-        && previous.turnId !== candidate.turnId && !newerTurn) return false;
-    if (previous?.terminal && sameTurn && !candidate.terminal && !next.authoritativeTurnStart) return false;
-    activities.set(threadId, candidate);
-    return true;
-  };
-
-  if (line.includes("Reasoning summary turn-start config resolved")) {
-    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    return store(threadId, {
-      turnId: null,
-      turnStartedAtMs: timestampMs,
-      activity: { kind: "request", label: "요청 분석" },
-      terminal: false,
-      authoritativeTurnStart: true
-    });
-  }
-
-  if (line.includes("Reasoning summary item completed")) {
-    const threadId = line.match(/threadId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnStartedAtMs = uuidV7TimestampMs(turnId);
-    const activity = remoteReasoningActivityFromLogLine(line);
-    if (!threadId || !turnId || !Number.isFinite(turnStartedAtMs) || !activity) return false;
-    return store(threadId, { turnId, turnStartedAtMs, activity, terminal: false });
-  }
-
-  if (line.includes("maybe_resume_success")) {
-    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnId = line.match(/latestTurnId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const status = remoteTurnStatus(line.match(/latestTurnStatus=([^ ]+)/i)?.[1]);
-    const turnStartedAtMs = uuidV7TimestampMs(turnId);
-    if (!threadId || !turnId || !Number.isFinite(turnStartedAtMs)
-        || !["completed", "stopped", "error"].includes(status)) return false;
-    return store(threadId, {
-      turnId,
-      turnStartedAtMs,
-      activity: null,
-      terminal: true
-    });
-  }
-
-  if (line.includes("[desktop-notifications] show turn-complete")) {
-    const threadId = line.match(/(?:conversationId|threadId)=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnStartedAtMs = uuidV7TimestampMs(turnId);
-    if (!threadId || !turnId || !Number.isFinite(turnStartedAtMs)) return false;
-    return store(threadId, { turnId, turnStartedAtMs, activity: null, terminal: true });
-  }
-  return false;
-}
-
-function remoteWorkingActivity(
-  thread,
-  lifecycle,
-  nowMs = Date.now(),
-  activities = remoteActivityByThreadId
-) {
-  if (!thread?.id || lifecycle?.status !== "working") return null;
-  const observed = activities.get(thread.id) ?? null;
-  if (!observed?.activity || observed.terminal) return null;
-  const ageMs = nowMs - observed.observedAtMs;
-  if (ageMs < 0 || ageMs > REMOTE_ACTIVITY_STALE_MS) return null;
-  const currentTurn = {
-    turnId: lifecycle.latestTurnId ?? null,
-    turnStartedAtMs: Number.isFinite(lifecycle.startedAtMs) ? lifecycle.startedAtMs : null
-  };
-  return remoteActivityTurnsMatch(observed, currentTurn) ? observed.activity : null;
+  return applyRemoteActivityLogLineToStore(line, activities);
 }
 
 function applyRemoteLifecycleLogLine(line, lifecycles = remoteLifecycleCache) {
-  if (typeof line !== "string" || !line) return false;
-  const timestampMs = Date.parse(line.slice(0, 24));
-  if (!Number.isFinite(timestampMs)) return false;
-
-  const update = (threadId, next) => {
-    if (!UUID_PATTERN.test(threadId ?? "")) return false;
-    const previous = lifecycles.get(threadId);
-    if (previous && timestampMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.observedAtMs) return false;
-    const nextStartedAtMs = Number.isFinite(next.startedAtMs)
-      ? next.startedAtMs
-      : previous?.startedAtMs ?? null;
-    if (previous && Number.isFinite(previous.startedAtMs)
-        && Number.isFinite(nextStartedAtMs)
-        && nextStartedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < previous.startedAtMs) {
-      return false;
-    }
-    const latestTurnId = Object.hasOwn(next, "latestTurnId")
-      ? next.latestTurnId
-      : previous?.latestTurnId ?? null;
-    if (previous?.pendingTurnStart
-        && previous.supersededTurnId
-        && latestTurnId === previous.supersededTurnId) return false;
-    if (previous?.latestTurnId && latestTurnId
-        && previous.latestTurnId !== latestTurnId
-        && Number.isFinite(previous.startedAtMs)
-        && Number.isFinite(nextStartedAtMs)
-        && nextStartedAtMs < previous.startedAtMs) {
-      return false;
-    }
-    const turnChanged = Boolean(
-      previous?.latestTurnId
-      && latestTurnId
-      && previous.latestTurnId !== latestTurnId
-    );
-    lifecycles.set(threadId, {
-      status: next.status ?? previous?.status ?? "idle",
-      startedAtMs: nextStartedAtMs,
-      endedAtMs: Object.hasOwn(next, "endedAtMs")
-        ? next.endedAtMs
-        : turnChanged ? null : previous?.endedAtMs ?? null,
-      latestTurnId,
-      lastActivityAtMs: Object.hasOwn(next, "lastActivityAtMs")
-        ? next.lastActivityAtMs
-        : turnChanged ? null : previous?.lastActivityAtMs ?? null,
-      terminalObservedAtMs: Object.hasOwn(next, "terminalObservedAtMs")
-        ? next.terminalObservedAtMs
-        : turnChanged ? null : previous?.terminalObservedAtMs ?? null,
-      pendingTurnStart: Boolean(next.pendingTurnStart),
-      supersededTurnId: next.pendingTurnStart
-        ? previous?.latestTurnId ?? previous?.supersededTurnId ?? null
-        : null,
-      observedAtMs: Math.max(timestampMs, previous?.observedAtMs ?? 0)
-    });
-    return true;
-  };
-
-  if (line.includes("maybe_resume_success")) {
-    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnId = line.match(/latestTurnId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const status = remoteTurnStatus(line.match(/latestTurnStatus=([^ ]+)/i)?.[1]);
-    const startedAtMs = uuidV7TimestampMs(turnId);
-    if (!threadId || !turnId || !status || !Number.isFinite(startedAtMs)) return false;
-    const resumed = {
-      status,
-      startedAtMs,
-      latestTurnId: turnId
-    };
-    if (status === "working") {
-      resumed.endedAtMs = null;
-      resumed.lastActivityAtMs = timestampMs;
-    }
-    return update(threadId, resumed);
-  }
-
-  if (line.includes("Reasoning summary turn-start config resolved")) {
-    const threadId = line.match(/conversationId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    return update(threadId, {
-      status: "working",
-      startedAtMs: timestampMs,
-      endedAtMs: null,
-      latestTurnId: null,
-      lastActivityAtMs: timestampMs,
-      terminalObservedAtMs: null,
-      pendingTurnStart: true
-    });
-  }
-
-  if (line.includes("Reasoning summary") && line.includes("turnId=")) {
-    const threadId = line.match(/threadId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const startedAtMs = uuidV7TimestampMs(turnId);
-    if (!threadId || !turnId || !Number.isFinite(startedAtMs)) return false;
-    return update(threadId, {
-      status: "working",
-      startedAtMs,
-      endedAtMs: null,
-      latestTurnId: turnId,
-      lastActivityAtMs: timestampMs,
-      terminalObservedAtMs: null
-    });
-  }
-
-  if (line.includes("[desktop-notifications] show turn-complete")) {
-    const threadId = line.match(/(?:conversationId|threadId)=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const turnId = line.match(/turnId=([0-9a-f-]{36})/i)?.[1] ?? null;
-    const startedAtMs = uuidV7TimestampMs(turnId);
-    if (!threadId || !turnId || !Number.isFinite(startedAtMs)) return false;
-    return update(threadId, {
-      status: "completed",
-      startedAtMs,
-      endedAtMs: timestampMs,
-      latestTurnId: turnId,
-      terminalObservedAtMs: timestampMs
-    });
-  }
-  return false;
+  return applyRemoteLifecycleLogLineToStore(line, lifecycles);
 }
 
 async function refreshRemoteLifecyclesFromLogs(nowMs = Date.now()) {
@@ -2508,41 +2031,89 @@ async function refreshRemoteLifecyclesFromLogs(nowMs = Date.now()) {
   files.sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs);
   const activePaths = new Set(files.map(({ filePath }) => filePath));
 
-  for (const { filePath, stat } of files) {
-    const previousSize = remoteLifecycleLogOffsets.get(filePath);
-    const start = Number.isFinite(previousSize) && previousSize <= stat.size
-      ? Math.max(0, previousSize - 1024)
-      : Math.max(0, stat.size - REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES);
-    if (start >= stat.size) continue;
+  for (const { filePath } of files) {
+    let handle;
     try {
-      const length = stat.size - start;
-      const handle = await fs.open(filePath, "r");
-      const buffer = Buffer.alloc(length);
-      try {
-        await handle.read(buffer, 0, length, start);
-      } finally {
-        await handle.close();
+      handle = await fs.open(filePath, "r");
+      const stat = await handle.stat();
+      const previous = remoteLifecycleLogCursors.get(filePath) ?? null;
+      let observedBoundary = Buffer.alloc(0);
+      if (Number.isSafeInteger(previous?.offset)
+          && previous.offset >= 0
+          && previous.offset <= stat.size
+          && Buffer.isBuffer(previous.boundaryBytes)
+          && previous.boundaryBytes.length > 0) {
+        const boundaryLength = Math.min(previous.boundaryBytes.length, previous.offset);
+        observedBoundary = Buffer.alloc(boundaryLength);
+        const { bytesRead } = await handle.read(
+          observedBoundary,
+          0,
+          boundaryLength,
+          previous.offset - boundaryLength
+        );
+        observedBoundary = observedBoundary.subarray(0, bytesRead);
       }
-      const lines = buffer.toString("utf8").split(/\r?\n/);
-      if (start > 0) lines.shift();
+      const continuing = canContinueLogCursor(previous, stat, observedBoundary);
+      const start = continuing
+        ? previous.offset
+        : Math.max(0, stat.size - REMOTE_LIFECYCLE_LOG_SEARCH_LIMIT_BYTES);
+      if (start >= stat.size) {
+        if (!continuing) {
+          remoteLifecycleLogCursors.set(filePath, {
+            offset: stat.size,
+            fileIdentity: logFileIdentity(stat),
+            boundaryBytes: Buffer.alloc(0),
+            lineState: null
+          });
+        }
+        continue;
+      }
+
+      let discardLeadingPartial = false;
+      if (!continuing && start > 0) {
+        const previousByte = Buffer.alloc(1);
+        const { bytesRead } = await handle.read(previousByte, 0, 1, start - 1);
+        discardLeadingPartial = bytesRead !== 1 || previousByte[0] !== 0x0a;
+      }
+      const buffer = Buffer.alloc(stat.size - start);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+      const chunk = buffer.subarray(0, bytesRead);
+      const { lines, state: lineState } = consumeLogBytes(
+        continuing ? previous.lineState : null,
+        chunk,
+        { discardLeadingPartial }
+      );
       for (const line of lines) {
         applyRemoteLifecycleLogLine(line);
         applyRemoteActivityLogLine(line);
       }
-      remoteLifecycleLogOffsets.set(filePath, stat.size);
+      remoteLifecycleLogCursors.set(filePath, {
+        offset: start + bytesRead,
+        fileIdentity: logFileIdentity(stat),
+        boundaryBytes: nextLogBoundary(continuing ? previous.boundaryBytes : null, chunk),
+        lineState
+      });
     } catch {
       // Preserve the last parsed lifecycle while a Desktop log rotates.
+    } finally {
+      try {
+        await handle?.close();
+      } catch {
+        // The read result above remains usable even if a rotating handle closes late.
+      }
     }
   }
-  for (const filePath of remoteLifecycleLogOffsets.keys()) {
-    if (!activePaths.has(filePath)) remoteLifecycleLogOffsets.delete(filePath);
+  for (const filePath of remoteLifecycleLogCursors.keys()) {
+    if (activePaths.has(filePath)) continue;
+    const finalLineBytes = remoteLifecycleLogCursors.get(filePath)?.lineState?.carryBytes;
+    if (Buffer.isBuffer(finalLineBytes) && finalLineBytes.length > 0) {
+      const finalLine = finalLineBytes.toString("utf8");
+      applyRemoteLifecycleLogLine(finalLine);
+      applyRemoteActivityLogLine(finalLine);
+    }
+    remoteLifecycleLogCursors.delete(filePath);
   }
   return remoteLifecycleCache;
-}
-
-function parseCodexReasoningState(output) {
-  const effort = String(output ?? "").match(/(?:^|\s)effort=(none|minimal|low|medium|high|xhigh|max|ultra)(?:\s|$)/i)?.[1];
-  return normalizedReasoningEffort(effort);
 }
 
 async function refreshVisibleRemoteReasoningEffort(threads, queueWindows, nowMs = Date.now()) {
@@ -2579,21 +2150,11 @@ async function refreshVisibleRemoteReasoningEffort(threads, queueWindows, nowMs 
 }
 
 function reasoningEffortForRemoteThread(thread, lifecycle) {
-  const summaryEffort = normalizedReasoningEffort(thread.reasoningEffort);
-  if (summaryEffort) return summaryEffort;
-  const observed = remoteReasoningEffortByThreadId.get(thread.id);
-  const observedEffort = normalizedReasoningEffort(observed?.effort);
-  if (!observedEffort) return null;
-  if (Number.isFinite(lifecycle?.startedAtMs)
-      && observed.observedAtMs + REMOTE_REASONING_TURN_TOLERANCE_MS < lifecycle.startedAtMs) {
-    return null;
-  }
-  if (Number.isFinite(lifecycle?.startedAtMs)
-      && Number.isFinite(observed.turnStartedAtMs)
-      && Math.abs(observed.turnStartedAtMs - lifecycle.startedAtMs) > REMOTE_REASONING_TURN_TOLERANCE_MS) {
-    return null;
-  }
-  return observedEffort;
+  return reasoningEffortForRemoteThreadInStore(
+    thread,
+    lifecycle,
+    remoteReasoningEffortByThreadId
+  );
 }
 
 function observeRemoteRuntimeEnd(
@@ -2602,78 +2163,7 @@ function observeRemoteRuntimeEnd(
   nowMs = Date.now(),
   observations = remoteRuntimeObservationByThreadId
 ) {
-  const startedAtMs = Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null;
-  if (!thread?.id || !Number.isFinite(startedAtMs)) {
-    if (thread?.id) observations.delete(thread.id);
-    return { endedAtMs: null, inactiveSinceMs: null, pending: false, wasActive: false };
-  }
-
-  const turnId = lifecycle?.latestTurnId ?? null;
-  const existing = observations.get(thread.id) ?? null;
-  const sameTurn = existing
-    && (
-      turnId && existing.turnId
-        ? turnId === existing.turnId
-        : Math.abs(existing.turnStartedAtMs - startedAtMs) <= REMOTE_REASONING_TURN_TOLERANCE_MS
-    );
-  const observationGapMs = Number.isFinite(existing?.lastObservedAtMs)
-    ? nowMs - existing.lastObservedAtMs
-    : Number.POSITIVE_INFINITY;
-  const continuousObservation = observationGapMs >= 0
-    && observationGapMs <= REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS;
-  const previous = sameTurn
-    && (continuousObservation || Number.isFinite(existing?.endedAtMs))
-    ? existing
-    : null;
-  const runtimeType = String(thread.threadRuntimeStatus?.type ?? "notLoaded");
-
-  if (runtimeType === "active") {
-    const next = {
-      turnId,
-      turnStartedAtMs: startedAtMs,
-      wasActive: true,
-      inactiveSinceMs: null,
-      endedAtMs: null,
-      runtimeType,
-      lastObservedAtMs: nowMs
-    };
-    observations.set(thread.id, next);
-    return { ...next, pending: false };
-  }
-
-  if (!previous?.wasActive) {
-    const next = {
-      turnId,
-      turnStartedAtMs: startedAtMs,
-      wasActive: false,
-      inactiveSinceMs: null,
-      endedAtMs: null,
-      runtimeType,
-      lastObservedAtMs: nowMs
-    };
-    observations.set(thread.id, next);
-    return { ...next, pending: false };
-  }
-
-  const inactiveSinceMs = Number.isFinite(previous.inactiveSinceMs)
-    ? previous.inactiveSinceMs
-    : nowMs;
-  const endedAtMs = Number.isFinite(previous.endedAtMs)
-    ? previous.endedAtMs
-    : nowMs - inactiveSinceMs >= REMOTE_RUNTIME_TERMINAL_CONFIRM_MS
-      ? inactiveSinceMs
-      : null;
-  const next = {
-    turnId,
-    turnStartedAtMs: startedAtMs,
-    wasActive: true,
-    inactiveSinceMs,
-    endedAtMs,
-    runtimeType,
-    lastObservedAtMs: nowMs
-  };
-  observations.set(thread.id, next);
-  return { ...next, pending: !Number.isFinite(endedAtMs) };
+  return observeRemoteRuntimeEndInStore(thread, lifecycle, nowMs, observations);
 }
 
 function remoteStatusForThread(
@@ -2682,103 +2172,14 @@ function remoteStatusForThread(
   runtimeObservations = remoteRuntimeObservationByThreadId,
   remoteActivities = remoteActivityByThreadId
 ) {
-  const runtimeStatus = thread.threadRuntimeStatus ?? { type: "notLoaded" };
   const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
-  const startedAtMs = Number.isFinite(lifecycle?.startedAtMs) ? lifecycle.startedAtMs : null;
-  const runtimeEnd = observeRemoteRuntimeEnd(thread, lifecycle, nowMs, runtimeObservations);
-  const reasoningEffort = reasoningEffortForRemoteThread(thread, lifecycle);
-  const serviceTier = typeof thread.serviceTier === "string" ? thread.serviceTier : "default";
-  const observedActivity = remoteWorkingActivity(thread, lifecycle, nowMs, remoteActivities)
-    ?? { kind: "command", label: "원격 작업" };
-
-  if (runtimeStatus.type === "active") {
-    const flags = Array.isArray(runtimeStatus.activeFlags) ? runtimeStatus.activeFlags : [];
-    const waitingOnApproval = flags.includes("waitingOnApproval");
-    const waitingOnUserInput = flags.includes("waitingOnUserInput");
-    return {
-      status: "working",
-      startedAtMs,
-      endedAtMs: null,
-      reasoningEffort,
-      serviceTier,
-      activity: waitingOnApproval
-        ? { kind: "request", label: "원격 승인 대기" }
-        : waitingOnUserInput
-          ? { kind: "request", label: "원격 입력 대기" }
-          : observedActivity
-    };
-  }
-  if (runtimeStatus.type === "systemError") {
-    return {
-      status: "error",
-      startedAtMs,
-      endedAtMs: null,
-      reasoningEffort,
-      serviceTier,
-      activity: { kind: "error", label: "원격 오류" }
-    };
-  }
-
-  const lifecycleTerminal = ["completed", "stopped", "error"].includes(lifecycle?.status);
-  const completionEvidence = lifecycleTerminal
-    || Number.isFinite(runtimeEnd.endedAtMs)
-    || (Boolean(thread.hasUnreadTurn) && runtimeStatus.type !== "active");
-
-  // A remote summary's updatedAt is a recency/cache timestamp and can remain
-  // near turn start while the remote task keeps working for many minutes. A
-  // transient non-active sample also needs confirmation before it freezes the
-  // timer; returning to active cancels that candidate, while a long observation
-  // gap is treated as a cold start instead of inventing an end at reappearance.
-  if (Number.isFinite(startedAtMs)
-      && lifecycle?.status === "working"
-      && (!completionEvidence || runtimeEnd.pending)) {
-    return {
-      status: "working",
-      startedAtMs,
-      endedAtMs: null,
-      reasoningEffort,
-      serviceTier,
-      activity: observedActivity
-    };
-  }
-  if (Number.isFinite(startedAtMs) && completionEvidence) {
-    const status = lifecycle?.status === "stopped"
-      ? "stopped"
-      : lifecycle?.status === "error"
-        ? "error"
-        : "completed";
-    const preferredEndMs = [
-      lifecycle?.endedAtMs,
-      runtimeEnd.endedAtMs,
-      lifecycle?.terminalObservedAtMs
-    ].find(Number.isFinite) ?? null;
-    const endedAtMs = Number.isFinite(preferredEndMs)
-      ? Math.max(preferredEndMs, lifecycle?.lastActivityAtMs ?? startedAtMs)
-      : null;
-    return {
-      status,
-      startedAtMs,
-      endedAtMs,
-      reasoningEffort,
-      serviceTier,
-      activity: status === "stopped"
-        ? { kind: "stopped", label: "원격 작업 중단" }
-        : status === "error"
-          ? { kind: "error", label: "원격 오류" }
-          : { kind: "complete", label: thread.hasUnreadTurn ? "원격 완료 확인" : "원격 작업 종료" }
-    };
-  }
-  return {
-    status: "idle",
-    startedAtMs: null,
-    endedAtMs: null,
-    reasoningEffort,
-    serviceTier,
-    activity: {
-      kind: thread.hasUnreadTurn ? "answer" : "idle",
-      label: thread.hasUnreadTurn ? "원격 확인 필요" : "원격 열기"
-    }
-  };
+  return deriveRemoteStatus(thread, {
+    nowMs,
+    lifecycle,
+    reasoningEfforts: remoteReasoningEffortByThreadId,
+    runtimeObservations,
+    activities: remoteActivities
+  });
 }
 
 async function refreshClosedSideChatsFromLogs(threads) {
@@ -3009,57 +2410,9 @@ async function readThreadRows() {
   return Array.isArray(rows) ? rows : [];
 }
 
-async function readRemoteThreadRows() {
+async function readRemoteThreadRows(globalStatePromise = readGlobalStateSnapshot()) {
   try {
-    const state = JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
-    const persistedValue = state?.["electron-persisted-atom-state"];
-    const persisted = typeof persistedValue === "string"
-      ? JSON.parse(persistedValue)
-      : persistedValue;
-    if (!persisted || typeof persisted !== "object") return [];
-
-    const byId = new Map();
-    for (const [key, summaries] of Object.entries(persisted)) {
-      if (!key.startsWith("remote-thread-summaries-v2:") || !Array.isArray(summaries)) continue;
-      const cachedHostId = key.slice("remote-thread-summaries-v2:".length);
-      for (const summary of summaries) {
-        const id = summary?.conversationId;
-        const hostId = typeof summary?.hostId === "string" && summary.hostId
-          ? summary.hostId
-          : cachedHostId;
-        const title = typeof summary?.title === "string" ? summary.title.trim() : "";
-        if (!UUID_PATTERN.test(id ?? "") || !hostId || hostId === "local" || !title) continue;
-
-        const recencyAt = Number(summary?.recencyAt ?? summary?.updatedAt ?? 0);
-        const updatedAt = Number(summary?.updatedAt ?? recencyAt);
-        const createdAt = Number(summary?.createdAt ?? recencyAt);
-        const recencyAtMs = recencyAt > 100_000_000_000 ? recencyAt : recencyAt * 1000;
-        const summaryUpdatedAtMs = updatedAt > 100_000_000_000 ? updatedAt : updatedAt * 1000;
-        const existing = byId.get(id);
-        if (existing && threadRecencyMs(existing) >= recencyAtMs) {
-          continue;
-        }
-        byId.set(id, {
-          id,
-          hostId,
-          remote: true,
-          title,
-          cwd: typeof summary?.cwd === "string" ? summary.cwd : "",
-          rollout_path: null,
-          recency_at: recencyAt,
-          updated_at: updatedAt,
-          summaryUpdatedAtMs,
-          createdAtMs: createdAt > 100_000_000_000 ? createdAt : createdAt * 1000,
-          hasUnreadTurn: Boolean(summary?.hasUnreadTurn),
-          threadRuntimeStatus: summary?.threadRuntimeStatus ?? { type: "notLoaded" },
-          reasoningEffort: normalizedReasoningEffort(summary?.reasoningEffort)
-            ?? normalizedReasoningEffort(summary?.latestReasoningEffort),
-          serviceTier: typeof summary?.serviceTier === "string" ? summary.serviceTier : "default",
-          workspaceKind: summary?.workspaceKind ?? "project"
-        });
-      }
-    }
-    remoteThreadRowsCache = [...byId.values()].sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+    remoteThreadRowsCache = remoteThreadRowsFromState(await globalStatePromise);
     return [...remoteThreadRowsCache];
   } catch {
     // Preserve pinned remote candidates through one partially written Codex
@@ -3107,109 +2460,6 @@ async function readActiveThreadIds() {
     // A missing registry simply means there are no known background commands.
   }
   return active;
-}
-
-function classifyToolActivity(input) {
-  const text = String(input ?? "");
-  if (!text) return null;
-  if (/tools\.apply_patch|const\s+patch\s*=|\*\*\* Begin Patch/i.test(text)) return { kind: "edit", label: "코드 수정" };
-  if (/tools\.update_plan/i.test(text)) return { kind: "edit", label: "계획 정리" };
-  if (/tools\.(?:web__run|web\.run)|tools\.mcp__.*(?:search|browse)/i.test(text)) return { kind: "search", label: "웹 검색" };
-  if (/tools\.(?:view_image|image_gen__imagegen)/i.test(text)) return { kind: "inspect", label: /imagegen/i.test(text) ? "이미지 생성" : "이미지 확인" };
-  if (/mcp__node_repl__js|sky\.(?:get_app_state|click|press_key|set_value|type_text|scroll)/i.test(text)) {
-    return /get_app_state/i.test(text) ? { kind: "inspect", label: "앱 화면 확인" } : { kind: "command", label: "앱 조작" };
-  }
-  if (!/tools\.exec_command/i.test(text)) return { kind: "command", label: "도구 실행" };
-  if (/StreamDeck\/Plugins|com\.elgato\.StreamDeck\/Plugins/i.test(text) && /\b(?:cp|ditto|rsync)\b/i.test(text)) return { kind: "command", label: "플러그인 설치" };
-  if (/(?:npm|pnpm|yarn|bun)\s+(?:run\s+)?test|pytest|node\s+--test|cargo\s+test|go\s+test|vitest|jest/i.test(text)) return { kind: "command", label: "테스트 실행" };
-  if (/node\s+--check|tsc\s+--noEmit|eslint|ruff\s+check|mypy/i.test(text)) return { kind: "inspect", label: "코드 검증" };
-  if (/\bxmllint\b/i.test(text)) return { kind: "inspect", label: "화면 구조 검증" };
-  if (/\bshasum\b/i.test(text)) return { kind: "inspect", label: "설치 파일 확인" };
-  if (/rollout-|session_index\.jsonl|\.jsonl/i.test(text) && /\b(?:tail|jq)\b/i.test(text)) return { kind: "inspect", label: "활동 기록 확인" };
-  if (/\bsqlite3\b/i.test(text)) return { kind: "inspect", label: "작업 목록 확인" };
-  if (/\bcodexbar\b/i.test(text)) return { kind: "inspect", label: "사용량 확인" };
-  if (/\b(?:rg|grep|find|fd|mdfind)\b/i.test(text)) return { kind: "search", label: "파일 검색" };
-  if (/\b(?:sed|head|tail|jq|ls|stat)\b/i.test(text)) return { kind: "inspect", label: "파일 내용 확인" };
-  if (/\b(?:ps|pgrep|lsof)\b/i.test(text)) return { kind: "inspect", label: "실행 상태 확인" };
-  if (/\b(?:python|python3)\b/i.test(text)) return { kind: "command", label: "Python 실행" };
-  if (/\b(?:npm|pnpm|yarn|bun)\b/i.test(text)) return { kind: "command", label: "패키지 명령" };
-  if (/\b(?:mkdir|cp|mv|rsync)\b/i.test(text)) return { kind: "edit", label: "파일 정리" };
-  return { kind: "command", label: "명령 실행" };
-}
-
-function activityFromEvent(event) {
-  const payload = event?.payload ?? {};
-  if (event?.type === "event_msg") {
-    if (payload.type === "task_complete" || payload.type === "turn_aborted") return null;
-    if (payload.type === "task_started" || payload.type === "user_message") return { kind: "request", label: "요청 분석" };
-    if (payload.type === "patch_apply_end") return { kind: payload.success === false ? "error" : "edit", label: payload.success === false ? "수정 실패" : "코드 수정" };
-    if (payload.type === "mcp_tool_call_end") {
-      const server = String(payload?.invocation?.server ?? "");
-      if (/node_repl/i.test(server)) return { kind: "inspect", label: "앱 화면 확인" };
-      if (/web|browser|chrome/i.test(server)) return { kind: "search", label: "웹 결과 확인" };
-      return { kind: "inspect", label: "도구 결과 확인" };
-    }
-    if (payload.type === "agent_reasoning") return { kind: "think", label: "생각 중" };
-    if (payload.type === "context_compacted") return { kind: "edit", label: "대화 정리" };
-    if (payload.type === "agent_message") return payload.phase === "final_answer"
-      ? { kind: "answer", label: "답변 완료" }
-      : { kind: "answer", label: "답변 작성" };
-    return null;
-  }
-  if (event?.type === "response_item") {
-    if (payload.type === "custom_tool_call") return classifyToolActivity(payload.input);
-    if (payload.type === "reasoning") return { kind: "think", label: "생각 중" };
-  }
-  return null;
-}
-
-function consumeLifecycleLines(lines, lifecycle) {
-  for (let index = lines.length - 1; index >= 0; index -= 1) {
-    let event;
-    try {
-      event = JSON.parse(lines[index]);
-    } catch {
-      continue;
-    }
-    if (!lifecycle.activity) lifecycle.activity = activityFromEvent(event);
-    if (event?.type === "turn_context") {
-      const effort = event?.payload?.effort;
-      if (!lifecycle.reasoningEffort && typeof effort === "string") lifecycle.reasoningEffort = effort;
-    }
-    if (event?.type !== "event_msg") {
-      if (lifecycle.foundStart && lifecycle.reasoningEffort && lifecycle.serviceTier !== undefined) return true;
-      continue;
-    }
-    const type = event?.payload?.type;
-    if (type === "thread_settings_applied") {
-      const settings = event?.payload?.thread_settings ?? {};
-      if (!lifecycle.reasoningEffort && typeof settings.reasoning_effort === "string") {
-        lifecycle.reasoningEffort = settings.reasoning_effort;
-      }
-      if (lifecycle.serviceTier === undefined && Object.hasOwn(settings, "service_tier")) {
-        lifecycle.serviceTier = typeof settings.service_tier === "string" ? settings.service_tier : "default";
-      }
-    }
-    const timestampMs = Date.parse(event?.timestamp ?? "");
-    const validTimestamp = Number.isFinite(timestampMs) ? timestampMs : null;
-    if (!lifecycle.status) {
-      if (type === "task_complete") {
-        lifecycle.status = "completed";
-        lifecycle.endedAtMs = validTimestamp;
-      } else if (type === "turn_aborted") {
-        lifecycle.status = "stopped";
-        lifecycle.endedAtMs = validTimestamp;
-      } else if (type === "task_started" || type === "user_message") {
-        lifecycle.status = "working";
-      }
-    }
-    if (lifecycle.status && type === "task_started" && !lifecycle.foundStart) {
-      lifecycle.startedAtMs = validTimestamp;
-      lifecycle.foundStart = true;
-    }
-    if (lifecycle.foundStart && lifecycle.reasoningEffort && lifecycle.serviceTier !== undefined) return true;
-  }
-  return false;
 }
 
 async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
@@ -3296,53 +2546,27 @@ async function statusForThread(thread, activeThreadIds) {
 }
 
 function selectTopThreadRows(localRows, remoteRows, openSideChats, pinnedIds) {
-  const localIds = new Set(localRows.map((row) => row.id));
-  const pinnedIdSet = new Set(pinnedIds);
-  const pinnedRemoteRows = remoteRows.filter((row) => !localIds.has(row.id)
-    && pinnedIdSet.has(row.id)
-    && !isInternalAmbientTitle(row.title));
-  const selectablePersistentRows = [...localRows, ...pinnedRemoteRows];
-  const recentRows = [...localRows, ...openSideChats]
-    .sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
-  const byId = new Map(selectablePersistentRows.map((row) => [row.id, row]));
-  const selected = [];
-  const selectedIds = new Set();
-
-  for (const id of pinnedIds) {
-    const row = byId.get(id);
-    if (!row || selectedIds.has(id)) continue;
-    selected.push({ ...row, pinned: true });
-    selectedIds.add(id);
-    if (selected.length === THREAD_COUNT) break;
-  }
-
-  for (const row of recentRows) {
-    if (selected.length === THREAD_COUNT) break;
-    if (selectedIds.has(row.id)) continue;
-    selected.push({ ...row, pinned: false });
-    selectedIds.add(row.id);
-  }
-
-  return {
-    selected,
-    byId,
-    mostRecentId: recentRows[0]?.id ?? null
-  };
+  return selectThreadRows(localRows, remoteRows, openSideChats, pinnedIds, THREAD_COUNT);
 }
 
 async function readTopThreads() {
   const queueWindowsPromise = readCodexQueueWindows();
+  const globalStatePromise = readGlobalStateSnapshot();
   const [rows, remoteRows, pinnedIds, activeThreadIds, sidebarNames] = await Promise.all([
     readThreadRows(),
-    readRemoteThreadRows(),
-    readPinnedIds(),
+    readRemoteThreadRows(globalStatePromise),
+    readPinnedIds(globalStatePromise),
     readActiveThreadIds(),
     readSidebarThreadNames()
   ]);
   const localRows = rows
     .map((row) => ({ ...row, title: sidebarNames.get(row.id) ?? row.title }))
     .filter((row) => !isInternalAmbientTitle(row.title));
-  const sideChats = await readEphemeralSideChats(localRows, localRows[0]?.id ?? null);
+  const sideChats = await readEphemeralSideChats(
+    localRows,
+    localRows[0]?.id ?? null,
+    globalStatePromise
+  );
   const sideChatLifecycles = await readSideChatLifecycles(sideChats);
   const openSideChats = sideChats.filter((thread) => !closedSideChatAtMs.has(thread.id)
     && sideChatLifecycles.get(thread.id)?.status !== "closed");
@@ -3913,6 +3137,7 @@ function registerPlugin() {
       cancelVoiceTranscription(message.context);
       cancelSendPress(message.context);
       voiceStateByContext.delete(message.context);
+      voiceSessionIdByContext.delete(message.context);
       contexts.delete(message.context);
       contextImages.delete(message.context);
       contextSentImages.delete(message.context);
@@ -3999,6 +3224,7 @@ function resetDemoEffects() {
   completionPulseReasonByThreadId.clear();
   voiceStateByContext.clear();
   voiceTargetThreadByContext.clear();
+  voiceSessionIdByContext.clear();
   globalCompletionStartedAtMs = null;
   globalCompletionThreadId = null;
   globalCompletionWasRendered = false;
@@ -4280,637 +3506,76 @@ async function verifyThreadRefreshResilience() {
     console.error = originalConsoleError;
   }
 
+  const sideChatCreatedAtMs = Date.now();
+  const timestampHex = sideChatCreatedAtMs.toString(16).padStart(12, "0").slice(-12);
+  const sideChatId = `${timestampHex.slice(0, 8)}-${timestampHex.slice(8)}-7000-8000-000000000001`;
+  const sideChatState = {
+    "electron-persisted-atom-state": {
+      "prompt-history": { [sideChatId]: ["임시 사이드 작업"] }
+    }
+  };
+  const savedAppServerSessionCache = appServerSessionCache;
+  const savedSideChatSessionStartMs = sideChatSessionStartMs;
+  const savedSideChatRowsCache = sideChatRowsCache;
+  const savedSideChatParents = new Map(sideChatParentById);
+  let sideChatCachePreserved = false;
+  try {
+    const sessionStartedAtMs = sideChatCreatedAtMs - 1_000;
+    appServerSessionCache = { checkedAtMs: Date.now(), startedAtMs: sessionStartedAtMs };
+    sideChatSessionStartMs = sessionStartedAtMs;
+    sideChatRowsCache = [];
+    sideChatParentById.clear();
+    const persistentRows = [stableThread];
+    const first = await readEphemeralSideChats(
+      persistentRows,
+      stableThread.id,
+      Promise.resolve(sideChatState)
+    );
+    const afterReadFailure = await readEphemeralSideChats(
+      persistentRows,
+      stableThread.id,
+      Promise.reject(new Error("simulated global-state rewrite"))
+    );
+    const afterSemanticFailure = await readEphemeralSideChats(
+      persistentRows,
+      stableThread.id,
+      Promise.resolve({ "electron-persisted-atom-state": "{partial" })
+    );
+    const afterValidEmptyState = await readEphemeralSideChats(
+      persistentRows,
+      stableThread.id,
+      Promise.resolve({
+        "electron-persisted-atom-state": { "prompt-history": {} }
+      })
+    );
+    sideChatCachePreserved = first[0]?.id === sideChatId
+      && afterReadFailure[0]?.id === sideChatId
+      && afterSemanticFailure[0]?.id === sideChatId
+      && afterValidEmptyState.length === 0
+      && sideChatRowsCache.length === 0;
+  } finally {
+    appServerSessionCache = savedAppServerSessionCache;
+    sideChatSessionStartMs = savedSideChatSessionStartMs;
+    sideChatRowsCache = savedSideChatRowsCache;
+    sideChatParentById.clear();
+    for (const [id, parentId] of savedSideChatParents) sideChatParentById.set(id, parentId);
+  }
+
   const passed = recoveredInsideRefresh
     && keptLastGoodList
     && oneOffStartupHidden
-    && startupErrorStable;
+    && startupErrorStable
+    && sideChatCachePreserved;
   console.log(JSON.stringify({
     passed,
     retryAttempts,
     keptLastGoodList,
     oneOffStartupHidden,
+    sideChatCachePreserved,
     startupErrorAfterFailures: startupErrorStable ? THREAD_REFRESH_STARTUP_ERROR_FAILURES : null
   }));
   if (!passed) process.exitCode = 1;
   socket = null;
-}
-
-function verifyThreadSelectionPolicy() {
-  const localRecent = {
-    id: "00000000-0000-4000-8000-000000000010",
-    title: "로컬 최근 작업",
-    recency_at: 400
-  };
-  const localPinned = {
-    id: "00000000-0000-4000-8000-000000000011",
-    title: "로컬 고정 작업",
-    recency_at: 300
-  };
-  const pinnedRemote = {
-    id: "00000000-0000-4000-8000-000000000012",
-    title: "원격 고정 작업",
-    recency_at: 500,
-    remote: true
-  };
-  const unpinnedRemote = {
-    id: "00000000-0000-4000-8000-000000000013",
-    title: "원격 최근 작업",
-    recency_at: 600,
-    remote: true
-  };
-  const sideChat = {
-    id: "00000000-0000-4000-8000-000000000014",
-    title: "로컬 사이드챗",
-    recency_at: 450,
-    ephemeral: true
-  };
-  const pinnedIds = [pinnedRemote.id, localPinned.id];
-  const selected = selectTopThreadRows(
-    [localRecent, localPinned],
-    [unpinnedRemote, pinnedRemote],
-    [sideChat],
-    pinnedIds
-  );
-  const selectedIds = selected.selected.map((thread) => thread.id);
-  const onlyPinnedRemoteIncluded = selectedIds.includes(pinnedRemote.id)
-    && !selectedIds.includes(unpinnedRemote.id)
-    && selected.selected.filter((thread) => thread.remote).every((thread) => thread.pinned);
-  const localRecentsFillRemainingSlots = selectedIds.join(",") === [
-    pinnedRemote.id,
-    localPinned.id,
-    sideChat.id,
-    localRecent.id
-  ].join(",");
-  const dedicatedVoiceTargetsLocalRecency = selected.mostRecentId === sideChat.id;
-
-  const afterRemoteUnpin = selectTopThreadRows(
-    [localRecent, localPinned],
-    [unpinnedRemote, pinnedRemote],
-    [sideChat],
-    [localPinned.id]
-  );
-  const unpinnedRemoteRemoved = afterRemoteUnpin.selected.every((thread) => !thread.remote);
-
-  const localWinsDuplicate = selectTopThreadRows(
-    [localRecent],
-    [{ ...pinnedRemote, id: localRecent.id }],
-    [],
-    [localRecent.id]
-  ).selected[0];
-  const localRecordWins = localWinsDuplicate?.id === localRecent.id
-    && !localWinsDuplicate.remote
-    && localWinsDuplicate.pinned;
-  const passed = onlyPinnedRemoteIncluded
-    && localRecentsFillRemainingSlots
-    && dedicatedVoiceTargetsLocalRecency
-    && unpinnedRemoteRemoved
-    && localRecordWins;
-  console.log(JSON.stringify({
-    passed,
-    onlyPinnedRemoteIncluded,
-    localRecentsFillRemainingSlots,
-    unpinnedRemoteRemoved,
-    localRecordWins
-  }));
-  if (!passed) process.exitCode = 1;
-}
-
-function verifyRemoteLifecyclePolicy() {
-  const threadId = "019f0000-0000-7000-8000-000000000001";
-  const turnId = "019f77d5-d319-7000-8000-000000000002";
-  const startedAtMs = uuidV7TimestampMs(turnId);
-  const startConfigMs = startedAtMs - 192;
-  const reasoningObservedMs = startedAtMs + 3_200;
-  const endedAtMs = startedAtMs + 9 * 60_000 + 22_000;
-  const misleadingSummaryUpdatedAtMs = startedAtMs + 1_000;
-  const lifecycles = new Map();
-  applyRemoteLifecycleLogLine(
-    `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${threadId}`,
-    lifecycles
-  );
-  applyRemoteLifecycleLogLine(
-    `${new Date(reasoningObservedMs).toISOString()} info [electron-message-handler] Reasoning summary item threadId=${threadId} turnId=${turnId}`,
-    lifecycles
-  );
-  const parsed = lifecycles.get(threadId);
-  remoteLifecycleCache.clear();
-  remoteReasoningEffortByThreadId.clear();
-  remoteRuntimeObservationByThreadId.clear();
-  remoteActivityByThreadId.clear();
-  remoteLifecycleCache.set(threadId, parsed);
-  remoteReasoningEffortByThreadId.set(threadId, {
-    effort: "high",
-    observedAtMs: reasoningObservedMs,
-    turnStartedAtMs: startedAtMs
-  });
-
-  const remoteActivities = new Map();
-  const lifecycleBeforeActivity = JSON.stringify(remoteLifecycleCache.get(threadId));
-  applyRemoteActivityLogLine(
-    `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${threadId}`,
-    remoteActivities
-  );
-  applyRemoteActivityLogLine(
-    `${new Date(reasoningObservedMs).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=["**Planning test implementation**"] summaryPartCount=1 threadId=${threadId} turnId=${turnId}`,
-    remoteActivities
-  );
-  const activityUpdatesDoNotMutateLifecycle = JSON.stringify(remoteLifecycleCache.get(threadId))
-    === lifecycleBeforeActivity;
-  const runtimeObservations = new Map();
-  const active = remoteStatusForThread({
-    id: threadId,
-    remote: true,
-    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
-    threadRuntimeStatus: { type: "active", activeFlags: [] },
-    reasoningEffort: null,
-    serviceTier: "default"
-  }, startedAtMs + 10_000, runtimeObservations, remoteActivities);
-  const approvalOverridesActivity = remoteStatusForThread({
-    id: threadId,
-    remote: true,
-    threadRuntimeStatus: { type: "active", activeFlags: ["waitingOnApproval"] }
-  }, startedAtMs + 10_000, new Map(), remoteActivities).activity.label === "원격 승인 대기";
-  const inputOverridesActivity = remoteStatusForThread({
-    id: threadId,
-    remote: true,
-    threadRuntimeStatus: { type: "active", activeFlags: ["waitingOnUserInput"] }
-  }, startedAtMs + 10_000, new Map(), remoteActivities).activity.label === "원격 입력 대기";
-  const errorOverridesActivity = remoteStatusForThread({
-    id: threadId,
-    remote: true,
-    threadRuntimeStatus: { type: "systemError" }
-  }, startedAtMs + 10_000, new Map(), remoteActivities).activity.label === "원격 오류";
-
-  const activityThreadId = "019f0000-0000-7000-8000-00000000000a";
-  const activityStates = new Map();
-  const activityLine = (timestamp, activityTurnId, summaries) => (
-    `${new Date(timestamp).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=${JSON.stringify(summaries)} summaryPartCount=${summaries.length} threadId=${activityThreadId} turnId=${activityTurnId}`
-  );
-  applyRemoteActivityLogLine(
-    `${new Date(startConfigMs).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${activityThreadId}`,
-    activityStates
-  );
-  const planningLine = activityLine(reasoningObservedMs, turnId, ["**Planning final validation tests**"]);
-  const planningMapped = applyRemoteActivityLogLine(planningLine, activityStates)
-    && activityStates.get(activityThreadId)?.activity?.label === "계획 중";
-  const cumulativeLine = activityLine(reasoningObservedMs + 1_000, turnId, [
-    "**Planning final validation tests**",
-    "**Implementing compact activity cache**"
-  ]);
-  const cumulativeLatestMapped = applyRemoteActivityLogLine(cumulativeLine, activityStates)
-    && activityStates.get(activityThreadId)?.activity?.label === "구현 중";
-  const activityBeforeEmpty = JSON.stringify(activityStates.get(activityThreadId));
-  const emptySummaryIgnored = !applyRemoteActivityLogLine(
-    activityLine(reasoningObservedMs + 2_000, turnId, []),
-    activityStates
-  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityBeforeEmpty;
-  const activityAfterEmpty = JSON.stringify(activityStates.get(activityThreadId));
-  const malformedSummaryIgnored = !applyRemoteActivityLogLine(
-    `${new Date(reasoningObservedMs + 3_000).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=[broken summaryPartCount=1 threadId=${activityThreadId} turnId=${turnId}`,
-    activityStates
-  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterEmpty;
-  const olderActivityIgnored = !applyRemoteActivityLogLine(
-    activityLine(reasoningObservedMs + 500, turnId, ["**Searching older evidence**"]),
-    activityStates
-  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterEmpty;
-  const verifyLine = activityLine(reasoningObservedMs + 4_000, turnId, ["**Verifying release artifacts**"]);
-  const verificationMapped = applyRemoteActivityLogLine(verifyLine, activityStates)
-    && activityStates.get(activityThreadId)?.activity?.label === "검증 중";
-  const activityAfterVerification = JSON.stringify(activityStates.get(activityThreadId));
-  const duplicateOverlapIgnored = !applyRemoteActivityLogLine(verifyLine, activityStates)
-    && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterVerification;
-  const oversizedSummaryIgnored = !applyRemoteActivityLogLine(
-    activityLine(reasoningObservedMs + 5_000, turnId, ["x".repeat(REMOTE_REASONING_SUMMARY_MAX_LENGTH + 1)]),
-    activityStates
-  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterVerification;
-  const partAddedIgnored = !applyRemoteActivityLogLine(
-    `${new Date(reasoningObservedMs + 6_000).toISOString()} info [electron-message-handler] Reasoning summary part added payload={} threadId=${activityThreadId} turnId=${turnId}`,
-    activityStates
-  ) && JSON.stringify(activityStates.get(activityThreadId)) === activityAfterVerification;
-  const activityLifecycle = {
-    status: "working",
-    startedAtMs,
-    latestTurnId: turnId
-  };
-  const freshActivityShown = remoteWorkingActivity(
-    { id: activityThreadId },
-    activityLifecycle,
-    reasoningObservedMs + 4_500,
-    activityStates
-  )?.label === "검증 중";
-  const staleActivityHidden = remoteWorkingActivity(
-    { id: activityThreadId },
-    activityLifecycle,
-    reasoningObservedMs + 4_000 + REMOTE_ACTIVITY_STALE_MS + 1,
-    activityStates
-  ) === null;
-  const classifierUsesLeadingVerb = classifyRemoteReasoningSummary("Planning final validation tests").label === "계획 중"
-    && classifyRemoteReasoningSummary("Searching current documentation").label === "검색 중"
-    && classifyRemoteReasoningSummary("Summarizing final results").label === "정리 중";
-
-  const nextActivityTurnId = "019f780e-4bbf-7000-8000-00000000000b";
-  const nextActivityStartMs = uuidV7TimestampMs(nextActivityTurnId);
-  applyRemoteActivityLogLine(
-    `${new Date(nextActivityStartMs - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${activityThreadId}`,
-    activityStates
-  );
-  const newTurnStartClearsActivity = activityStates.get(activityThreadId)?.turnId === null
-    && activityStates.get(activityThreadId)?.activity?.label === "요청 분석";
-  const priorTurnActivityRejected = !applyRemoteActivityLogLine(
-    activityLine(nextActivityStartMs + 1_000, turnId, ["**Implementing stale prior turn**"]),
-    activityStates
-  ) && activityStates.get(activityThreadId)?.activity?.label === "요청 분석";
-  applyRemoteActivityLogLine(
-    activityLine(nextActivityStartMs + 2_000, nextActivityTurnId, ["**Analyzing current turn**"]),
-    activityStates
-  );
-  applyRemoteActivityLogLine(
-    `${new Date(nextActivityStartMs + 3_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${activityThreadId} latestTurnId=${nextActivityTurnId} latestTurnStatus=completed`,
-    activityStates
-  );
-  const lateTerminalActivityRejected = !applyRemoteActivityLogLine(
-    activityLine(nextActivityStartMs + 4_000, nextActivityTurnId, ["**Implementing after completion**"]),
-    activityStates
-  ) && activityStates.get(activityThreadId)?.terminal === true
-    && activityStates.get(activityThreadId)?.activity === null;
-
-  const quickThreadId = "019f0000-0000-7000-8000-00000000000e";
-  const quickTurnA = "019f77d5-d319-7000-8000-00000000000c";
-  const quickTurnB = "019f77d5-dae9-7000-8000-00000000000d";
-  const quickStartA = uuidV7TimestampMs(quickTurnA);
-  const quickStartB = uuidV7TimestampMs(quickTurnB);
-  const quickStates = new Map();
-  const quickActivityLine = (timestamp, quickTurnId, summary) => (
-    `${new Date(timestamp).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=${JSON.stringify([summary])} summaryPartCount=1 threadId=${quickThreadId} turnId=${quickTurnId}`
-  );
-  applyRemoteActivityLogLine(
-    `${new Date(quickStartA - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${quickThreadId}`,
-    quickStates
-  );
-  applyRemoteActivityLogLine(
-    quickActivityLine(quickStartA + 100, quickTurnA, "**Analyzing first turn**"),
-    quickStates
-  );
-  applyRemoteActivityLogLine(
-    `${new Date(quickStartA + 1_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${quickThreadId} latestTurnId=${quickTurnA} latestTurnStatus=completed`,
-    quickStates
-  );
-  applyRemoteActivityLogLine(
-    `${new Date(quickStartB - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${quickThreadId}`,
-    quickStates
-  );
-  const pendingQuickState = JSON.stringify(quickStates.get(quickThreadId));
-  const delayedPriorCompletionBeforeActivityIgnored = !applyRemoteActivityLogLine(
-    `${new Date(quickStartB - 100).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
-    quickStates
-  ) && JSON.stringify(quickStates.get(quickThreadId)) === pendingQuickState;
-  applyRemoteActivityLogLine(
-    quickActivityLine(quickStartB + 100, quickTurnB, "**Implementing quick retry**"),
-    quickStates
-  );
-  const quickRetryTurnRecovered = quickStates.get(quickThreadId)?.turnId === quickTurnB
-    && quickStates.get(quickThreadId)?.activity?.label === "구현 중"
-    && !quickStates.get(quickThreadId)?.terminal;
-  const quickStateBeforeDelayedCompletion = JSON.stringify(quickStates.get(quickThreadId));
-  const delayedPriorActivityCompletionIgnored = !applyRemoteActivityLogLine(
-    `${new Date(quickStartB + 500).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
-    quickStates
-  ) && JSON.stringify(quickStates.get(quickThreadId)) === quickStateBeforeDelayedCompletion;
-
-  const coldTerminalThreadId = "019f0000-0000-7000-8000-00000000000f";
-  const coldTerminalStates = new Map();
-  applyRemoteActivityLogLine(
-    `${new Date(quickStartA + 1_000).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${coldTerminalThreadId} turnId=${quickTurnA}`,
-    coldTerminalStates
-  );
-  const coldTerminalLine = `${new Date(quickStartA + 1_500).toISOString()} info [electron-message-handler] Reasoning summary item completed summary=["**Implementing late activity**"] summaryPartCount=1 threadId=${coldTerminalThreadId} turnId=${quickTurnA}`;
-  const coldTerminalBlocksLateActivity = !applyRemoteActivityLogLine(coldTerminalLine, coldTerminalStates)
-    && coldTerminalStates.get(coldTerminalThreadId)?.terminal === true;
-
-  const quickLifecycles = new Map();
-  applyRemoteLifecycleLogLine(
-    `${new Date(quickStartA + 1_000).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
-    quickLifecycles
-  );
-  applyRemoteLifecycleLogLine(
-    `${new Date(quickStartB - 192).toISOString()} info [electron-message-handler] Reasoning summary turn-start config resolved conversationId=${quickThreadId}`,
-    quickLifecycles
-  );
-  const pendingQuickLifecycle = JSON.stringify(quickLifecycles.get(quickThreadId));
-  const delayedPriorCompletionBeforeLifecycleActivityIgnored = !applyRemoteLifecycleLogLine(
-    `${new Date(quickStartB - 100).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
-    quickLifecycles
-  ) && JSON.stringify(quickLifecycles.get(quickThreadId)) === pendingQuickLifecycle;
-  applyRemoteLifecycleLogLine(
-    `${new Date(quickStartB + 100).toISOString()} info [electron-message-handler] Reasoning summary item threadId=${quickThreadId} turnId=${quickTurnB}`,
-    quickLifecycles
-  );
-  const quickLifecycleRolloverRecovered = quickLifecycles.get(quickThreadId)?.status === "working"
-    && quickLifecycles.get(quickThreadId)?.latestTurnId === quickTurnB
-    && quickLifecycles.get(quickThreadId)?.endedAtMs === null;
-  const quickLifecycleBeforeDelayedCompletion = JSON.stringify(quickLifecycles.get(quickThreadId));
-  const delayedPriorLifecycleCompletionIgnored = !applyRemoteLifecycleLogLine(
-    `${new Date(quickStartB + 500).toISOString()} info [electron-message-handler] [desktop-notifications] show turn-complete conversationId=${quickThreadId} turnId=${quickTurnA}`,
-    quickLifecycles
-  ) && JSON.stringify(quickLifecycles.get(quickThreadId)) === quickLifecycleBeforeDelayedCompletion;
-  const remoteActivityPolicyRecovered = planningMapped
-    && cumulativeLatestMapped
-    && emptySummaryIgnored
-    && malformedSummaryIgnored
-    && olderActivityIgnored
-    && verificationMapped
-    && duplicateOverlapIgnored
-    && oversizedSummaryIgnored
-    && partAddedIgnored
-    && freshActivityShown
-    && staleActivityHidden
-    && classifierUsesLeadingVerb
-    && newTurnStartClearsActivity
-    && priorTurnActivityRejected
-    && lateTerminalActivityRejected
-    && delayedPriorCompletionBeforeActivityIgnored
-    && delayedPriorCompletionBeforeLifecycleActivityIgnored
-    && quickRetryTurnRecovered
-    && delayedPriorActivityCompletionIgnored
-    && coldTerminalBlocksLateActivity
-    && quickLifecycleRolloverRecovered
-    && delayedPriorLifecycleCompletionIgnored;
-
-  applyRemoteLifecycleLogLine(
-    `${new Date(endedAtMs).toISOString()} info [desktop-notifications] show turn-complete threadId=${threadId} turnId=${turnId}`,
-    remoteLifecycleCache
-  );
-  const completed = remoteStatusForThread({
-    id: threadId,
-    remote: true,
-    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
-    threadRuntimeStatus: { type: "notLoaded" },
-    hasUnreadTurn: true,
-    reasoningEffort: null,
-    serviceTier: "default"
-  }, endedAtMs + 100, runtimeObservations);
-
-  applyRemoteLifecycleLogLine(
-    `${new Date(endedAtMs + 2_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=interrupted`,
-    remoteLifecycleCache
-  );
-  const stopped = remoteStatusForThread({
-    id: threadId,
-    remote: true,
-    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
-    threadRuntimeStatus: { type: "notLoaded" },
-    reasoningEffort: null,
-    serviceTier: "default"
-  }, endedAtMs + 2_000, runtimeObservations);
-  applyRemoteLifecycleLogLine(
-    `${new Date(endedAtMs + 5 * 60_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=completed`,
-    remoteLifecycleCache
-  );
-  applyRemoteLifecycleLogLine(
-    `${new Date(endedAtMs + 10 * 60_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${threadId} latestTurnId=${turnId} latestTurnStatus=completed`,
-    remoteLifecycleCache
-  );
-  const repeatedResumePreservesFrozenEnd = remoteLifecycleCache.get(threadId)?.endedAtMs === endedAtMs
-    && remoteLifecycleCache.get(threadId)?.terminalObservedAtMs === endedAtMs;
-
-  const transitionThreadId = "019f0000-0000-7000-8000-000000000003";
-  const transitionTurnId = "019f77d5-d319-7000-8000-000000000004";
-  const transitionStartMs = uuidV7TimestampMs(transitionTurnId);
-  const transitionEndMs = transitionStartMs + 70_000;
-  remoteLifecycleCache.set(transitionThreadId, {
-    status: "working",
-    startedAtMs: transitionStartMs,
-    endedAtMs: null,
-    latestTurnId: transitionTurnId,
-    lastActivityAtMs: transitionStartMs + 30_000,
-    terminalObservedAtMs: null,
-    observedAtMs: transitionStartMs + 30_000
-  });
-  const transitionObservations = new Map();
-  remoteStatusForThread({
-    id: transitionThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "active", activeFlags: [] }
-  }, transitionStartMs + 40_000, transitionObservations);
-  const transientInactive = remoteStatusForThread({
-    id: transitionThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "notLoaded" }
-  }, transitionStartMs + 50_000, transitionObservations);
-  const recoveredActive = remoteStatusForThread({
-    id: transitionThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "active", activeFlags: [] }
-  }, transitionStartMs + 50_500, transitionObservations);
-  remoteStatusForThread({
-    id: transitionThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "active", activeFlags: [] }
-  }, transitionEndMs - 5_000, transitionObservations);
-  const pendingTerminal = remoteStatusForThread({
-    id: transitionThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "notLoaded" }
-  }, transitionEndMs, transitionObservations);
-  const observedTerminal = remoteStatusForThread({
-    id: transitionThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "notLoaded" }
-  }, transitionEndMs + REMOTE_RUNTIME_TERMINAL_CONFIRM_MS, transitionObservations);
-  const runtimeTransitionRecovered = transientInactive.status === "working"
-    && recoveredActive.status === "working"
-    && pendingTerminal.status === "working"
-    && observedTerminal.status === "completed"
-    && observedTerminal.endedAtMs === transitionEndMs
-    && timingLabel(observedTerminal, transitionEndMs) === "01:10";
-
-  const coldThreadId = "019f0000-0000-7000-8000-000000000005";
-  remoteLifecycleCache.set(coldThreadId, {
-    status: "working",
-    startedAtMs,
-    endedAtMs: null,
-    latestTurnId: turnId,
-    lastActivityAtMs: startedAtMs + 5 * 60_000,
-    terminalObservedAtMs: null,
-    observedAtMs: startedAtMs + 5 * 60_000
-  });
-  const coldCompleted = remoteStatusForThread({
-    id: coldThreadId,
-    remote: true,
-    summaryUpdatedAtMs: misleadingSummaryUpdatedAtMs,
-    threadRuntimeStatus: { type: "notLoaded" },
-    hasUnreadTurn: true
-  }, endedAtMs, new Map());
-  const coldStartAvoidsFabricatedDuration = coldCompleted.status === "completed"
-    && coldCompleted.endedAtMs === null
-    && timingLabel(coldCompleted, endedAtMs) === "--:--";
-
-  const staleObservationThreadId = "019f0000-0000-7000-8000-000000000007";
-  remoteLifecycleCache.set(staleObservationThreadId, {
-    status: "working",
-    startedAtMs,
-    endedAtMs: null,
-    latestTurnId: turnId,
-    lastActivityAtMs: startedAtMs + 5 * 60_000,
-    terminalObservedAtMs: null,
-    observedAtMs: startedAtMs + 5 * 60_000
-  });
-  const staleObservations = new Map();
-  remoteStatusForThread({
-    id: staleObservationThreadId,
-    remote: true,
-    threadRuntimeStatus: { type: "active", activeFlags: [] }
-  }, startedAtMs + 10_000, staleObservations);
-  const staleObservationReappeared = remoteStatusForThread({
-    id: staleObservationThreadId,
-    remote: true,
-    threadRuntimeStatus: { type: "notLoaded" },
-    hasUnreadTurn: true
-  }, startedAtMs + 10_000 + REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS + 60_000, staleObservations);
-  const staleObservationConfirmed = remoteStatusForThread({
-    id: staleObservationThreadId,
-    remote: true,
-    threadRuntimeStatus: { type: "notLoaded" },
-    hasUnreadTurn: true
-  }, startedAtMs + 10_000 + REMOTE_RUNTIME_OBSERVATION_MAX_GAP_MS + 60_000
-    + REMOTE_RUNTIME_TERMINAL_CONFIRM_MS, staleObservations);
-  const staleRuntimeObservationIgnored = staleObservationReappeared.status === "completed"
-    && staleObservationReappeared.endedAtMs === null
-    && staleObservationConfirmed.status === "completed"
-    && staleObservationConfirmed.endedAtMs === null
-    && timingLabel(staleObservationConfirmed, endedAtMs) === "--:--";
-
-  const rolloverThreadId = "019f0000-0000-7000-8000-000000000006";
-  const previousTurnId = "019f77c3-ca44-7000-8000-000000000007";
-  const previousStartMs = uuidV7TimestampMs(previousTurnId);
-  const previousEndMs = previousStartMs + 60_000;
-  const rolloverLifecycles = new Map([[
-    rolloverThreadId,
-    {
-      status: "completed",
-      startedAtMs: previousStartMs,
-      endedAtMs: previousEndMs,
-      latestTurnId: previousTurnId,
-      lastActivityAtMs: previousStartMs + 30_000,
-      terminalObservedAtMs: previousEndMs,
-      observedAtMs: previousEndMs
-    }
-  ]]);
-  const rolloverEndMs = transitionStartMs + 90_000;
-  applyRemoteLifecycleLogLine(
-    `${new Date(rolloverEndMs).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${rolloverThreadId} latestTurnId=${transitionTurnId} latestTurnStatus=completed`,
-    rolloverLifecycles
-  );
-  const firstRolloverLifecycle = rolloverLifecycles.get(rolloverThreadId);
-  applyRemoteLifecycleLogLine(
-    `${new Date(rolloverEndMs + 5 * 60_000).toISOString()} info [electron-message-handler] maybe_resume_success conversationId=${rolloverThreadId} latestTurnId=${transitionTurnId} latestTurnStatus=completed`,
-    rolloverLifecycles
-  );
-  const rolloverLifecycle = rolloverLifecycles.get(rolloverThreadId);
-  remoteLifecycleCache.set(rolloverThreadId, rolloverLifecycle);
-  const rolloverCompleted = remoteStatusForThread({
-    id: rolloverThreadId,
-    remote: true,
-    summaryUpdatedAtMs: transitionStartMs + 1_000,
-    threadRuntimeStatus: { type: "notLoaded" }
-  }, rolloverEndMs + 100, new Map());
-  const resumeTerminalDoesNotInventEnd = firstRolloverLifecycle?.endedAtMs === null
-    && firstRolloverLifecycle?.terminalObservedAtMs === null
-    && rolloverLifecycle?.endedAtMs === null
-    && rolloverLifecycle?.lastActivityAtMs === null
-    && rolloverLifecycle?.terminalObservedAtMs === null
-    && rolloverCompleted.status === "completed"
-    && rolloverCompleted.endedAtMs === null
-    && timingLabel(rolloverCompleted, rolloverEndMs) === "--:--";
-
-  remoteReasoningEffortByThreadId.set(threadId, {
-    effort: "medium",
-    observedAtMs: startedAtMs - REMOTE_REASONING_TURN_TOLERANCE_MS - 1,
-    turnStartedAtMs: startedAtMs - 60_000
-  });
-  const staleEffortRejected = reasoningEffortForRemoteThread(
-    { id: threadId, reasoningEffort: null },
-    remoteLifecycleCache.get(threadId)
-  ) === null;
-  const summaryEffortPreferred = reasoningEffortForRemoteThread(
-    { id: threadId, reasoningEffort: "max" },
-    remoteLifecycleCache.get(threadId)
-  ) === "max";
-  const queueWindows = parseCodexQueueWindows("window\t2\t1\nend\nwindow\t3\t0\nend\n");
-  const focusedWindowParsed = queueWindows.length === 2
-    && queueWindows[0].index === 2
-    && queueWindows[0].focused
-    && !queueWindows[1].focused;
-
-  const passed = Number.isFinite(startedAtMs)
-    && parsed?.status === "working"
-    && parsed.startedAtMs === startedAtMs
-    && parsed.lastActivityAtMs === reasoningObservedMs
-    && active.status === "working"
-    && active.startedAtMs === startedAtMs
-    && active.reasoningEffort === "high"
-    && active.activity.label === "계획 중"
-    && activityUpdatesDoNotMutateLifecycle
-    && approvalOverridesActivity
-    && inputOverridesActivity
-    && errorOverridesActivity
-    && remoteActivityPolicyRecovered
-    && completed.status === "completed"
-    && completed.endedAtMs === endedAtMs
-    && timingLabel(completed, endedAtMs) === "09:22"
-    && completed.endedAtMs !== misleadingSummaryUpdatedAtMs
-    && stopped.status === "stopped"
-    && stopped.startedAtMs === startedAtMs
-    && runtimeTransitionRecovered
-    && coldStartAvoidsFabricatedDuration
-    && staleRuntimeObservationIgnored
-    && repeatedResumePreservesFrozenEnd
-    && resumeTerminalDoesNotInventEnd
-    && staleEffortRejected
-    && summaryEffortPreferred
-    && focusedWindowParsed
-    && parseCodexReasoningState("effort=ultra confidence=120 visited=800") === "ultra"
-    && parseCodexReasoningState("effort=unknown confidence=0 visited=800") === null
-    && reasoningEffortProgress(null) === 0;
-  console.log(JSON.stringify({
-    passed,
-    uuidStartRecovered: parsed?.startedAtMs === startedAtMs,
-    activeTimingRecovered: active.startedAtMs === startedAtMs,
-    remoteActivity: active.activity.label,
-    remoteActivityPolicyRecovered,
-    activityTimingIndependent: activityUpdatesDoNotMutateLifecycle,
-    activityPrecedenceRecovered: approvalOverridesActivity && inputOverridesActivity && errorOverridesActivity,
-    quickRetryActivityRecovered: quickRetryTurnRecovered && quickLifecycleRolloverRecovered,
-    delayedCompletionIsolation: delayedPriorCompletionBeforeActivityIgnored
-      && delayedPriorCompletionBeforeLifecycleActivityIgnored
-      && delayedPriorActivityCompletionIgnored
-      && coldTerminalBlocksLateActivity
-      && delayedPriorLifecycleCompletionIgnored,
-    completedDuration: timingLabel(completed, endedAtMs),
-    misleadingSummaryIgnored: completed.endedAtMs !== misleadingSummaryUpdatedAtMs,
-    runtimeTransitionRecovered,
-    transientInactiveIgnored: transientInactive.status === "working" && recoveredActive.status === "working",
-    coldStartAvoidsFabricatedDuration,
-    staleRuntimeObservationIgnored,
-    repeatedResumePreservesFrozenEnd,
-    resumeTerminalDoesNotInventEnd,
-    stoppedStatusRecovered: stopped.status === "stopped",
-    staleEffortRejected,
-    summaryEffortPreferred,
-    focusedWindowParsed,
-    unknownEffortProgress: reasoningEffortProgress(null)
-  }));
-  remoteLifecycleCache.clear();
-  remoteReasoningEffortByThreadId.clear();
-  remoteRuntimeObservationByThreadId.clear();
-  remoteActivityByThreadId.clear();
-  if (!passed) process.exitCode = 1;
 }
 
 async function verifyUsageCachePolicy() {
@@ -4997,7 +3662,11 @@ async function verifyVoiceSubmissionPolicy() {
   voiceStateByContext.clear();
   voiceStateResetAtMs.clear();
   voiceTargetThreadByContext.clear();
+  voiceSessionIdByContext.clear();
   contexts.set(context, ACTIONS.thread1);
+
+  const sessionId = ++nextVoiceSessionId;
+  voiceSessionIdByContext.set(context, sessionId);
 
   const tracker = {
     baseline,
@@ -5006,7 +3675,8 @@ async function verifyVoiceSubmissionPolicy() {
     lastProbeAtMs: null,
     releasedAtMs: 1_000,
     autoSubmit: true,
-    targetThreadId
+    targetThreadId,
+    sessionId
   };
   voiceTranscriptionByContext.set(context, tracker);
   let completions = 0;
@@ -5071,13 +3741,133 @@ async function verifyVoiceSubmissionPolicy() {
   const successRequiresConfirmation = verificationAttempts === 2
     && voiceStateByContext.get(context) === "sent";
 
+  const staleCommands = [];
+  voiceStateByContext.set(context, "submitting");
+  voiceSessionIdByContext.set(context, ++nextVoiceSessionId);
+  await submitCompletedVoiceTranscription(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript
+  }, {
+    openApp: async () => {},
+    sleep: async () => {},
+    bridge(command) {
+      staleCommands.push(command);
+      return true;
+    },
+    scheduleRefresh: () => {}
+  });
+  const staleSubmissionIgnored = staleCommands.length === 0
+    && voiceStateByContext.get(context) === "submitting";
+
+  const otherContext = "voice-submit-other-context";
+  contexts.set(otherContext, ACTIONS.thread2);
+  const crossContextSessionId = ++nextVoiceSessionId;
+  voiceSessionIdByContext.clear();
+  voiceSessionIdByContext.set(context, crossContextSessionId);
+  voiceStateByContext.set(context, "submitting");
+  voiceTargetThreadByContext.set(context, targetThreadId);
+  voiceTranscriptionByContext.set(context, {
+    ...tracker,
+    sessionId: crossContextSessionId
+  });
+  const crossContextCommands = [];
+  await submitCompletedVoiceTranscription(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript,
+    sessionId: crossContextSessionId
+  }, {
+    openApp: async () => {
+      claimVoiceSession(otherContext);
+    },
+    sleep: async () => {},
+    bridge(command) {
+      crossContextCommands.push(command);
+      return true;
+    },
+    scheduleRefresh: () => {}
+  });
+  const crossContextSubmissionIgnored = crossContextCommands.length === 0
+    && !voiceSessionIdByContext.has(context)
+    && voiceSessionIdByContext.has(otherContext)
+    && !voiceTranscriptionByContext.has(context)
+    && !voiceStateByContext.has(context)
+    && !voiceTargetThreadByContext.has(context);
+
+  const otherTargetThreadId = "00000000-0000-4000-8000-000000000021";
+  function verifyOverlappingHoldReleaseOrder(releaseOrder) {
+    voiceHeldContexts.clear();
+    voiceTranscriptionByContext.clear();
+    voiceStateByContext.clear();
+    voiceStateResetAtMs.clear();
+    voiceTargetThreadByContext.clear();
+    voiceSessionIdByContext.clear();
+    const overlapCommands = [];
+    let resumeCount = 0;
+    const bridge = (command, commandContext) => {
+      overlapCommands.push(`${command}:${commandContext ?? "none"}`);
+      return true;
+    };
+    const baseOptions = {
+      autoSubmit: true,
+      composerAlreadyFocused: true,
+      bridge,
+      stateReader: () => baseline,
+      pauseMedia: () => {},
+      resumeMedia: () => { resumeCount += 1; }
+    };
+    const firstStarted = beginVoiceHoldSync(context, {
+      ...baseOptions,
+      targetThreadId
+    });
+    const secondStarted = beginVoiceHoldSync(otherContext, {
+      ...baseOptions,
+      targetThreadId: otherTargetThreadId
+    });
+    for (const releasedContext of releaseOrder) {
+      endVoiceHoldSync(releasedContext, true, baseOptions);
+    }
+    const ownerTracker = voiceTranscriptionByContext.get(otherContext);
+    const passed = firstStarted
+      && secondStarted
+      && overlapCommands.join(",") === [
+        `voice-down:${context}`,
+        `voice-up:${context}`,
+        `voice-down:${otherContext}`,
+        `voice-up:${otherContext}`
+      ].join(",")
+      && voiceHeldContexts.size === 0
+      && voiceTranscriptionByContext.size === 1
+      && !voiceTranscriptionByContext.has(context)
+      && ownerTracker?.targetThreadId === otherTargetThreadId
+      && Number.isFinite(ownerTracker?.releasedAtMs)
+      && voiceSessionIdByContext.size === 1
+      && voiceSessionIdByContext.get(otherContext) === ownerTracker?.sessionId
+      && resumeCount === 1;
+    for (const heldContext of voiceStartVerificationTimers.keys()) {
+      clearVoiceStartVerification(heldContext);
+    }
+    return passed;
+  }
+  const overlappingOldThenNewRelease = verifyOverlappingHoldReleaseOrder([
+    context,
+    otherContext
+  ]);
+  const overlappingNewThenOldRelease = verifyOverlappingHoldReleaseOrder([
+    otherContext,
+    context
+  ]);
+
   const passed = Boolean(baseline && transcript && buttonFocusFallback)
     && ignoredFocusTypeChange
     && detectedStableTranscript
     && rejectedUnchangedDraft
     && acceptedStableReset
     && retriedUnconfirmedSubmit
-    && successRequiresConfirmation;
+    && successRequiresConfirmation
+    && staleSubmissionIgnored
+    && crossContextSubmissionIgnored
+    && overlappingOldThenNewRelease
+    && overlappingNewThenOldRelease;
   console.log(JSON.stringify({
     passed,
     ignoredFocusTypeChange,
@@ -5085,68 +3875,87 @@ async function verifyVoiceSubmissionPolicy() {
     rejectedUnchangedDraft,
     acceptedStableReset,
     retriedUnconfirmedSubmit,
-    successRequiresConfirmation
+    successRequiresConfirmation,
+    staleSubmissionIgnored,
+    crossContextSubmissionIgnored,
+    overlappingOldThenNewRelease,
+    overlappingNewThenOldRelease
   }));
   if (!passed) process.exitCode = 1;
+  voiceHeldContexts.clear();
+  voiceTranscriptionByContext.clear();
+  voiceStateByContext.clear();
+  voiceStateResetAtMs.clear();
+  voiceTargetThreadByContext.clear();
+  voiceSessionIdByContext.clear();
   socket = null;
 }
 
-process.once("SIGTERM", () => {
-  releaseVoiceKeysSync();
-  process.exit(0);
-});
-process.once("SIGINT", () => {
-  releaseVoiceKeysSync();
-  process.exit(0);
-});
-process.on("exit", releaseVoiceKeysSync);
+function installShutdownHandlers() {
+  process.once("SIGTERM", () => {
+    releaseVoiceKeysSync();
+    process.exit(0);
+  });
+  process.once("SIGINT", () => {
+    releaseVoiceKeysSync();
+    process.exit(0);
+  });
+  process.on("exit", releaseVoiceKeysSync);
+}
 
-if (completionContractMode) {
-  verifyCompletionFanout();
-} else if (refreshResilienceContractMode) {
-  verifyThreadRefreshResilience().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-} else if (threadSelectionContractMode) {
-  verifyThreadSelectionPolicy();
-} else if (usageCacheContractMode) {
-  verifyUsageCachePolicy().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-} else if (voiceSubmitContractMode) {
-  verifyVoiceSubmissionPolicy().catch((error) => {
-    console.error(error);
-    process.exitCode = 1;
-  });
-} else if (remoteLifecycleContractMode) {
-  verifyRemoteLifecyclePolicy();
-} else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
-  if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
-  else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
-} else if (snapshotMode) {
-  readTopThreads()
-    .then((threads) => {
-      console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, remote, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount }) => ({
-        id,
-        title: normalizeTitle(title),
-        pinned,
-        ephemeral: Boolean(ephemeral),
-        remote: Boolean(remote),
-        status,
-        activity,
-        reasoningEffort,
-        serviceTier,
-        queueCount,
-        speed: isFastServiceTier(serviceTier) ? "fast" : "standard",
-        timing: timingLabel({ status, startedAtMs, endedAtMs })
-      })), null, 2));
-    })
-    .catch((error) => {
+function runSelectedMode() {
+  if (completionContractMode) {
+    verifyCompletionFanout();
+  } else if (refreshResilienceContractMode) {
+    verifyThreadRefreshResilience().catch((error) => {
       console.error(error);
       process.exitCode = 1;
     });
-} else {
-  registerPlugin();
+  } else if (usageCacheContractMode) {
+    verifyUsageCachePolicy().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  } else if (voiceSubmitContractMode) {
+    verifyVoiceSubmissionPolicy().catch((error) => {
+      console.error(error);
+      process.exitCode = 1;
+    });
+  } else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
+    if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
+    else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
+  } else if (snapshotMode) {
+    readTopThreads()
+      .then((threads) => {
+        console.log(JSON.stringify(threads.map(({ id, title, pinned, ephemeral, remote, status, startedAtMs, endedAtMs, activity, reasoningEffort, serviceTier, queueCount }) => ({
+          id,
+          title: normalizeTitle(title),
+          pinned,
+          ephemeral: Boolean(ephemeral),
+          remote: Boolean(remote),
+          status,
+          activity,
+          reasoningEffort,
+          serviceTier,
+          queueCount,
+          speed: isFastServiceTier(serviceTier) ? "fast" : "standard",
+          timing: timingLabel({ status, startedAtMs, endedAtMs })
+        })), null, 2));
+      })
+      .catch((error) => {
+        console.error(error);
+        process.exitCode = 1;
+      });
+  } else {
+    registerPlugin();
+  }
 }
+
+function main() {
+  installShutdownHandlers();
+  runSelectedMode();
+}
+
+if (require.main === module) main();
+
+module.exports = { main };

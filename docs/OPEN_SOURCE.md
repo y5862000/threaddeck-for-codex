@@ -8,7 +8,7 @@ ThreadDeck's implementation is fully published under the [MIT License](../LICENS
 
 | Source | Generated artifact | Build step |
 |---|---|---|
-| `src/plugin.js` | `com.yechan.threaddeck.sdPlugin/bin/plugin.js` | `scripts/build.sh` |
+| Top-level `src/*.js` modules | Matching `com.yechan.threaddeck.sdPlugin/bin/*.js` modules, copied byte-for-byte | `scripts/build.sh` |
 | `native/keybridge.m` | Universal `com.yechan.threaddeck.sdPlugin/bin/keybridge` | `scripts/build-bridge.sh` |
 | `profiles/source/unpacked/` | Bundled `.streamDeckProfile` archive | `scripts/build-profile.sh` |
 | `assets/plugin.svg` | Plugin PNG assets | `scripts/build-assets.sh` |
@@ -16,7 +16,7 @@ ThreadDeck's implementation is fully published under the [MIT License](../LICENS
 | Deterministic demo frames + `scripts/encode-gif.swift` | `docs/media/threaddeck-demo.gif` | `scripts/render-animation.mjs` |
 | Plugin directory | `.streamDeckPlugin` installer | `pnpm run pack` |
 
-Generated `bin/`, profile archives, and release installers are ignored by Git because they are reproducibly built from the source above. Documentation PNGs and the GIF are tracked so GitHub visitors can see the interface without running the plugin; their source is the same renderer shipped in the plugin.
+Generated `bin/`, profile archives, and release installers are ignored by Git because they are reproducibly built from the source above. Verification compares every bundled JavaScript module with its source byte-for-byte and rejects missing or stale modules. Documentation PNGs and the GIF are tracked so GitHub visitors can see the interface without running the plugin; their source is the same renderer shipped in the plugin.
 
 ## Dependency boundary
 

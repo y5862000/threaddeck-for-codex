@@ -4,18 +4,19 @@
 
 ```text
 Codex local state (~/.codex) ─┐
-Codex Accessibility metadata ─┼─ plugin.js ── localhost WebSocket ── Stream Deck
-CodexBar CLI (usage only) ────┘       │
-                                      └─ keybridge ── macOS input/audio/AX APIs
+Codex Accessibility metadata ─┼─ src/plugin.js ── localhost WebSocket ── Stream Deck
+CodexBar CLI (usage only) ────┘          │
+                                         ├─ src/*.js domain modules
+                                         └─ keybridge ── macOS input/audio/AX APIs
 ```
 
-ThreadDeck is intentionally small. A dependency-free Node.js process owns local state parsing, visual rendering, and Stream Deck events; one universal native helper handles the macOS input and audio operations Node cannot provide reliably.
+ThreadDeck keeps its runtime dependency-free. A Node.js process composes small CommonJS domain modules, visual rendering, and Stream Deck events; one universal native helper handles the macOS input and audio operations Node cannot provide reliably.
 
 ## Runtime components
 
 ### Node.js plugin
 
-`src/plugin.js` is the source of truth for the Stream Deck plugin. The build copies it to `com.yechan.threaddeck.sdPlugin/bin/plugin.js`.
+`src/plugin.js` is the composition and runtime entry point. It owns external I/O, caches, timers, SVG rendering, the Stream Deck WebSocket, and calls to the native helper. The build copies every top-level `src/*.js` module byte-for-byte to the matching `com.yechan.threaddeck.sdPlugin/bin/*.js` path. The manifest starts `bin/plugin.js`, which loads its sibling CommonJS modules.
 
 It:
 
@@ -28,11 +29,29 @@ It:
 - renders every ThreadDeck-owned 144 × 144 key as SVG;
 - animates active reasoning cues, queue-advance acknowledgements, and completion pulses;
 - invokes CodexBar for the optional weekly quota value;
-- delegates keyboard, media, and push-to-talk operations to `keybridge`.
-- lets a held task key open that task, dictate a follow-up, detect transcription completion using text fingerprints, and submit it on release.
+- delegates keyboard, media, and push-to-talk operations to `keybridge`;
+- lets a held task key open that task, dictate a follow-up, detect transcription completion using text fingerprints, and submit it on release;
+- gives each recording attempt a monotonically increasing session token, makes a new hold on any task key supersede the previous global composer session, and requires asynchronous transcription and submission callbacks to match that token before they can update the current session;
 - opens remote tasks through Codex's own visible sidebar result when available, then falls back to the unified task search so Codex activates the result's host before navigation.
 
 No Codex file is opened for writing.
+
+### JavaScript module boundaries
+
+The I/O-free modules under `src/` keep private Codex formats and deterministic policies out of the runtime coordinator:
+
+| Module | Responsibility |
+|---|---|
+| `config.js` | Action UUIDs, timing constants, action maps, and stable fallback view state |
+| `text.js` | Title normalization, NFC/NFD fingerprints, ambient-title filtering, and grapheme-aware layout helpers |
+| `time.js` | UUIDv7 timestamps, recency normalization, duration formatting, and timing labels |
+| `text-input.js` | Composer text-state parsing, comparison, and draft-reset detection |
+| `queue-state.js` | Parsing accessibility fingerprints for localized queued-message controls and deriving queue counts |
+| `thread-selection.js` | Local-first deduplication, explicit pinned-remote inclusion, recency ordering, and slot limits |
+| `codex-state.js` | Parsing one Codex global-state snapshot into pinned IDs, prompt history, and normalized remote summary rows |
+| `local-lifecycle.js` | Classifying local rollout activity and reducing JSONL events into lifecycle state |
+| `remote-state.js` | Reducing remote lifecycle, activity, reasoning-effort, and runtime observations into display state |
+| `log-lines.js` | UTF-8-safe append-only log framing, bounded partial-line carry, and file-rotation cursor validation |
 
 ### Native helper
 
@@ -58,15 +77,23 @@ ThreadDeck owns the bundled previous-page actions and exposes a next-page action
 
 ## Data refresh and rendering
 
-- Task metadata refreshes every 3 seconds while a task action is visible.
+- Task metadata refreshes every 3 seconds while any ThreadDeck-owned action is visible.
+- Each task refresh creates one read of the Codex global-state file and shares that same promise with the pinned-ID, remote-summary, and Side Chat prompt-history parsers. All three therefore observe the same file generation; if that read fails, each consumer applies its existing safe fallback instead of mixing fields from separate reads. Side Chats retain their last valid rows through a rejected or semantically incomplete snapshot and clear only after a valid empty history or a new app-server session.
 - Pinned local tasks and explicitly pinned remote summaries are placed first; only local tasks and Side Chats fill the remaining recent slots. A local record wins if the same conversation ID appears in both sources.
 - The same refresh observes the open Codex task's queue count. Cached counts follow that task key and decrement when a queued turn starts.
+- Remote Desktop logs are tailed with a per-file byte offset and bounded raw-byte carry. Only complete UTF-8 lines are reduced, so a long reasoning-summary line or a multibyte character split across two polls is completed on the next poll. File identity and a boundary fingerprint detect rotation, truncation, and rapid same-path replacement before the cursor is reused.
 - Active task timers and animation frames render at device-appropriate intervals.
-- Weekly usage refreshes every 60 seconds while the quota action is visible.
+- Weekly usage refreshes every 60 seconds while a ThreadDeck-owned action is visible, keeping the quota value warm before its page appears.
 - macOS appearance is checked every 2 seconds and swaps the renderer between the existing dark and light palettes.
 - Completion is detected by comparing end timestamps with an overlapping observation window and a startup grace period. Queue decreases are also treated as a completed turn. The first global frame is fanned out to every visible ThreadDeck-owned key before later frames are split into device-safe groups; the matching task key receives the longer task pulse.
 
 The plugin caches the last image for each context and avoids sending unchanged frames.
+
+## Build and verification boundaries
+
+`scripts/build.sh` mirrors every top-level JavaScript source module into the plugin's `bin/` directory without transforming it and removes stale bundled JavaScript modules. `scripts/verify.sh` syntax-checks both copies and compares each pair byte-for-byte.
+
+`pnpm run test` runs the I/O-free module contracts under `test/` with Node's built-in `node:test` runner. The runtime entry point retains small inline contract modes for behavior that depends on its coordinated context and caches: completion fan-out, refresh resilience, usage caching, and voice submission. The full `pnpm run check` path runs both groups along with native-helper, manifest, documentation, and release checks.
 
 ## Documentation renderer
 

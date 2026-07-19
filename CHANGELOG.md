@@ -14,6 +14,9 @@
 - Prefetched weekly quota on every visible ThreadDeck page and preserved the last good value, removing the multi-second wait when the quota page appears.
 - Restored composer focus after dictation, submitted through Codex's visible Send control, verified that the draft cleared, and retried safely with Return when needed.
 - Added actionable key feedback for missing Accessibility permission, duplicate remote titles, and unavailable remote tasks, plus regression checks for completion fan-out and voice event encoding.
+- Split the monolithic plugin into dependency-free CommonJS domain and parser modules, and shared one global Codex state snapshot across each refresh instead of reading it independently for related views.
+- Hardened asynchronous state handling with UTF-8-safe bounded log carry and rotation detection, typed remote-log parsing and reducers, last-good Side Chat snapshots, and global voice-submission session tokens that isolate late results from an earlier send or another task key.
+- Added `node:test` fixture coverage and source-to-bundle byte-parity checks, and changed release packaging to build once and pack an exact staging copy so the verified artifact is shipped without dirtying its source directory.
 
 ## 0.2.0-beta — 2026-07-18
 

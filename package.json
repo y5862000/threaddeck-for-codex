@@ -20,14 +20,18 @@
     "stream-deck-neo"
   ],
   "scripts": {
+    "test": "node --test test/*.test.js",
     "build": "zsh scripts/build.sh",
-    "audit": "node scripts/audit-release.mjs && node scripts/audit-licenses.mjs",
+    "audit:release": "node scripts/audit-release.mjs",
+    "audit:licenses": "node scripts/audit-licenses.mjs",
+    "audit": "pnpm run audit:release && pnpm run audit:licenses",
     "check": "zsh scripts/verify.sh",
     "render-demo": "node src/plugin.js --render-demo docs/media/neo-preview.svg",
     "render-docs": "node scripts/render-docs.mjs",
     "render-animation": "node scripts/render-animation.mjs",
-    "pack": "pnpm run build && pnpm exec streamdeck pack com.yechan.threaddeck.sdPlugin --output release --force --no-update-check",
-    "release": "pnpm run build && pnpm run audit && pnpm run check && pnpm run pack"
+    "pack:artifact": "zsh scripts/pack.sh",
+    "pack": "pnpm run build && pnpm run pack:artifact",
+    "release": "pnpm run build && pnpm run check && pnpm run audit:licenses && pnpm run pack:artifact"
   },
   "engines": {
     "node": ">=20"
