@@ -2542,10 +2542,22 @@ static int print_codex_queue_state(void) {
   if (application == NULL) return 1;
   AXUIElementSetMessagingTimeout(application, 0.8);
 
+  // kAXFocusedWindowAttribute keeps the window Codex considers active even
+  // after another macOS app moves to the foreground. That is the identity the
+  // Current Task key should follow; kAXFocusedAttribute alone drops to false
+  // as soon as Codex is backgrounded.
+  CFTypeRef active_window_value = NULL;
+  AXUIElementCopyAttributeValue(
+    application,
+    kAXFocusedWindowAttribute,
+    &active_window_value
+  );
+
   CFTypeRef windows_value = NULL;
   if (AXUIElementCopyAttributeValue(application, kAXWindowsAttribute, &windows_value) != kAXErrorSuccess
       || windows_value == NULL || CFGetTypeID(windows_value) != CFArrayGetTypeID()) {
     if (windows_value != NULL) CFRelease(windows_value);
+    if (active_window_value != NULL) CFRelease(active_window_value);
     CFRelease(application);
     return 1;
   }
@@ -2569,10 +2581,12 @@ static int print_codex_queue_state(void) {
     };
     collect_codex_queue_descendants(window, 0, &state);
     CFTypeRef focused_value = NULL;
-    bool focused = false;
+    bool focused = active_window_value != NULL
+      && CFGetTypeID(active_window_value) == AXUIElementGetTypeID()
+      && CFEqual(window_value, active_window_value);
     if (AXUIElementCopyAttributeValue(window, kAXFocusedAttribute, &focused_value) == kAXErrorSuccess
         && focused_value != NULL && CFGetTypeID(focused_value) == CFBooleanGetTypeID()) {
-      focused = CFBooleanGetValue((CFBooleanRef)focused_value);
+      focused = focused || CFBooleanGetValue((CFBooleanRef)focused_value);
     }
     if (focused_value != NULL) CFRelease(focused_value);
     printf("window\t%ld\t%d\n", (long)window_index, focused ? 1 : 0);
@@ -2594,6 +2608,7 @@ static int print_codex_queue_state(void) {
     printf("end\n");
     emitted += 1;
   }
+  if (active_window_value != NULL) CFRelease(active_window_value);
   CFRelease(windows_value);
   CFRelease(application);
   return emitted > 0 ? 0 : 1;
@@ -5265,14 +5280,17 @@ static void collect_focused_codex_thread_header(
   CFRelease(values);
 }
 
-// Verify only the focused Codex window's compact header. Unlike
-// `codex-queue-state`, this command does not scan every window or emit hashes
-// for unrelated controls. Output contains only the match class and visit count.
+// Verify only Codex's internally active window header. Safety-critical callers
+// can additionally require Codex to be the frontmost macOS app; the passive
+// Current Task observer deliberately does not. Unlike `codex-queue-state`,
+// this does not scan every window or emit hashes for unrelated controls.
+// Output contains only the match class and visit count.
 static int verify_focused_codex_thread(
   const char *uuid_text,
   const char * const *fingerprint_inputs,
   unsigned fingerprint_input_count,
-  bool uuid_only
+  bool uuid_only,
+  bool require_frontmost
 ) {
   if (!valid_thread_uuid(uuid_text)) return 64;
   StringFingerprint *fingerprints = NULL;
@@ -5284,7 +5302,7 @@ static int verify_focused_codex_thread(
         &fingerprints,
         &fingerprint_count
       )) return 64;
-  if (!codex_is_frontmost()) {
+  if (require_frontmost && !codex_is_frontmost()) {
     free(fingerprints);
     return 1;
   }
@@ -5939,12 +5957,27 @@ int main(int argc, char **argv) {
       argv[2],
       (const char * const *)&argv[3],
       (unsigned)(argc - 3),
-      false
+      false,
+      true
     );
   }
   if (strcmp(argv[1], "codex-focused-thread-strict") == 0) {
     if (argc != 3) return 64;
-    return verify_focused_codex_thread(argv[2], NULL, 0, true);
+    return verify_focused_codex_thread(argv[2], NULL, 0, true, true);
+  }
+  if (strcmp(argv[1], "codex-current-thread") == 0) {
+    if (argc < 4) return 64;
+    return verify_focused_codex_thread(
+      argv[2],
+      (const char * const *)&argv[3],
+      (unsigned)(argc - 3),
+      false,
+      false
+    );
+  }
+  if (strcmp(argv[1], "codex-current-thread-strict") == 0) {
+    if (argc != 3) return 64;
+    return verify_focused_codex_thread(argv[2], NULL, 0, true, false);
   }
   if (argc != 2) return 64;
   if (strcmp(argv[1], "codex-wait-frontmost") == 0) {

@@ -79,7 +79,7 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 
 | Key | Press behavior | Hold or release behavior |
 |---|---|---|
-| Current / last switched task | Opens the current task, or the last task whose switch ThreadDeck confirmed | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Current task | Opens the task selected in Codex's active window | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
 | Top Task 1–8 | Starts opening that position in the sorted local, pinned-remote, and Side Chat list | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
 | Microphone | Starts dictation immediately and pauses supported audio-producing media apps | Keep held while speaking; release to stop, resume media, and leave the transcript in the composer **without submitting** |
 | Send | Release before 0.6 s to send Return | At **0.6 s** the key turns blue; release to send Command+Return |
@@ -90,7 +90,7 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 | App switcher / media | Runs immediately on press | No alternate hold action |
 | Previous / next page | — | Release to cycle through the three ThreadDeck pages |
 
-The Dashboard's Current / Last key is deliberately stable: it represents the currently identified Codex task and, after ThreadDeck confirms a task switch, keeps that last successful destination. A failed or ambiguous switch does not replace it. **Top Task 1** is a separate selectable action, so custom profiles can place both keys side by side; the bundled Tasks page starts with Top Task 1 while the Dashboard keeps Current / Last.
+The Dashboard's Current Task key follows the task selected in Codex's active window, including a task you select directly in the app. Pressing a ThreadDeck task key naturally updates it after Codex confirms the destination. A transient or ambiguous Accessibility read keeps the last verified current identity instead of guessing. **Top Task 1** is a separate selectable action, so custom profiles can place both keys side by side; the bundled Tasks page starts with Top Task 1 while the Dashboard keeps Current Task.
 
 ## Keys with hold gestures
 
@@ -139,7 +139,7 @@ ThreadDeck fills up to eight slots with user-facing tasks only:
 2. **remote** tasks only when you explicitly pin them in Codex, apart from the current-task exception below;
 3. temporary **Side Chats** while their Codex session remains open.
 
-Unpinned remote history does not consume ordinary Top Task slots. The separate Current / Last action is the single exception: when the currently verified task—or ThreadDeck's last successfully switched task—is remote, that exact task may remain on that key without a pin. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
+Unpinned remote history does not consume ordinary Top Task slots. The separate Current Task action is the single exception: when the task selected in Codex's active window is remote, that exact task may remain on the key without a pin. Internal helper and review tasks are excluded by structural provenance before titles reach the renderer. Archived persistent task IDs cannot re-enter through prompt history as fake Side Chats.
 
 To put a remote task on the deck, open its computer in Codex once so its summary is cached, then pin only the task you want. Pressing the key prefers the exact task UUID exposed by Codex, then activates the verified sidebar or single unified-search result from the keyboard, which switches both the computer and task. Known duplicate titles require strict UUID identity; if Codex does not expose enough identity, ThreadDeck reports a duplicate instead of guessing.
 
@@ -154,8 +154,8 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 The bundled profile has three pages and can be rearranged in Stream Deck:
 
-1. **Dashboard** — quota, the current/last successfully switched task, Fast mode, new task, Side Chat, microphone, Send, and back navigation. The Fast mode key occupies `1,1`; Current / Last remains at `0,1`.
-2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current / Last action are available in the action list for custom layouts.
+1. **Dashboard** — quota, the current Codex task, Fast mode, new task, Side Chat, microphone, Send, and back navigation. The Fast mode key occupies `1,1`; Current Task remains at `0,1`.
+2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current Task action are available in the action list for custom layouts.
 3. **Media** — previous track, rewind, play/pause, four app launchers, and back navigation. Forward page, next track, seek, mute, and volume actions are also available.
 
 Elgato-owned app-launch keys keep their native artwork, support their configured long-press-to-quit behavior, and do not receive ThreadDeck's completion overlay. ThreadDeck page-navigation keys do.

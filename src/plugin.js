@@ -294,7 +294,7 @@ let activeUsageRefresh = null;
 let activeThreadRefresh = null;
 let activeAppearanceRefresh = null;
 // Ranked slots always preserve the user-visible Top Task 1-8 ordering. The
-// independently selectable Current / Last action resolves through
+// independently selectable Current Task action resolves through
 // `primaryThreadRow`, so switching tasks never silently renumbers the list.
 let threadSlots = Array(THREAD_COUNT).fill(null);
 let primaryThreadId = null;
@@ -2538,7 +2538,7 @@ function focusedQueueThread(windows, threads) {
   return focusedWindow ? matchQueueWindowThread(focusedWindow, threads) : null;
 }
 
-async function verifiedFocusedQueueThread(windows, threads, options = {}) {
+async function verifiedCurrentCodexThread(windows, threads, options = {}) {
   const focusedWindow = windows.find((window) => window.focused)
     ?? (windows.length === 1 ? windows[0] : null);
   if (!focusedWindow) return null;
@@ -2548,11 +2548,8 @@ async function verifiedFocusedQueueThread(windows, threads, options = {}) {
       if (right.id === primaryThreadId) return 1;
       return threadRecencyMs(right) - threadRecencyMs(left);
     });
-  if (candidates.length === 1 && candidates[0].id === primaryThreadId) {
-    return candidates[0];
-  }
   for (const candidate of candidates) {
-    if (await threadIsFocused(candidate, options)) return candidate;
+    if (await threadIsCurrentInCodex(candidate, options)) return candidate;
   }
   return null;
 }
@@ -2564,8 +2561,16 @@ function remoteThreadKeyBridgeCommand(thread, baseCommand) {
 }
 
 async function threadIsFocused(thread, options = {}) {
+  return probeCodexThreadIdentity(thread, "codex-focused-thread", options);
+}
+
+async function threadIsCurrentInCodex(thread, options = {}) {
+  return probeCodexThreadIdentity(thread, "codex-current-thread", options);
+}
+
+async function probeCodexThreadIdentity(thread, baseCommand, options = {}) {
   const fingerprints = [...titleFingerprints(thread.title)];
-  const command = remoteThreadKeyBridgeCommand(thread, "codex-focused-thread");
+  const command = remoteThreadKeyBridgeCommand(thread, baseCommand);
   const strictIdentity = Boolean(thread.titleAmbiguous || thread.requiresStrictIdentity);
   const args = strictIdentity ? [thread.id] : [thread.id, ...fingerprints];
   const probe = options.probe
@@ -2733,7 +2738,7 @@ function refreshFastMode(options = {}) {
         ?? (primaryThreadRow?.id === threadId ? primaryThreadRow : null);
       // The native speed control is scoped to the focused composer and carries
       // no task id of its own. Never bind another window's mode to the cached
-      // Current / Last task. Contract tests inject a state probe and exercise
+      // Current Task. Contract tests inject a state probe and exercise
       // the cache logic independently of the native identity guard.
       if (!options.stateProbe) {
         if (!thread || !await threadIsFocused(thread)) {
@@ -4328,9 +4333,9 @@ async function readTopThreads() {
     })),
     identityCandidates
   );
-  const focusedThread = await verifiedFocusedQueueThread(queueWindows, currentCandidates);
-  if (focusedThread && focusedThread.id !== primaryThreadId) {
-    rememberVerifiedThread(focusedThread, {
+  const currentThread = await verifiedCurrentCodexThread(queueWindows, currentCandidates);
+  if (currentThread && currentThread.id !== primaryThreadId) {
+    rememberVerifiedThread(currentThread, {
       promote: false
     });
   }
@@ -4338,13 +4343,13 @@ async function readTopThreads() {
   const selected = annotateKnownTitleAmbiguity(
     // Hydrate all eight ranked rows plus an independently tracked current row.
     // The old current-first slice displaced Top Task 8 and made Top Task 1 a
-    // duplicate of Current / Last whenever the focused task was not rank 1.
+    // duplicate of Current Task whenever the active task was not rank 1.
     primaryFirstThreadRows(selection.selected, currentCandidates, THREAD_COUNT + 1),
     identityCandidates
   );
   await Promise.all([
     refreshVisibleRemoteComposerState(selected, queueWindows),
-    refreshFocusedGoalState(focusedThread?.remote ? focusedThread : null)
+    refreshFocusedGoalState(currentThread?.remote ? currentThread : null)
   ]);
 
   const persistentThreads = selected.filter((thread) => !thread.ephemeral);
@@ -7394,6 +7399,45 @@ async function verifyInteractionPolicy() {
       && args.length === 1)
     && focusedIdentityCalls[0].args[0] === ambiguousRemote.id
     && focusedIdentityCalls[1].args[0] === ambiguousRemotePeer.id;
+  const manuallyActiveThread = {
+    id: "00000000-0000-4000-8000-000000000032",
+    title: "Codex 앱에서 직접 선택한 작업",
+    remote: false,
+    status: "idle"
+  };
+  primaryThreadId = remoteThread.id;
+  primaryThreadRow = remoteThread;
+  const currentIdentityCalls = [];
+  const currentIdentityProbe = async (command, args) => {
+    currentIdentityCalls.push({ command, args: [...args] });
+    if (command === "codex-current-thread" && args[0] === manuallyActiveThread.id) {
+      return { stdout: "match=title" };
+    }
+    const error = new Error("simulated different active Codex task");
+    error.exitCode = 1;
+    throw error;
+  };
+  const manuallySelectedCurrent = await verifiedCurrentCodexThread([
+    {
+      focused: true,
+      headers: new Set(titleFingerprints(manuallyActiveThread.title)),
+      buttons: new Map()
+    }
+  ], [remoteThread, manuallyActiveThread], {
+    probe: currentIdentityProbe
+  });
+  if (manuallySelectedCurrent) {
+    rememberVerifiedThread(manuallySelectedCurrent, {
+      promote: false,
+      refreshFastMode: false
+    });
+  }
+  const manualCodexSelectionOverridesStreamDeckHistory = manuallySelectedCurrent?.id === manuallyActiveThread.id
+    && primaryThreadId === manuallyActiveThread.id
+    && primaryThreadRow?.id === manuallyActiveThread.id
+    && currentIdentityCalls.length === 1
+    && currentIdentityCalls[0].command === "codex-current-thread"
+    && currentIdentityCalls[0].args[0] === manuallyActiveThread.id;
   const composerTurnStartedAtMs = 180_000;
   remoteLifecycleCache.set(remoteThread.id, {
     status: "working",
@@ -8355,6 +8399,7 @@ async function verifyInteractionPolicy() {
     && knownTitleAmbiguityDetected
     && ambiguousTitleUsesStrictIdentity
     && sameTitleVoiceTargetIsIdentitySafe
+    && manualCodexSelectionOverridesStreamDeckHistory
     && focusedRemoteSpeedUpdatesImmediately
     && fallbackSearchRunsOnce
     && activationWaitRunsOnceBeforeNavigation
@@ -8411,6 +8456,7 @@ async function verifyInteractionPolicy() {
     knownTitleAmbiguityDetected,
     ambiguousTitleUsesStrictIdentity,
     sameTitleVoiceTargetIsIdentitySafe,
+    manualCodexSelectionOverridesStreamDeckHistory,
     focusedRemoteSpeedUpdatesImmediately,
     fallbackSearchRunsOnce,
     activationWaitRunsOnceBeforeNavigation,

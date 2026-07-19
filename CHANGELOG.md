@@ -2,6 +2,10 @@
 
 > [한국어 변경 기록](CHANGELOG.ko.md)
 
+## Unreleased
+
+- Changed the Dashboard key from Current / Last Switched to **Current Task**. It now follows the task selected in Codex's active window, including manual in-app switches, while retaining the stricter frontmost-task check for dictation and submission safety.
+
 ## 0.3.2-beta — 2026-07-19
 
 - Collapsed Fast mode read, inversion, and selection into one native transaction, eliminating the repeated model-menu flashes that made a single physical press feel sluggish.

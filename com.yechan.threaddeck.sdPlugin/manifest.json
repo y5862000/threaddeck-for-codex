@@ -22,14 +22,14 @@
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Codex 현재/마지막 전환 작업",
+      "Name": "Codex 현재 작업",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "현재 Codex 작업을 표시하며, 작업 전환에 성공하면 마지막으로 전환한 작업을 유지합니다. 짧게 누르면 해당 작업으로 이동하고, 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 자동으로 보냅니다.",
+      "Tooltip": "Codex 앱의 활성 창에 열린 작업을 자동으로 표시합니다. 짧게 누르면 해당 작업으로 이동하고, 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 자동으로 보냅니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread1"
     },
@@ -45,7 +45,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "짧게 누르면 정렬된 첫 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다. 현재/마지막 전환 작업 액션과 별도로 사용할 수 있습니다.",
+      "Tooltip": "짧게 누르면 정렬된 첫 번째 Codex 작업으로 이동합니다. 0.55초 이상 누른 채 말하고 놓으면 받아쓴 후속 요청을 해당 작업에 자동으로 보냅니다. 현재 작업 액션과 별도로 사용할 수 있습니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread.top1"
     },

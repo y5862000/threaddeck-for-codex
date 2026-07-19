@@ -67,7 +67,7 @@ It:
 - sends app-switch and media-key events;
 - checks whether a supported media app or browser helper is actively producing Core Audio output;
 - sends the normal macOS play/pause media command when active supported output should pause, without signaling processes or retaining process IDs;
-- traverses the visible Codex accessibility tree once for the target UUID and normalized title fingerprints, activates only identity-safe pressable results, rejects title-only ambiguity in strict mode, verifies the focused task from its header, and counts localized queue-action buttons without returning message text.
+- traverses the visible Codex accessibility tree once for the target UUID and normalized title fingerprints, activates only identity-safe pressable results, rejects title-only ambiguity in strict mode, verifies both the safety-critical frontmost task and the passive current task from the active Codex window header, and counts localized queue-action buttons without returning message text.
 
 The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input.
 
@@ -77,7 +77,7 @@ The editable profile source lives under `profiles/source/unpacked`. `scripts/bui
 
 ThreadDeck owns the bundled previous-page actions and exposes a next-page action. They use Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while those keys participate in plugin-rendered completion overlays. Elgato-owned app-launch actions remain native and do not receive ThreadDeck overlays.
 
-The Dashboard keeps task action 1 at keypad position `0,1` as the current task or last successfully switched task. Position `1,1` contains the ThreadDeck-owned Fast mode toggle; the app-switch action remains available in the action list for custom profiles.
+The Dashboard keeps task action 1 at keypad position `0,1` as the task selected in Codex's active window. Position `1,1` contains the ThreadDeck-owned Fast mode toggle; the app-switch action remains available in the action list for custom profiles.
 
 ## Data refresh and rendering
 
@@ -85,7 +85,7 @@ The Dashboard keeps task action 1 at keypad position `0,1` as the current task o
 - SQLite rows, remote summaries, and Side Chats pass through one privacy boundary before selection. Subagent provenance is rejected structurally before any sidebar title override; exact guardian and ambient prompt signatures remain a fallback for older metadata. A separate persistent-ID read prevents a hidden subagent from being reclassified through prompt history as a Side Chat.
 - Each task refresh creates one read of the Codex global-state file and shares that same promise with the pinned-ID, remote-summary, and Side Chat prompt-history parsers. All three therefore observe the same file generation; if that read fails, each consumer applies its existing safe fallback instead of mixing fields from separate reads. Side Chats retain their last valid rows through a rejected or semantically incomplete snapshot and clear only after a valid empty history or a new app-server session.
 - Pinned local tasks and explicitly pinned remote summaries are placed first; only local tasks and Side Chats fill the remaining recent slots. A local record wins if the same conversation ID appears in both sources.
-- The same refresh observes the open Codex task's queue count. Cached counts follow that task key and decrement when a queued turn starts.
+- The same refresh observes the active Codex window, updates the Current Task key even after an in-app manual switch, and reads that task's queue count. Cached counts follow that task key and decrement when a queued turn starts.
 - Remote Desktop logs are tailed with a per-file byte offset and bounded raw-byte carry. Only complete UTF-8 lines are reduced, so a long reasoning-summary line or a multibyte character split across two polls is completed on the next poll. File identity and a boundary fingerprint detect rotation, truncation, and rapid same-path replacement before the cursor is reused.
 - Active task timers and animation frames render at device-appropriate intervals.
 - Weekly usage refreshes every 60 seconds while a ThreadDeck-owned action is visible, keeping the quota value warm before its page appears.
