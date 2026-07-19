@@ -81,6 +81,8 @@ const THREAD_ACTIONS = [
 ];
 const THREAD_COUNT = THREAD_ACTIONS.length;
 const THREAD_COMPLETION_PULSE_DURATION_MS = 5200;
+const THREAD_REFRESH_RETRY_DELAYS_MS = [120, 360];
+const THREAD_REFRESH_STARTUP_ERROR_FAILURES = 3;
 const GLOBAL_COMPLETION_PULSE_DURATION_MS = 2600;
 const GLOBAL_COMPLETION_FRAME_INTERVAL_MS = 80;
 const GLOBAL_COMPLETION_GROUP_COUNT = 2;
@@ -113,6 +115,12 @@ const QUEUED_MESSAGE_ACTION_LABELS = [
   "대기열에 있는 메시지 액션",
   "Queued message actions"
 ];
+const THREAD_REFRESH_ERROR_STATE = Object.freeze({
+  title: "상태를 읽지 못함",
+  status: "error",
+  pinned: false,
+  activity: { kind: "error", label: "상태 확인" }
+});
 const THREAD_SLOT_BY_ACTION = new Map(THREAD_ACTIONS.map((action, index) => [action, index]));
 const MEDIA_COMMAND_BY_ACTION = new Map([
   [ACTIONS.mediaPrevious, "media-previous"],
@@ -197,6 +205,7 @@ const pluginUUID = argument("-pluginUUID");
 const registerEvent = argument("-registerEvent");
 const snapshotMode = process.argv.includes("--snapshot");
 const completionContractMode = process.argv.includes("--verify-completion");
+const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
 const demoAnimationDirectory = argument("--render-demo-animation");
@@ -230,6 +239,8 @@ let usageState = { remaining: null, failed: false };
 let pulse = false;
 let feedbackSerial = 0;
 let hasLoadedThreadState = false;
+let consecutiveThreadRefreshFailures = 0;
+let threadRefreshUnavailable = false;
 let lastThreadTransitionScanAtMs = pluginStartedAtMs - COMPLETION_STARTUP_GRACE_MS;
 let globalCompletionStartedAtMs = null;
 let globalCompletionThreadId = null;
@@ -959,8 +970,13 @@ function staticActionSvg(action, context = null) {
 function currentActionSvg(action, context = null) {
   if (action === ACTIONS.weekly) return usageSvg(usageState.remaining, usageState.failed);
   const slot = THREAD_SLOT_BY_ACTION.get(action);
-  if (slot !== undefined) return threadSvg(threadSlots[slot], slot);
+  if (slot !== undefined) return threadSvg(displayedThreadSlot(slot), slot);
   return staticActionSvg(action, context);
+}
+
+function displayedThreadSlot(slot) {
+  if (threadRefreshUnavailable && !hasLoadedThreadState) return THREAD_REFRESH_ERROR_STATE;
+  return threadSlots[slot];
 }
 
 function runKeyBridge(command, context = null) {
@@ -2722,7 +2738,7 @@ async function refreshUsage(feedbackContext) {
 function renderThreadContexts() {
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
-    if (slot !== undefined) setImage(context, threadSvg(threadSlots[slot], slot));
+    if (slot !== undefined) setImage(context, threadSvg(displayedThreadSlot(slot), slot));
   }
 }
 
@@ -2818,11 +2834,33 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
   lastThreadTransitionScanAtMs = nowMs;
 }
 
-async function refreshThreads(feedbackContext) {
+async function readTopThreadsWithRetries(reader, retryDelays = THREAD_REFRESH_RETRY_DELAYS_MS) {
+  let lastError = null;
+  for (let attempt = 0; attempt <= retryDelays.length; attempt += 1) {
+    try {
+      return await reader();
+    } catch (error) {
+      lastError = error;
+      const delayMs = retryDelays[attempt];
+      if (Number.isFinite(delayMs) && delayMs >= 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error(String(lastError ?? "unknown refresh failure"));
+}
+
+async function refreshThreads(feedbackContext, options = {}) {
   if (!activeThreadRefresh) {
     activeThreadRefresh = (async () => {
       try {
-        const threads = await readTopThreads();
+        const reader = typeof options.reader === "function" ? options.reader : readTopThreads;
+        const retryDelays = Array.isArray(options.retryDelays)
+          ? options.retryDelays
+          : THREAD_REFRESH_RETRY_DELAYS_MS;
+        const threads = await readTopThreadsWithRetries(reader, retryDelays);
+        consecutiveThreadRefreshFailures = 0;
+        threadRefreshUnavailable = false;
         pulse = !pulse;
         const nextThreadSlots = THREAD_ACTIONS.map((_, index) => threads[index] ?? null);
         trackCompletionTransitions(threadSlots, nextThreadSlots);
@@ -2831,12 +2869,20 @@ async function refreshThreads(feedbackContext) {
         if (feedbackContext) showFeedback(feedbackContext, "success", "목록 갱신");
         return true;
       } catch (error) {
-        for (const [context, action] of contexts) {
-          const slot = THREAD_SLOT_BY_ACTION.get(action);
-          if (slot !== undefined) setImage(context, threadSvg({ title: "상태를 읽지 못함", status: "error", pinned: false }, slot));
+        consecutiveThreadRefreshFailures += 1;
+        const wasUnavailable = threadRefreshUnavailable;
+        if (!hasLoadedThreadState
+            && consecutiveThreadRefreshFailures >= THREAD_REFRESH_STARTUP_ERROR_FAILURES) {
+          threadRefreshUnavailable = true;
         }
+        if (threadRefreshUnavailable !== wasUnavailable) renderThreadContexts();
         if (feedbackContext) showFeedback(feedbackContext, "error", "갱신 실패");
-        console.error(`Codex thread refresh failed: ${error?.message ?? "unknown error"}`);
+        const preservedState = hasLoadedThreadState
+          ? "keeping the last good task list"
+          : threadRefreshUnavailable
+            ? "showing a stable startup error"
+            : "waiting for another startup attempt";
+        console.error(`Codex thread refresh failed (${consecutiveThreadRefreshFailures} consecutive; ${preservedState}): ${error?.message ?? "unknown error"}`);
         return false;
       } finally {
         activeThreadRefresh = null;
@@ -3043,10 +3089,10 @@ function registerPlugin() {
         setImage(message.context, usageSvg(usageState.remaining, usageState.failed));
         void refreshUsage();
       } else if (THREAD_SLOT_BY_ACTION.has(message.action)) {
-        // In particular, do not leave a previously rendered thread visible
-        // while SQLite and rollout state are being read on startup.
+        // Replace Stream Deck's persisted image with this process's current
+        // last-good state. On first startup this is the neutral placeholder.
         const slot = THREAD_SLOT_BY_ACTION.get(message.action);
-        setImage(message.context, threadSvg(null, slot));
+        setImage(message.context, threadSvg(displayedThreadSlot(slot), slot));
         void refreshThreads();
       } else {
         const svg = staticActionSvg(message.action, message.context);
@@ -3338,6 +3384,106 @@ function verifyCompletionFanout() {
   resetDemoEffects();
 }
 
+async function verifyThreadRefreshResilience() {
+  const context = "refresh-resilience-context";
+  const stableThread = {
+    id: "00000000-0000-4000-8000-000000000003",
+    title: "마지막 정상 작업",
+    pinned: false,
+    status: "idle",
+    startedAtMs: null,
+    endedAtMs: null,
+    activity: { kind: "idle", label: "다시 열기" },
+    reasoningEffort: "medium",
+    serviceTier: "default",
+    queueCount: 0
+  };
+  socket = { readyState: WebSocket.OPEN, send() {} };
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  contexts.set(context, ACTIONS.thread1);
+  threadSlots = Array(THREAD_COUNT).fill(null);
+  threadSlots[0] = stableThread;
+  hasLoadedThreadState = true;
+  consecutiveThreadRefreshFailures = 0;
+  threadRefreshUnavailable = false;
+  renderThreadContexts();
+
+  let retryAttempts = 0;
+  const recovered = await refreshThreads(null, {
+    reader: async () => {
+      retryAttempts += 1;
+      if (retryAttempts === 1) throw new Error("simulated transient read failure");
+      return [stableThread];
+    },
+    retryDelays: [0]
+  });
+  const recoveredInsideRefresh = recovered
+    && retryAttempts === 2
+    && threadSlots[0] === stableThread
+    && !threadRefreshUnavailable;
+
+  const lastGoodThread = threadSlots[0];
+  const lastGoodSvg = contextImages.get(context);
+  const originalConsoleError = console.error;
+  let failedRefreshResult;
+  let keptLastGoodList;
+  let oneOffStartupHidden;
+  let startupErrorStable;
+  try {
+    console.error = () => {};
+    failedRefreshResult = await refreshThreads(null, {
+      reader: async () => { throw new Error("simulated persistent read failure"); },
+      retryDelays: []
+    });
+    keptLastGoodList = failedRefreshResult === false
+      && threadSlots[0] === lastGoodThread
+      && !threadRefreshUnavailable
+      && contextImages.get(context) === lastGoodSvg
+      && !contextImages.get(context)?.includes("상태를 읽지 못함");
+
+    hasLoadedThreadState = false;
+    consecutiveThreadRefreshFailures = 0;
+    threadRefreshUnavailable = false;
+    threadSlots = Array(THREAD_COUNT).fill(null);
+    contextImages.clear();
+    contextSentImages.clear();
+    for (let failure = 1; failure < THREAD_REFRESH_STARTUP_ERROR_FAILURES; failure += 1) {
+      await refreshThreads(null, {
+        reader: async () => { throw new Error("simulated startup read failure"); },
+        retryDelays: []
+      });
+    }
+    oneOffStartupHidden = !threadRefreshUnavailable && !contextImages.has(context);
+    await refreshThreads(null, {
+      reader: async () => { throw new Error("simulated startup read failure"); },
+      retryDelays: []
+    });
+    const startupErrorSvg = contextImages.get(context);
+    renderThreadContexts();
+    startupErrorStable = threadRefreshUnavailable
+      && displayedThreadSlot(0) === THREAD_REFRESH_ERROR_STATE
+      && contextImages.get(context) === startupErrorSvg;
+  } finally {
+    console.error = originalConsoleError;
+  }
+
+  const passed = recoveredInsideRefresh
+    && keptLastGoodList
+    && oneOffStartupHidden
+    && startupErrorStable;
+  console.log(JSON.stringify({
+    passed,
+    retryAttempts,
+    keptLastGoodList,
+    oneOffStartupHidden,
+    startupErrorAfterFailures: startupErrorStable ? THREAD_REFRESH_STARTUP_ERROR_FAILURES : null
+  }));
+  if (!passed) process.exitCode = 1;
+  socket = null;
+}
+
 process.once("SIGTERM", () => {
   releaseVoiceKeysSync();
   process.exit(0);
@@ -3350,6 +3496,11 @@ process.on("exit", releaseVoiceKeysSync);
 
 if (completionContractMode) {
   verifyCompletionFanout();
+} else if (refreshResilienceContractMode) {
+  verifyThreadRefreshResilience().catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });
 } else if (demoOutput || demoLightOutput || demoAnimationDirectory) {
   if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
   else renderDemo(demoOutput || demoLightOutput, demoLightOutput ? "light" : "dark");
