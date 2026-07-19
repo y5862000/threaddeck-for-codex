@@ -63,6 +63,7 @@ const {
   remoteThreadRowsFromState
 } = require("./codex-state");
 const { consumeLifecycleLines } = require("./local-lifecycle");
+const { ensureKeyBridgeExecutable } = require("./keybridge-permissions");
 const {
   ACTIONS,
   APP_SERVER_SESSION_CACHE_MS,
@@ -2749,6 +2750,47 @@ function toggleFastMode(context, options = {}) {
     if (!thread || !await threadIsFocused(thread, { probe: options.focusProbe })) {
       feedback(context, "error", "작업 확인", 1600);
       return false;
+    }
+
+    // Production uses one native transaction: it opens the composer menu
+    // once, reads the live state, selects its exact inverse, and returns the
+    // applied state. The injected stateProbe/setMode pair remains available
+    // for deterministic legacy contract tests.
+    const toggleMode = options.toggleMode
+      ?? (!options.stateProbe && !options.setMode
+        ? () => execFileAsync(KEY_BRIDGE, ["fast-mode-toggle"], {
+          timeout: 5000,
+          maxBuffer: 4096
+        })
+        : null);
+    if (toggleMode) {
+      try {
+        const result = await toggleMode();
+        const confirmed = parseFastModeState(result?.stdout ?? result ?? "");
+        if (primaryThreadId !== threadId
+            || !confirmed?.available
+            || typeof confirmed.enabled !== "boolean") {
+          throw new Error("Codex fast mode toggle result was not confirmed");
+        }
+        fastModeState = { threadId, ...confirmed, failed: false };
+        applyFocusedRemoteComposerState(thread, confirmed);
+        renderFastModeContexts();
+        feedback(context, "success", confirmed.enabled ? "FAST 켬" : "FAST 끔");
+        return true;
+      } catch (error) {
+        if (primaryThreadId === threadId) {
+          fastModeState = {
+            threadId,
+            enabled: null,
+            available: null,
+            failed: true
+          };
+          renderFastModeContexts();
+        }
+        feedback(context, "error", "변경 실패", 1600);
+        console.error(`Could not change Codex fast mode: ${error?.message ?? "unknown error"}`);
+        return false;
+      }
     }
 
     let current;
@@ -7651,6 +7693,27 @@ async function verifyInteractionPolicy() {
     && voiceMediaPauseOwners.size === 0
     && !voiceMediaPaused;
 
+  const alreadyPausedCommands = [];
+  const alreadyPausedStart = await pauseMediaForVoice("already-paused-owner", {
+    bridge: async (command) => {
+      alreadyPausedCommands.push(command);
+      return false;
+    }
+  });
+  const alreadyPausedRelease = await resumeMediaAfterVoice("already-paused-owner", {
+    bridge: async (command) => {
+      alreadyPausedCommands.push(command);
+      return true;
+    },
+    sleep: async () => {},
+    debounceMs: 0
+  });
+  const alreadyPausedMediaIsNeverToggled = !alreadyPausedStart
+    && !alreadyPausedRelease
+    && alreadyPausedCommands.join(",") === "media-pause-if-playing"
+    && !voiceMediaPauseOwners.has("already-paused-owner")
+    && !voiceMediaPaused;
+
   voiceMediaPaused = true;
   addVoiceMediaPauseOwner("coalesced-owner-a");
   addVoiceMediaPauseOwner("coalesced-owner-b");
@@ -7882,6 +7945,23 @@ async function verifyInteractionPolicy() {
     && timeoutRecoveryStateProbes === 2
     && fastModeState.threadId === localThreadB.id
     && fastModeState.enabled === false;
+
+  let singleShotFastToggleCalls = 0;
+  const singleShotFastToggleResult = await toggleFastMode(fastContext, {
+    feedback: () => {},
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    toggleMode: async () => {
+      singleShotFastToggleCalls += 1;
+      return {
+        stdout: "requested=on state=on available=1 changed=1 verified=1 reasoning=max service_tier=priority\n"
+      };
+    }
+  });
+  const singleShotFastToggleUsesOneNativeAction = singleShotFastToggleResult
+    && singleShotFastToggleCalls === 1
+    && fastModeState.threadId === localThreadB.id
+    && fastModeState.enabled === true
+    && fastModeState.available === true;
 
   let resolveStaleFastRefresh;
   const staleFastRefreshState = new Promise((resolve) => { resolveStaleFastRefresh = resolve; });
@@ -8176,6 +8256,7 @@ async function verifyInteractionPolicy() {
     && staleHoldCannotDeleteNextPress
     && missingBaselineRejected
     && mediaPauseLeaseIsBalanced
+    && alreadyPausedMediaIsNeverToggled
     && multiOwnerResumeDebouncesOnce
     && failedResumeRetainsState
     && concurrentResumeBeforeDispatchIsCoalesced
@@ -8185,6 +8266,7 @@ async function verifyInteractionPolicy() {
     && fastToggleWaitedForNavigation
     && fastToggleIsCoalescedAndConfirmed
     && fastSetTimeoutIsReconciled
+    && singleShotFastToggleUsesOneNativeAction
     && staleFastRefreshCannotOverwriteToggle
     && fastRefreshRecoversWithoutPageReentry
     && navigationWaitsForFastToggle
@@ -8227,6 +8309,7 @@ async function verifyInteractionPolicy() {
     staleHoldCannotDeleteNextPress,
     missingBaselineRejected,
     mediaPauseLeaseIsBalanced,
+    alreadyPausedMediaIsNeverToggled,
     multiOwnerResumeDebouncesOnce,
     failedResumeRetainsState,
     concurrentResumeBeforeDispatchIsCoalesced,
@@ -8236,6 +8319,7 @@ async function verifyInteractionPolicy() {
     fastToggleWaitedForNavigation,
     fastToggleIsCoalescedAndConfirmed,
     fastSetTimeoutIsReconciled,
+    singleShotFastToggleUsesOneNativeAction,
     staleFastRefreshCannotOverwriteToggle,
     fastRefreshRecoversWithoutPageReentry,
     navigationWaitsForFastToggle,
@@ -8362,6 +8446,7 @@ function runSelectedMode() {
 }
 
 function main() {
+  ensureKeyBridgeExecutable(KEY_BRIDGE);
   installShutdownHandlers();
   runSelectedMode();
 }

@@ -19,3 +19,19 @@ pnpm exec streamdeck pack "$STAGING_DIR/$PLUGIN_NAME" \
   --output "$ROOT_DIR/release" \
   --force \
   --no-update-check
+
+# The packer writes a FAT-compatible ZIP and therefore does not preserve the
+# native helper's executable bit. Exercise the installed layout so every
+# release proves that the Node entry point repairs keybridge before first use.
+ARTIFACT="$ROOT_DIR/release/com.yechan.threaddeck.streamDeckPlugin"
+EXTRACTED_DIR="$STAGING_DIR/extracted"
+mkdir -p "$EXTRACTED_DIR"
+/usr/bin/unzip -q "$ARTIFACT" -d "$EXTRACTED_DIR"
+EXTRACTED_PLUGIN="$EXTRACTED_DIR/$PLUGIN_NAME"
+chmod 0666 "$EXTRACTED_PLUGIN/bin/keybridge"
+node "$EXTRACTED_PLUGIN/bin/plugin.js" --snapshot >/dev/null
+[[ -x "$EXTRACTED_PLUGIN/bin/keybridge" ]] || {
+  echo "Packaged plugin did not repair keybridge permissions" >&2
+  exit 1
+}
+echo "Packaged keybridge permission repair passed."

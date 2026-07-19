@@ -57,13 +57,14 @@ jobs:
           checksum="$(shasum -a 256 "$artifact" | awk '{print $1}')"
           notes_file="$RUNNER_TEMP/threaddeck-release-notes.md"
           {
-            echo "ThreadDeck ${RELEASE_VERSION} beta consolidates the Stream Deck Neo reliability and remote-task UX updates."
+            echo "ThreadDeck ${RELEASE_VERSION} beta fixes installed native-helper permissions, current Codex Fast mode switching, and push-to-talk media safety."
             echo
-            echo "- exact-host local and pinned-remote task switching"
-            echo "- exact-turn remote reasoning depth and Fast / Standard detection"
-            echo "- independent Current / Last and Top Task 1-8 actions"
-            echo "- hardened completion, queue, goal timing, hold-to-talk, and media behavior"
-            echo "- refreshed bilingual documentation, profile, screenshots, and GIFs"
+            echo "- self-repairs keybridge executable permissions stripped by Stream Deck packaging"
+            echo "- recognizes and toggles the latest Korean Fast / Standard speed submenu"
+            echo "- performs each Fast mode inversion in one native menu transaction"
+            echo "- uses accessibility focus plus keyboard activation with no pointer movement"
+            echo "- leaves already-paused media paused when voice input starts"
+            echo "- verifies the installed-layout permission repair during release packaging"
             echo
             echo "SHA-256: \`${checksum}\`"
           } > "$notes_file"
