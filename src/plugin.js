@@ -66,6 +66,11 @@ const {
 const { consumeLifecycleLines } = require("./local-lifecycle");
 const { ensureKeyBridgeExecutable } = require("./keybridge-permissions");
 const {
+  parsePermissionHealth,
+  permissionIssueForHealth,
+  permissionIssueLabel
+} = require("./permission-health");
+const {
   ACTIONS,
   APP_SERVER_SESSION_CACHE_MS,
   APP_SERVER_START_TOLERANCE_MS,
@@ -116,6 +121,12 @@ const VOICE_START_UNKNOWN_RETRY_DELAYS_MS = [120, 300, 600];
 const VOICE_MEDIA_RESUME_DEBOUNCE_MS = 120;
 const VOICE_MEDIA_REASSERT_DELAY_MS = 120;
 const VOICE_MEDIA_REASSERT_ATTEMPTS = 3;
+const PERMISSION_HEALTH_CACHE_MS = 15_000;
+const PERMISSION_MONITOR_INTERVAL_MS = 30_000;
+const PERMISSION_REQUEST_COOLDOWN_MS = 10 * 60_000;
+const PERMISSION_RECHECK_DELAYS_MS = [1_200, 5_000, 15_000];
+const OPERATION_FAILURE_WINDOW_MS = 30_000;
+const OPERATION_FAILURE_THRESHOLD = 2;
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, ".codex"));
@@ -154,7 +165,11 @@ const RUNTIME_TRACE_FIELDS = new Set([
   "coalesced",
   "mediaPaused",
   "baselineReady",
-  "held"
+  "held",
+  "accessibility",
+  "postEvent",
+  "codexAccess",
+  "issue"
 ]);
 
 function resolveCodexBar() {
@@ -278,6 +293,8 @@ const contexts = new Map();
 const contextImages = new Map();
 const contextSentImages = new Map();
 const contextFeedback = new Map();
+const permissionAlertedContexts = new Set();
+const operationFailureByCapability = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
 const unreadCompletionByThreadId = new Map();
@@ -383,7 +400,12 @@ let fastModeState = {
 };
 let appServerSessionCache = { checkedAtMs: 0, startedAtMs: null };
 let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
-let accessibilityTrustCache = { checkedAtMs: 0, trusted: null };
+let permissionHealthCache = { checkedAtMs: 0, health: null };
+let permissionIssue = null;
+let lastPermissionRequestAtMs = 0;
+let activePermissionRefresh = null;
+let codexAccessFailureCount = 0;
+let lastCodexAccessFailureAtMs = 0;
 let runtimeTraceTail = Promise.resolve();
 let pinnedIdsCache = [];
 let remoteThreadRowsCache = [];
@@ -473,6 +495,20 @@ function feedbackOverlaySvg(svg, feedback) {
   <rect x="15" y="105" width="114" height="28" rx="10" fill="${THEME.raised}" stroke="${THEME.borderStrong}"/>
   ${icon}
   <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="600" text-anchor="middle">${escapeXml(label)}</text>`;
+  return svg.replace("</svg>", `${overlay}\n</svg>`);
+}
+
+function permissionIssueOverlaySvg(svg, issue) {
+  const label = compactLine(permissionIssueLabel(issue), 6.2);
+  const labelWidth = Math.max(1, titleVisualWidth(label));
+  const labelFontSize = Math.max(12.5, Math.min(15.5, 76 / labelWidth)).toFixed(1);
+  const overlay = `
+  <rect x="5.2" y="5.2" width="133.6" height="133.6" rx="15.4" fill="none" stroke="${THEME.red}" stroke-width="3.2" stroke-opacity=".92"/>
+  <rect x="15" y="105" width="114" height="28" rx="10" fill="${THEME.raised}" stroke="${THEME.red}" stroke-width="1.4"/>
+  <path d="M28 123L34 112L40 123Z" fill="none" stroke="${THEME.red}" stroke-width="2" stroke-linejoin="round"/>
+  <path d="M34 116V119" stroke="${THEME.red}" stroke-width="2" stroke-linecap="round"/>
+  <circle cx="34" cy="121.5" r="1" fill="${THEME.red}"/>
+  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="650" text-anchor="middle">${escapeXml(label)}</text>`;
   return svg.replace("</svg>", `${overlay}\n</svg>`);
 }
 
@@ -771,6 +807,7 @@ function composedContextSvg(context, svg, nowMs = renderTimeMs()) {
   if (globalEffect && contextThreadId(context) !== globalCompletionThreadId) {
     rendered = applyGlobalCompletion(rendered, globalEffect);
   }
+  if (permissionIssue) rendered = permissionIssueOverlaySvg(rendered, permissionIssue);
   const feedback = contextFeedback.get(context);
   return feedback ? feedbackOverlaySvg(rendered, feedback) : rendered;
 }
@@ -1292,15 +1329,289 @@ function displayedThreadSlot(slot) {
   return threadForSlot(slot);
 }
 
-function runKeyBridge(command, context = null) {
-  if (!accessibilityTrustedSync()) {
-    if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
-    console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
+function sendContextResult(context, event) {
+  if (context && contexts.has(context)) send({ event, context });
+}
+
+function renderPermissionIssueContexts() {
+  for (const [context] of contexts) {
+    const svg = contextImages.get(context);
+    if (svg) sendImage(context, composedContextSvg(context, svg));
+  }
+}
+
+function alertPermissionContext(context) {
+  if (!context || permissionAlertedContexts.has(context)) return;
+  permissionAlertedContexts.add(context);
+  sendContextResult(context, "showAlert");
+}
+
+function setPermissionIssue(nextIssue, context = null) {
+  if (permissionIssue === nextIssue) {
+    if (nextIssue) alertPermissionContext(context);
     return false;
   }
+  const previousIssue = permissionIssue;
+  permissionIssue = nextIssue;
+  permissionAlertedContexts.clear();
+  renderPermissionIssueContexts();
+  for (const [visibleContext] of contexts) {
+    if (nextIssue) alertPermissionContext(visibleContext);
+    else if (previousIssue) sendContextResult(visibleContext, "showOk");
+  }
+  return true;
+}
+
+function permissionHealthFromResult(result) {
+  return parsePermissionHealth(result?.stdout ?? result ?? "");
+}
+
+function legacyPermissionHealthSync() {
+  let accessibility = false;
+  let postEvent = false;
+  try {
+    execFileSync(KEY_BRIDGE, ["accessibility-preflight"], { stdio: "ignore", timeout: 800 });
+    accessibility = true;
+  } catch {
+    accessibility = false;
+  }
+  try {
+    execFileSync(KEY_BRIDGE, ["preflight"], { stdio: "ignore", timeout: 800 });
+    postEvent = true;
+  } catch {
+    postEvent = false;
+  }
+  return {
+    accessibility,
+    postEvent,
+    codexRunning: null,
+    codexAccess: null,
+    axError: null
+  };
+}
+
+function permissionHealthSync(nowMs = Date.now(), force = false) {
+  if (!force
+      && permissionHealthCache.health
+      && nowMs - permissionHealthCache.checkedAtMs < PERMISSION_HEALTH_CACHE_MS) {
+    return permissionHealthCache.health;
+  }
+  let health = null;
+  try {
+    health = parsePermissionHealth(execFileSync(KEY_BRIDGE, ["permission-health"], {
+      encoding: "utf8",
+      timeout: 1200,
+      maxBuffer: 4096
+    }));
+  } catch (error) {
+    health = parsePermissionHealth(error?.stdout);
+  }
+  health ??= legacyPermissionHealthSync();
+  permissionHealthCache = { checkedAtMs: nowMs, health };
+  return health;
+}
+
+function commandPermissionRequirements(command) {
+  if (command.includes("selftest")) {
+    return { accessibility: false, postEvent: false, codex: false };
+  }
+  const codexCommand = command.startsWith("codex-") && command !== "codex-wait-frontmost";
+  const accessibility = command.startsWith("fast-mode-")
+    || codexCommand
+    || [
+      "focused-text-state",
+      "editable-text-state",
+      "focused-element-info",
+      "editable-element-info",
+      "selected-element-info",
+      "media-pause-if-playing",
+      "media-resume-paused",
+      "media-playback-state",
+      "media-playback-debug",
+      "media-accessibility-state",
+      "media-active-debug"
+    ].includes(command);
+  const postEvent = command.startsWith("fast-mode-")
+    || command.startsWith("codex-open-thread")
+    || command.startsWith("codex-find-thread")
+    || command.startsWith("codex-search-thread")
+    || [
+      "voice-down",
+      "send",
+      "send-command",
+      "app-switch",
+      "new-thread",
+      "side-chat",
+      "selftest",
+      "voice-event-selftest",
+      "media-previous",
+      "media-rewind",
+      "media-pause-if-playing",
+      "media-resume-paused",
+      "media-play-pause",
+      "media-forward",
+      "media-mute",
+      "media-volume-down",
+      "media-volume-up",
+      "media-next"
+    ].includes(command);
+  return {
+    accessibility,
+    postEvent,
+    codex: (accessibility && codexCommand) || command.startsWith("fast-mode-")
+  };
+}
+
+function commandPermissionIssue(command, health) {
+  const requirements = commandPermissionRequirements(command);
+  if (requirements.accessibility && health?.accessibility === false) return "accessibility";
+  if (requirements.postEvent && health?.postEvent === false) return "post-event";
+  if (requirements.codex
+      && health?.codexRunning === true
+      && health?.codexAccess === false) return "codex-access";
+  return null;
+}
+
+function requestSystemPermissions(context = null, nowMs = Date.now()) {
+  if (nowMs - lastPermissionRequestAtMs < PERMISSION_REQUEST_COOLDOWN_MS) {
+    if (permissionIssue) alertPermissionContext(context);
+    return false;
+  }
+  lastPermissionRequestAtMs = nowMs;
+  execFile(KEY_BRIDGE, ["permission-request"], {
+    timeout: 5000,
+    maxBuffer: 4096
+  }, (error, stdout) => {
+    const health = parsePermissionHealth(stdout ?? error?.stdout);
+    if (health) permissionHealthCache = { checkedAtMs: Date.now(), health };
+  });
+  for (const delayMs of PERMISSION_RECHECK_DELAYS_MS) {
+    setTimeout(() => void refreshPermissionHealth({ force: true }), delayMs);
+  }
+  return true;
+}
+
+function refreshPermissionHealth(options = {}) {
+  if (activePermissionRefresh && !options.force) return activePermissionRefresh;
+  const refresh = (async () => {
+    let health = null;
+    try {
+      const result = await execFileAsync(KEY_BRIDGE, ["permission-health"], {
+        timeout: 1500,
+        maxBuffer: 4096
+      });
+      health = permissionHealthFromResult(result);
+    } catch (error) {
+      health = parsePermissionHealth(error?.stdout);
+    }
+    if (!health) health = permissionHealthSync(Date.now(), true);
+    permissionHealthCache = { checkedAtMs: Date.now(), health };
+
+    let issue = permissionIssueForHealth(health);
+    if (!issue && health?.codexRunning === true && health?.codexAccess === false) {
+      const nowMs = Date.now();
+      if (nowMs - lastCodexAccessFailureAtMs > OPERATION_FAILURE_WINDOW_MS) {
+        codexAccessFailureCount = 0;
+      }
+      lastCodexAccessFailureAtMs = nowMs;
+      codexAccessFailureCount += 1;
+      if (codexAccessFailureCount >= OPERATION_FAILURE_THRESHOLD) issue = "codex-access";
+    } else if (!issue) {
+      codexAccessFailureCount = 0;
+      lastCodexAccessFailureAtMs = 0;
+    }
+
+    runtimeTrace("permission-health", {
+      accessibility: health?.accessibility,
+      postEvent: health?.postEvent,
+      codexAccess: health?.codexAccess,
+      issue: issue ?? "none"
+    });
+    if (issue) {
+      setPermissionIssue(issue, options.context ?? null);
+      if (options.promptIfMissing && ["accessibility", "post-event"].includes(issue)) {
+        requestSystemPermissions(options.context ?? null);
+      }
+    } else if (["accessibility", "post-event", "codex-access"].includes(permissionIssue)) {
+      setPermissionIssue(null);
+    }
+    return health;
+  })().finally(() => {
+    if (activePermissionRefresh === refresh) activePermissionRefresh = null;
+  });
+  activePermissionRefresh = refresh;
+  return refresh;
+}
+
+function ensureCommandPermissions(command, context = null, quiet = false) {
+  const health = permissionHealthSync(Date.now(), Boolean(permissionIssue));
+  const issue = commandPermissionIssue(command, health);
+  if (!issue) return true;
+  setPermissionIssue(issue, context);
+  requestSystemPermissions(context);
+  if (!quiet && context) showFeedback(context, "error", "권한 요청", 2400);
+  console.error(`Key bridge ${command} is blocked by ${issue}`);
+  return false;
+}
+
+function bridgeCapability(command) {
+  if (command.startsWith("codex-") || command.startsWith("fast-mode-")) return "codex";
+  if (command.startsWith("media-") || command.startsWith("audio-")) return "media";
+  return "input";
+}
+
+function noteBridgeSuccess(command, quiet = false) {
+  const capability = bridgeCapability(command);
+  if (quiet && permissionIssue !== `${capability}-operation`) return;
+  operationFailureByCapability.delete(capability);
+  if (permissionIssue === `${capability}-operation`) setPermissionIssue(null);
+  if (["accessibility", "post-event", "codex-access"].includes(permissionIssue)) {
+    void refreshPermissionHealth({ force: true });
+  }
+}
+
+function noteBridgeFailure(command, error, context = null, quiet = false) {
+  const exitCode = keyBridgeExitCode(error);
+  const health = permissionHealthSync(Date.now(), true);
+  let issue = commandPermissionIssue(command, health) ?? permissionIssueForHealth(health);
+  if (!issue && [77, 79].includes(exitCode)) issue = "accessibility";
+  if (!issue && exitCode === 78) issue = "post-event";
+  if (issue) {
+    setPermissionIssue(issue, context);
+    requestSystemPermissions(context);
+    if (!quiet && context) showFeedback(context, "error", "권한 요청", 2400);
+    return true;
+  }
+  const capability = bridgeCapability(command);
+  const mediaHealthFailure = capability === "media" && exitCode !== 2;
+  if ((quiet && !mediaHealthFailure) || isAbortError(error)) return false;
+  const nowMs = Date.now();
+  const prior = operationFailureByCapability.get(capability);
+  const count = prior && nowMs - prior.lastAtMs <= OPERATION_FAILURE_WINDOW_MS
+    ? prior.count + 1
+    : 1;
+  operationFailureByCapability.set(capability, { count, lastAtMs: nowMs });
+  const threshold = capability === "media" ? 1 : OPERATION_FAILURE_THRESHOLD;
+  if (count >= threshold) {
+    setPermissionIssue(`${capability}-operation`, context);
+  }
+  runtimeTrace("bridge-health", {
+    result: "failed",
+    reason: command.slice(0, 48),
+    issue: count >= threshold ? `${capability}-operation` : "transient"
+  });
+  return false;
+}
+
+function runKeyBridge(command, context = null) {
+  if (!ensureCommandPermissions(command, context)) return false;
   execFile(KEY_BRIDGE, [command], { timeout: 2000 }, (error) => {
-    if (!error) return;
-    if (context) showFeedback(context, "error", "키 입력 실패");
+    if (!error) {
+      noteBridgeSuccess(command);
+      return;
+    }
+    const permissionFailure = noteBridgeFailure(command, error, context);
+    if (context && !permissionFailure) showFeedback(context, "error", "키 입력 실패");
     console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
   });
   return true;
@@ -1308,22 +1619,18 @@ function runKeyBridge(command, context = null) {
 
 async function runKeyBridgeAwaited(command, context = null, options = {}) {
   const quiet = Boolean(options.quiet);
-  if (!accessibilityTrustedSync()) {
-    if (!quiet) {
-      if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
-      console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
-    }
-    return false;
-  }
+  if (!ensureCommandPermissions(command, context, quiet)) return false;
   try {
     await execFileAsync(KEY_BRIDGE, [command], {
       timeout: command.startsWith("codex-") ? 2500 : 1000,
       maxBuffer: 64 * 1024
     });
+    noteBridgeSuccess(command, quiet);
     return true;
   } catch (error) {
+    const permissionFailure = noteBridgeFailure(command, error, context, quiet);
     if (!quiet) {
-      if (context) showFeedback(context, "error", "키 입력 실패");
+      if (context && !permissionFailure) showFeedback(context, "error", "키 입력 실패");
       console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
     }
     return false;
@@ -1333,55 +1640,26 @@ async function runKeyBridgeAwaited(command, context = null, options = {}) {
 function runKeyBridgeSync(command, context = null, options = {}) {
   const quiet = Boolean(options.quiet);
   const releasesHeldKeys = command === "voice-up" || command === "release";
-  if (!releasesHeldKeys && !accessibilityTrustedSync()) {
-    if (!quiet) {
-      if (context) showFeedback(context, "error", "손쉬운 사용", 2200);
-      console.error(`Key bridge ${command} needs Stream Deck Accessibility permission`);
-    }
-    return false;
-  }
+  if (!releasesHeldKeys && !ensureCommandPermissions(command, context, quiet)) return false;
   try {
     execFileSync(KEY_BRIDGE, [command], {
       stdio: "ignore",
       timeout: command === "voice-up" || command.startsWith("codex-") ? 2500 : 1000
     });
+    noteBridgeSuccess(command, quiet);
     return true;
   } catch (error) {
+    const permissionFailure = noteBridgeFailure(command, error, context, quiet);
     if (!quiet) {
-      if (context) showFeedback(context, "error", "키 입력 실패");
+      if (context && !permissionFailure) showFeedback(context, "error", "키 입력 실패");
       console.error(`Key bridge ${command} failed: ${error?.message ?? "unknown error"}`);
     }
     return false;
   }
 }
 
-function accessibilityTrustedSync(nowMs = Date.now()) {
-  const cacheMs = accessibilityTrustCache.trusted ? 30_000 : 2_000;
-  if (typeof accessibilityTrustCache.trusted === "boolean"
-      && nowMs - accessibilityTrustCache.checkedAtMs < cacheMs) {
-    return accessibilityTrustCache.trusted;
-  }
-  let trusted = false;
-  try {
-    execFileSync(KEY_BRIDGE, ["accessibility-preflight"], {
-      stdio: "ignore",
-      timeout: 800
-    });
-    trusted = true;
-  } catch {
-    trusted = false;
-  }
-  accessibilityTrustCache = { checkedAtMs: nowMs, trusted };
-  return trusted;
-}
-
 function primeAccessibilityTrust() {
-  execFile(KEY_BRIDGE, ["accessibility-preflight"], { timeout: 800 }, (error) => {
-    accessibilityTrustCache = {
-      checkedAtMs: Date.now(),
-      trusted: !error
-    };
-  });
+  void refreshPermissionHealth({ force: true, promptIfMissing: true });
 }
 
 function keyBridgeExitCode(error) {
@@ -2267,7 +2545,7 @@ async function resumeMediaAfterVoice(context = null, options = {}) {
       return false;
     }
     try {
-      const resumed = Boolean(await bridge("media-play-pause", null, { quiet: true }));
+      const resumed = Boolean(await bridge("media-resume-paused", null, { quiet: true }));
       if (!resumed) {
         // Keep ownership of the paused state so a later release or shutdown can
         // retry instead of forgetting media that is still stopped.
@@ -2516,7 +2794,7 @@ function releaseVoiceKeysSync(rawOptions = {}) {
     if (state.timer) clearTimeout(state.timer);
   }
   threadPressByContext.clear();
-  if (released && voiceMediaPaused && bridge("media-play-pause", null, { quiet: true })) {
+  if (released && voiceMediaPaused && bridge("media-resume-paused", null, { quiet: true })) {
     voiceMediaPaused = false;
   }
   if (released && !voiceMediaPaused) clearVoiceMediaPauseOwners();
@@ -2848,6 +3126,8 @@ function toggleFastMode(context, options = {}) {
   fastModeRevision += 1;
   const feedback = options.feedback ?? showFeedback;
   const update = (async () => {
+    const productionNativeAction = !options.toggleMode && !options.stateProbe && !options.setMode;
+    if (productionNativeAction && !ensureCommandPermissions("fast-mode-toggle", context)) return false;
     feedback(context, "loading", "FAST 확인");
     const pendingRefresh = activeFastModeRefresh?.promise;
     if (pendingRefresh) {
@@ -2916,6 +3196,7 @@ function toggleFastMode(context, options = {}) {
         if (confirmed.composerFocused !== true && focusComposer) {
           fastModeState = { ...fastModeState, composerFocused: true };
         }
+        noteBridgeSuccess("fast-mode-toggle");
         // The verified icon itself is the success acknowledgement. Keep text
         // overlays for actionable failures instead of restating on/off.
         clearFeedback(context);
@@ -2931,7 +3212,8 @@ function toggleFastMode(context, options = {}) {
           };
           renderFastModeContexts();
         }
-        feedback(context, "error", "변경 실패", 1600);
+        const permissionFailure = noteBridgeFailure("fast-mode-toggle", error, context);
+        if (!permissionFailure) feedback(context, "error", "변경 실패", 1600);
         console.error(`Could not change Codex fast mode: ${error?.message ?? "unknown error"}`);
         return false;
       }
@@ -2986,6 +3268,7 @@ function toggleFastMode(context, options = {}) {
       fastModeState = { threadId, ...confirmed, failed: false };
       applyFocusedRemoteComposerState(thread, confirmed);
       renderFastModeContexts();
+      noteBridgeSuccess("fast-mode-set");
       clearFeedback(context);
       return true;
     } catch (confirmationError) {
@@ -2999,7 +3282,8 @@ function toggleFastMode(context, options = {}) {
         };
         renderFastModeContexts();
       }
-      feedback(context, "error", "변경 실패", 1600);
+      const permissionFailure = noteBridgeFailure("fast-mode-set", error, context);
+      if (!permissionFailure) feedback(context, "error", "변경 실패", 1600);
       console.error(`Could not change Codex fast mode: ${error?.message ?? "unknown error"}`);
       return false;
     }
@@ -5240,10 +5524,9 @@ async function openThread(context, slot, options = {}) {
   if (thread.ephemeral) {
     return openListedSideChat(context, thread, options);
   }
-  if (thread.remote && !accessibilityTrustedSync()) {
-    feedback(context, "error", "손쉬운 사용", 2200);
-    return false;
-  }
+  const permissionCommand = thread.remote ? "codex-open-thread" : "codex-current-thread";
+  if (!options.navigateRemote && !options.navigateDeepLink
+      && !ensureCommandPermissions(permissionCommand, context)) return false;
   pendingSideChatTarget = null;
   feedback(context, "loading", "여는 중");
   const remoteNavigation = options.navigateRemote ?? navigateRemoteThread;
@@ -5257,6 +5540,7 @@ async function openThread(context, slot, options = {}) {
       await remoteNavigation(thread, slot);
       acknowledge(thread.id, { render: false });
       remember(thread);
+      noteBridgeSuccess(permissionCommand);
       feedback(context, "success", "원격 전환");
       scheduleRefresh();
       return true;
@@ -5264,6 +5548,7 @@ async function openThread(context, slot, options = {}) {
     await deepLinkNavigation(thread, slot);
     acknowledge(thread.id, { render: false });
     remember(thread);
+    noteBridgeSuccess(permissionCommand);
     feedback(context, "success", "전환 완료");
     scheduleRefresh();
     return true;
@@ -5278,10 +5563,13 @@ async function openThread(context, slot, options = {}) {
       return false;
     }
     const exitCode = keyBridgeExitCode(error);
+    const permissionFailure = exitCode === 3 || thread.titleAmbiguous
+      ? false
+      : noteBridgeFailure(permissionCommand, error, context);
     const label = thread.remote
       ? exitCode === 3 || thread.titleAmbiguous ? "제목 중복" : "원격 확인"
       : "열기 실패";
-    feedback(context, "error", label, thread.remote ? 1800 : undefined);
+    if (!permissionFailure) feedback(context, "error", label, thread.remote ? 1800 : undefined);
     console.error(`Could not open Codex ${thread.remote ? "remote " : ""}thread: ${error?.message ?? "unknown error"}`);
     return false;
   }
@@ -5306,6 +5594,7 @@ async function openListedSideChat(context, thread, options = {}) {
     await navigate(thread, slot);
     acknowledge(thread.id, { render: false });
     remember(thread);
+    noteBridgeSuccess("codex-current-thread");
     feedback(context, "success", "사이드챗 전환");
     scheduleRefresh();
     return true;
@@ -5319,7 +5608,8 @@ async function openListedSideChat(context, thread, options = {}) {
       });
       return false;
     }
-    feedback(context, "error", "열기 실패");
+    const permissionFailure = noteBridgeFailure("codex-current-thread", error, context);
+    if (!permissionFailure) feedback(context, "error", "열기 실패");
     console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
     return false;
   }
@@ -5497,6 +5787,7 @@ function registerPlugin() {
         if (svg) setImage(message.context, svg);
         if (message.action === ACTIONS.fastMode) void refreshFastMode({ quiet: true });
       }
+      if (permissionIssue) alertPermissionContext(message.context);
     } else if (message.event === "willDisappear") {
       // A task-key hold owns both the voice release and its media lease. Let
       // that press state perform one gated teardown; calling the generic media
@@ -5515,6 +5806,7 @@ function registerPlugin() {
       contextImages.delete(message.context);
       contextSentImages.delete(message.context);
       contextFeedback.delete(message.context);
+      permissionAlertedContexts.delete(message.context);
     } else if (message.event === "keyDown" && contexts.has(message.context)) {
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice && !voiceHeldContexts.has(message.context)) {
@@ -5582,6 +5874,12 @@ function registerPlugin() {
   setInterval(() => {
     if (contexts.size > 0) void refreshAppearance();
   }, 2000);
+
+  setInterval(() => {
+    if (contexts.size > 0) {
+      void refreshPermissionHealth({ promptIfMissing: true });
+    }
+  }, PERMISSION_MONITOR_INTERVAL_MS);
 
   setInterval(() => {
     if (voiceTranscriptionByContext.size > 0 || voiceStateResetAtMs.size > 0) {
@@ -7364,7 +7662,7 @@ async function verifyVoiceSubmissionPolicy() {
     }
   });
   const shutdownSuccessRestoresMedia = shutdownSucceeded
-    && successfulShutdownCommands.join(",") === "media-play-pause"
+    && successfulShutdownCommands.join(",") === "media-resume-paused"
     && !voiceReleasePendingContexts.has(shutdownContext)
     && voiceMediaPauseOwners.size === 0
     && !voiceMediaPaused;
@@ -8029,7 +8327,7 @@ async function verifyInteractionPolicy() {
   const finalOwnerResumed = await resumeMediaAfterVoice("media-owner-b", immediateResumeOptions);
   const mediaPauseLeaseIsBalanced = firstOwnerKeptPaused
     && finalOwnerResumed
-    && mediaCommands.join(",") === "media-pause-if-playing,media-play-pause"
+    && mediaCommands.join(",") === "media-pause-if-playing,media-resume-paused"
     && voiceMediaPauseOwners.size === 0
     && !voiceMediaPaused;
 
@@ -8077,7 +8375,7 @@ async function verifyInteractionPolicy() {
   );
   await Promise.all([firstCoalescedResume, secondCoalescedResume]);
   const multiOwnerResumeDebouncesOnce = coalescedResumeSleeps === 1
-    && coalescedResumeCommands.join(",") === "media-play-pause"
+    && coalescedResumeCommands.join(",") === "media-resume-paused"
     && !voiceMediaPaused;
 
   voiceMediaPaused = true;
@@ -8139,7 +8437,7 @@ async function verifyInteractionPolicy() {
   let reassertAttempts = 0;
   const postDispatchBridge = async (command) => {
     postDispatchCommands.push(command);
-    if (command === "media-play-pause") {
+    if (command === "media-resume-paused") {
       signalResumeDispatched();
       await resumeDispatchGate;
       return true;
@@ -8163,7 +8461,7 @@ async function verifyInteractionPolicy() {
     && voiceMediaPauseOwners.has("post-dispatch-owner-b")
     && !voiceMediaResumeReassertPending
     && postDispatchCommands.join(",") === [
-      "media-play-pause",
+      "media-resume-paused",
       "media-pause-if-playing",
       "media-pause-if-playing"
     ].join(",");

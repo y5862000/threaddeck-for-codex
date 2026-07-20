@@ -73,9 +73,23 @@ if (!toggleBody.includes("restore_codex_composer_after_fast_mode()")
     || !toggleBody.includes("composer_focused=%d")) {
   throw new Error("Fast mode toggle must restore and report Codex composer focus");
 }
+
+for (const contract of [
+  "AXIsProcessTrustedWithOptions(options)",
+  "CGPreflightPostEventAccess()",
+  "CGRequestPostEventAccess()",
+  'strcmp(argv[1], "permission-health") == 0',
+  'strcmp(argv[1], "permission-request") == 0',
+  "command_permission_gate(argv[1])"
+]) {
+  if (!source.includes(contract)) {
+    throw new Error(`Missing permission-health contract: ${contract}`);
+  }
+}
 NODE
 echo "Passive composer reads are interaction-free."
 echo "Fast mode composer-focus restoration is wired."
+echo "Permission health and official macOS re-request are wired."
 if grep -Eq 'CGEventCreateMouseEvent|CGWarpMouseCursorPosition|kCGEventLeftMouse(Down|Up)' "$ROOT_DIR/native/keybridge.m"; then
   echo "keybridge must not synthesize mouse events" >&2
   exit 1

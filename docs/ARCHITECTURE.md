@@ -65,8 +65,8 @@ It:
 - holds and releases push-to-talk modifiers across Stream Deck key-down/key-up events;
 - attaches an explicit Latin `D` to push-to-talk events while retaining the physical key code, making the shortcut independent of the active keyboard input source;
 - sends app-switch and media-key events;
-- checks whether a supported media app or browser helper is actively producing Core Audio output;
-- sends the normal macOS play/pause media command when active supported output should pause, without signaling processes or retaining process IDs;
+- resolves each active Core Audio process to its GUI owner without an app allowlist and verifies semantic pause/play controls;
+- pauses those controls directly, uses the normal macOS media command only as a fallback, and records only bundle identifiers in a ten-minute local lease so release resumes the exact apps without retaining PIDs or media text;
 - traverses the visible Codex accessibility tree once for the target UUID and normalized title fingerprints, activates only identity-safe pressable results, rejects title-only ambiguity in strict mode, verifies both the safety-critical frontmost task and the passive current task from the active Codex window header, and counts localized queue-action buttons without returning message text.
 
 The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input.

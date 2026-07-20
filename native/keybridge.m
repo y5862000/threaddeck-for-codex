@@ -4,8 +4,10 @@
 #include <dispatch/dispatch.h>
 #include <IOKit/hidsystem/IOLLEvent.h>
 #include <IOKit/hidsystem/ev_keymap.h>
+#include <libproc.h>
 #include <ctype.h>
 #include <dlfcn.h>
+#include <float.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -50,6 +52,8 @@ static bool focus_codex_composer_if_visible(void);
 static bool submit_codex_composer_if_visible(void);
 static VoiceAudioState codex_audio_input_state(void);
 static bool codex_audio_input_is_running(void);
+static NSString *normalized_accessibility_label(CFTypeRef value);
+static CFStringRef copy_system_now_playing_bundle_id(void);
 
 static CGEventRef create_key_event(
   CGKeyCode key,
@@ -404,47 +408,332 @@ static void tap_media_key(int key) {
   post_media_key(key, false);
 }
 
-static bool pausable_media_bundle(CFStringRef bundle_id) {
-  if (bundle_id == NULL) return false;
-  const CFStringRef exact_bundles[] = {
-    CFSTR("com.apple.Music"),
-    CFSTR("com.apple.podcasts"),
-    CFSTR("com.apple.TV"),
-    CFSTR("com.apple.QuickTimePlayerX"),
-    CFSTR("com.spotify.client"),
-    CFSTR("com.google.Chrome"),
-    CFSTR("com.apple.Safari"),
-    CFSTR("company.thebrowser.Browser"),
-    CFSTR("com.brave.Browser"),
-    CFSTR("com.microsoft.edgemac"),
-    CFSTR("com.vivaldi.Vivaldi"),
-    CFSTR("com.operasoftware.Opera"),
-    CFSTR("org.mozilla.firefox"),
-    CFSTR("org.videolan.vlc"),
-    CFSTR("com.colliderli.iina"),
-    CFSTR("tv.plex.desktop"),
-    CFSTR("com.plexamp.plexamp")
-  };
-  for (size_t index = 0; index < sizeof(exact_bundles) / sizeof(exact_bundles[0]); index += 1) {
-    if (CFEqual(bundle_id, exact_bundles[index])) return true;
-  }
-  // Browser helpers can own the CoreAudio process instead of their parent app.
-  const CFStringRef browser_prefixes[] = {
-    CFSTR("com.google.Chrome."),
-    CFSTR("com.apple.WebKit."),
-    CFSTR("com.brave.Browser."),
-    CFSTR("com.microsoft.edgemac."),
-    CFSTR("com.vivaldi.Vivaldi."),
-    CFSTR("com.operasoftware.Opera."),
-    CFSTR("org.mozilla.firefox.")
-  };
-  for (size_t index = 0; index < sizeof(browser_prefixes) / sizeof(browser_prefixes[0]); index += 1) {
-    if (CFStringHasPrefix(bundle_id, browser_prefixes[index])) return true;
+typedef enum {
+  SYSTEM_MEDIA_PLAYBACK_UNKNOWN = -1,
+  SYSTEM_MEDIA_PLAYBACK_PAUSED = 0,
+  SYSTEM_MEDIA_PLAYBACK_PLAYING = 1
+} SystemMediaPlaybackState;
+
+typedef struct {
+  bool pause_control;
+  bool play_control;
+  bool audio_playing_control;
+  AXUIElementRef pause_target;
+  AXUIElementRef play_target;
+  unsigned visited;
+} MediaAccessibilityState;
+
+static bool media_action_label(CFTypeRef value, bool pause) {
+  NSString *label = normalized_accessibility_label(value);
+  if (label == nil) return false;
+  NSArray<NSString *> *labels = pause
+    ? @[@"pause", @"pause playback", @"pause button", @"일시 정지", @"일시정지"]
+    : @[@"play", @"play playback", @"play button", @"재생"];
+  if ([labels containsObject:label]) return true;
+  NSArray<NSString *> *prefixes = pause
+    ? @[@"pause ", @"일시 정지 ", @"일시정지 "]
+    : @[@"play ", @"재생 "];
+  for (NSString *prefix in prefixes) {
+    if ([label hasPrefix:prefix]) return true;
   }
   return false;
 }
 
-static bool supported_media_output_is_running(void) {
+static bool media_audio_playing_label(CFTypeRef value) {
+  NSString *label = normalized_accessibility_label(value);
+  if (label == nil) return false;
+  NSArray<NSString *> *signals = @[
+    @"mute tab",
+    @"mute this tab",
+    @"mute site",
+    @"mute this site",
+    @"audio playing",
+    @"audio is playing",
+    @"this tab is playing audio",
+    @"이 탭 음소거",
+    @"탭 음소거",
+    @"사이트 음소거",
+    @"오디오 재생 중"
+  ];
+  for (NSString *signal in signals) {
+    if ([label isEqualToString:signal] || [label hasPrefix:[signal stringByAppendingString:@" "]]) {
+      return true;
+    }
+  }
+  return false;
+}
+
+static void collect_media_accessibility_state(
+  AXUIElementRef element,
+  unsigned depth,
+  MediaAccessibilityState *state
+) {
+  if (element == NULL || state == NULL || depth > 24 || state->visited >= 4000) return;
+  state->visited += 1;
+
+  CFTypeRef role = NULL;
+  AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role);
+  bool button = role != NULL
+    && CFGetTypeID(role) == CFStringGetTypeID()
+    && CFEqual(role, kAXButtonRole);
+  if (role != NULL) CFRelease(role);
+  CFTypeRef hidden_value = NULL;
+  AXUIElementCopyAttributeValue(element, kAXHiddenAttribute, &hidden_value);
+  bool hidden = hidden_value != NULL
+    && CFGetTypeID(hidden_value) == CFBooleanGetTypeID()
+    && CFBooleanGetValue((CFBooleanRef)hidden_value);
+  if (hidden_value != NULL) CFRelease(hidden_value);
+  CFTypeRef enabled_value = NULL;
+  AXUIElementCopyAttributeValue(element, kAXEnabledAttribute, &enabled_value);
+  bool enabled = enabled_value == NULL
+    || CFGetTypeID(enabled_value) != CFBooleanGetTypeID()
+    || CFBooleanGetValue((CFBooleanRef)enabled_value);
+  if (enabled_value != NULL) CFRelease(enabled_value);
+  if (button && !hidden && enabled) {
+    CFStringRef attributes[] = {
+      kAXTitleAttribute,
+      kAXDescriptionAttribute,
+      kAXHelpAttribute,
+      kAXIdentifierAttribute
+    };
+    for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+      CFTypeRef value = NULL;
+      if (AXUIElementCopyAttributeValue(element, attributes[index], &value) == kAXErrorSuccess
+          && value != NULL) {
+        bool pause = media_action_label(value, true);
+        bool play = media_action_label(value, false);
+        state->pause_control |= pause;
+        state->play_control |= play;
+        if (pause && state->pause_target == NULL) {
+          state->pause_target = (AXUIElementRef)CFRetain(element);
+        }
+        if (play && state->play_target == NULL) {
+          state->play_target = (AXUIElementRef)CFRetain(element);
+        }
+        state->audio_playing_control |= media_audio_playing_label(value);
+      }
+      if (value != NULL) CFRelease(value);
+    }
+  } else {
+    CFStringRef attributes[] = {
+      kAXDescriptionAttribute,
+      kAXHelpAttribute,
+      kAXIdentifierAttribute
+    };
+    for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+      CFTypeRef value = NULL;
+      if (AXUIElementCopyAttributeValue(element, attributes[index], &value) == kAXErrorSuccess
+          && value != NULL) {
+        state->audio_playing_control |= media_audio_playing_label(value);
+      }
+      if (value != NULL) CFRelease(value);
+    }
+  }
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value) != kAXErrorSuccess
+      || children_value == NULL || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  CFIndex count = CFArrayGetCount(children);
+  for (CFIndex index = 0; index < count; index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_media_accessibility_state((AXUIElementRef)child, depth + 1, state);
+    }
+  }
+  CFRelease(children_value);
+}
+
+static void release_media_accessibility_state(MediaAccessibilityState *state) {
+  if (state == NULL) return;
+  if (state->pause_target != NULL) CFRelease(state->pause_target);
+  if (state->play_target != NULL) CFRelease(state->play_target);
+  state->pause_target = NULL;
+  state->play_target = NULL;
+}
+
+static bool perform_media_accessibility_action(
+  NSString *bundle_identifier,
+  bool pause
+) {
+  if (bundle_identifier.length == 0 || !AXIsProcessTrusted()) return false;
+  @autoreleasepool {
+    NSArray<NSRunningApplication *> *applications =
+      [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle_identifier];
+    for (NSRunningApplication *application in applications) {
+      if (application.terminated || application.processIdentifier <= 0) continue;
+      AXUIElementRef element = AXUIElementCreateApplication(application.processIdentifier);
+      if (element == NULL) continue;
+      AXUIElementSetMessagingTimeout(element, 0.6);
+      MediaAccessibilityState state = {0};
+      collect_media_accessibility_state(element, 0, &state);
+      CFRelease(element);
+      AXUIElementRef target = pause ? state.pause_target : state.play_target;
+      bool performed = target != NULL
+        && AXUIElementPerformAction(target, kAXPressAction) == kAXErrorSuccess;
+      release_media_accessibility_state(&state);
+      if (performed) return true;
+    }
+  }
+  return false;
+}
+
+static SystemMediaPlaybackState media_bundle_accessibility_playback_state(
+  NSString *bundle_identifier,
+  unsigned *visited
+) {
+  if (bundle_identifier.length == 0 || !AXIsProcessTrusted()) {
+    if (visited != NULL) *visited = 0;
+    return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+  }
+  @autoreleasepool {
+    NSArray<NSRunningApplication *> *applications =
+      [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle_identifier];
+    for (NSRunningApplication *application in applications) {
+      if (application.terminated || application.processIdentifier <= 0) continue;
+      AXUIElementRef element = AXUIElementCreateApplication(application.processIdentifier);
+      if (element == NULL) continue;
+      AXUIElementSetMessagingTimeout(element, 0.45);
+      MediaAccessibilityState state = {0};
+      collect_media_accessibility_state(element, 0, &state);
+      CFRelease(element);
+      if (visited != NULL) *visited = state.visited;
+      SystemMediaPlaybackState result = SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+      if (state.audio_playing_control
+          || (state.pause_control && !state.play_control)) {
+        result = SYSTEM_MEDIA_PLAYBACK_PLAYING;
+      } else if (state.play_control && !state.pause_control) {
+        result = SYSTEM_MEDIA_PLAYBACK_PAUSED;
+      }
+      release_media_accessibility_state(&state);
+      if (result != SYSTEM_MEDIA_PLAYBACK_UNKNOWN) return result;
+    }
+  }
+  if (visited != NULL) *visited = 0;
+  return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+}
+
+static NSString *media_parent_bundle_identifier(CFStringRef bundle_identifier) {
+  if (bundle_identifier == NULL || CFGetTypeID(bundle_identifier) != CFStringGetTypeID()) return nil;
+  NSString *bundle = (__bridge NSString *)bundle_identifier;
+  NSArray<NSArray<NSString *> *> *prefixes = @[
+    @[@"com.google.Chrome", @"com.google.Chrome"],
+    @[@"com.apple.WebKit", @"com.apple.Safari"],
+    @[@"com.brave.Browser", @"com.brave.Browser"],
+    @[@"com.microsoft.edgemac", @"com.microsoft.edgemac"],
+    @[@"com.vivaldi.Vivaldi", @"com.vivaldi.Vivaldi"],
+    @[@"com.operasoftware.Opera", @"com.operasoftware.Opera"],
+    @[@"org.mozilla.firefox", @"org.mozilla.firefox"]
+  ];
+  for (NSArray<NSString *> *mapping in prefixes) {
+    if ([bundle hasPrefix:mapping[0]]) return mapping[1];
+  }
+  return bundle;
+}
+
+static pid_t parent_process_identifier(pid_t process_identifier) {
+  if (process_identifier <= 1) return 0;
+  struct proc_bsdinfo information = {0};
+  int size = proc_pidinfo(
+    process_identifier,
+    PROC_PIDTBSDINFO,
+    0,
+    &information,
+    sizeof(information)
+  );
+  return size == sizeof(information) ? (pid_t)information.pbi_ppid : 0;
+}
+
+static NSString *visible_application_bundle_for_process(pid_t process_identifier) {
+  pid_t current = process_identifier;
+  for (unsigned depth = 0; current > 1 && depth < 8; depth += 1) {
+    NSRunningApplication *application =
+      [NSRunningApplication runningApplicationWithProcessIdentifier:current];
+    NSString *bundle = application.bundleIdentifier;
+    NSString *bundle_path = application.bundleURL.path;
+    bool user_interface_bundle = [bundle_path.pathExtension.lowercaseString isEqualToString:@"app"]
+      && [bundle_path rangeOfString:@"/XPCServices/"].location == NSNotFound
+      && [bundle_path rangeOfString:@"/Helpers/"].location == NSNotFound;
+    if (!application.terminated
+        && bundle.length > 0
+        && user_interface_bundle
+        && application.activationPolicy != NSApplicationActivationPolicyProhibited) {
+      return bundle;
+    }
+    pid_t parent = parent_process_identifier(current);
+    if (parent <= 1 || parent == current) break;
+    current = parent;
+  }
+  return nil;
+}
+
+static bool media_helper_belongs_to_application(
+  NSString *helper_bundle,
+  NSString *application_bundle
+) {
+  if (helper_bundle.length == 0 || application_bundle.length == 0) return false;
+  return [helper_bundle hasPrefix:[application_bundle stringByAppendingString:@"."]];
+}
+
+static NSString *longest_running_application_prefix(NSString *helper_bundle) {
+  if (helper_bundle.length == 0) return nil;
+  NSString *match = nil;
+  for (NSRunningApplication *application in NSWorkspace.sharedWorkspace.runningApplications) {
+    NSString *candidate = application.bundleIdentifier;
+    if (application.terminated
+        || application.activationPolicy == NSApplicationActivationPolicyProhibited
+        || candidate.length == 0) continue;
+    if (!media_helper_belongs_to_application(helper_bundle, candidate)) continue;
+    if (match == nil || candidate.length > match.length) match = candidate;
+  }
+  return match;
+}
+
+static NSString *resolved_media_application_bundle(
+  AudioObjectID process,
+  CFStringRef audio_bundle_identifier
+) {
+  pid_t process_identifier = 0;
+  UInt32 size = sizeof(process_identifier);
+  AudioObjectPropertyAddress address = {
+    kAudioProcessPropertyPID,
+    kAudioObjectPropertyScopeGlobal,
+    kAudioObjectPropertyElementMain
+  };
+  if (AudioObjectGetPropertyData(
+        process,
+        &address,
+        0,
+        NULL,
+        &size,
+        &process_identifier
+      ) == noErr) {
+    NSString *owner = visible_application_bundle_for_process(process_identifier);
+    if (owner.length > 0) return owner;
+  }
+
+  NSString *helper = audio_bundle_identifier == NULL
+    ? nil
+    : (__bridge NSString *)audio_bundle_identifier;
+  NSString *prefix_owner = longest_running_application_prefix(helper);
+  if (prefix_owner.length > 0) return prefix_owner;
+
+  // Some launchd-owned WebKit audio processes do not retain their browser's
+  // PID ancestry. Keep only this ownership hint as a fast path; the rest of
+  // the pipeline is application-agnostic and accepts any resolved GUI owner.
+  NSString *known_parent = media_parent_bundle_identifier(audio_bundle_identifier);
+  if (known_parent.length > 0
+      && [NSRunningApplication runningApplicationsWithBundleIdentifier:known_parent].count > 0) {
+    return known_parent;
+  }
+  return nil;
+}
+
+static NSArray<NSString *> *active_media_application_bundles(bool *saw_unresolved) {
+  if (saw_unresolved != NULL) *saw_unresolved = false;
   AudioObjectPropertyAddress address = {
     kAudioHardwarePropertyProcessObjectList,
     kAudioObjectPropertyScopeGlobal,
@@ -452,46 +741,160 @@ static bool supported_media_output_is_running(void) {
   };
   UInt32 size = 0;
   if (AudioObjectGetPropertyDataSize(kAudioObjectSystemObject, &address, 0, NULL, &size) != noErr
-      || size == 0) return false;
+      || size == 0) return @[];
   AudioObjectID *processes = malloc(size);
-  if (processes == NULL) return false;
+  if (processes == NULL) return @[];
   if (AudioObjectGetPropertyData(kAudioObjectSystemObject, &address, 0, NULL, &size, processes) != noErr) {
     free(processes);
-    return false;
+    return @[];
   }
 
-  bool active = false;
+  NSMutableOrderedSet<NSString *> *bundles = [NSMutableOrderedSet orderedSet];
   UInt32 count = size / sizeof(AudioObjectID);
-  for (UInt32 index = 0; index < count && !active; index += 1) {
+  for (UInt32 index = 0; index < count; index += 1) {
     UInt32 is_running = 0;
     UInt32 value_size = sizeof(is_running);
     address.mSelector = kAudioProcessPropertyIsRunningOutput;
     if (AudioObjectGetPropertyData(processes[index], &address, 0, NULL, &value_size, &is_running) != noErr
         || !is_running) continue;
 
-    CFStringRef bundle_id = NULL;
-    value_size = sizeof(bundle_id);
+    CFStringRef audio_bundle = NULL;
+    value_size = sizeof(audio_bundle);
     address.mSelector = kAudioProcessPropertyBundleID;
-    if (AudioObjectGetPropertyData(processes[index], &address, 0, NULL, &value_size, &bundle_id) == noErr
-        && bundle_id != NULL) {
-      active = pausable_media_bundle(bundle_id);
-      CFRelease(bundle_id);
+    if (AudioObjectGetPropertyData(
+          processes[index],
+          &address,
+          0,
+          NULL,
+          &value_size,
+          &audio_bundle
+        ) != noErr || audio_bundle == NULL) {
+      if (saw_unresolved != NULL) *saw_unresolved = true;
+      continue;
     }
+    NSString *owner = resolved_media_application_bundle(processes[index], audio_bundle);
+    CFRelease(audio_bundle);
+    if (owner.length > 0) [bundles addObject:owner];
+    else if (saw_unresolved != NULL) *saw_unresolved = true;
   }
   free(processes);
-  return active;
+  return bundles.array;
 }
 
-typedef enum {
-  SYSTEM_MEDIA_PLAYBACK_UNKNOWN = -1,
-  SYSTEM_MEDIA_PLAYBACK_PAUSED = 0,
-  SYSTEM_MEDIA_PLAYBACK_PLAYING = 1
-} SystemMediaPlaybackState;
+static SystemMediaPlaybackState system_media_accessibility_playback_state(void) {
+  CFStringRef bundle_identifier = copy_system_now_playing_bundle_id();
+  if (bundle_identifier == NULL) return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+  SystemMediaPlaybackState state = SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+  @autoreleasepool {
+    NSString *parent = media_parent_bundle_identifier(bundle_identifier);
+    if (parent.length > 0) {
+      state = media_bundle_accessibility_playback_state(parent, NULL);
+    }
+  }
+  CFRelease(bundle_identifier);
+  return state;
+}
+
+static int print_media_accessibility_state(void) {
+  unsigned visited = 0;
+  SystemMediaPlaybackState state = media_bundle_accessibility_playback_state(
+    @"com.apple.Music",
+    &visited
+  );
+  printf(
+    "music_state=%s visited=%u\n",
+    state == SYSTEM_MEDIA_PLAYBACK_PLAYING
+      ? "playing"
+      : state == SYSTEM_MEDIA_PLAYBACK_PAUSED ? "paused" : "unknown",
+    visited
+  );
+  return state == SYSTEM_MEDIA_PLAYBACK_UNKNOWN ? 2 : 0;
+}
+
+static int print_active_media_accessibility_state(void) {
+  bool saw_unresolved = false;
+  NSArray<NSString *> *bundles = active_media_application_bundles(&saw_unresolved);
+  bool printed = false;
+  for (NSString *bundle in bundles) {
+    for (NSRunningApplication *application in
+         [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle]) {
+      if (application.terminated || application.processIdentifier <= 0) continue;
+      AXUIElementRef element = AXUIElementCreateApplication(application.processIdentifier);
+      if (element == NULL) continue;
+      AXUIElementSetMessagingTimeout(element, 0.6);
+      MediaAccessibilityState state = {0};
+      collect_media_accessibility_state(element, 0, &state);
+      CFRelease(element);
+      printf(
+        "bundle=%s pause=%d play=%d audio=%d visited=%u\n",
+        bundle.UTF8String,
+        state.pause_control ? 1 : 0,
+        state.play_control ? 1 : 0,
+        state.audio_playing_control ? 1 : 0,
+        state.visited
+      );
+      release_media_accessibility_state(&state);
+      printed = true;
+    }
+  }
+  if (!printed) printf("bundle=none unresolved=%d\n", saw_unresolved ? 1 : 0);
+  return printed ? 0 : saw_unresolved ? 3 : 2;
+}
+
+static bool supported_media_output_is_running(void) {
+  return active_media_application_bundles(NULL).count > 0;
+}
+
+static SystemMediaPlaybackState supported_media_output_accessibility_state(void) {
+  bool saw_paused = false;
+  bool saw_unresolved = false;
+  NSArray<NSString *> *bundles = active_media_application_bundles(&saw_unresolved);
+  for (NSString *bundle in bundles) {
+    SystemMediaPlaybackState state = media_bundle_accessibility_playback_state(bundle, NULL);
+    if (state == SYSTEM_MEDIA_PLAYBACK_PLAYING) {
+      return state;
+    }
+    if (state == SYSTEM_MEDIA_PLAYBACK_PAUSED) saw_paused = true;
+    else saw_unresolved = true;
+  }
+  return saw_paused && !saw_unresolved
+    ? SYSTEM_MEDIA_PLAYBACK_PAUSED
+    : SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+}
 
 typedef void (*MediaRemoteIsPlayingFunction)(
   dispatch_queue_t queue,
   void (^completion)(Boolean is_playing)
 );
+
+typedef void (*MediaRemoteGetNowPlayingInfoFunction)(
+  dispatch_queue_t queue,
+  void (^completion)(CFDictionaryRef information)
+);
+
+typedef void (*MediaRemoteGetPlaybackStateFunction)(
+  dispatch_queue_t queue,
+  void (^completion)(NSInteger playback_state)
+);
+
+typedef void (*MediaRemoteGetDisplayIDFunction)(
+  dispatch_queue_t queue,
+  void (^completion)(CFStringRef display_identifier)
+);
+
+typedef void (*MediaRemoteRegisterNotificationsFunction)(dispatch_queue_t queue);
+
+static void *media_remote_handle(void) {
+  static void *handle = NULL;
+  static dispatch_once_t once_token;
+  dispatch_once(&once_token, ^{
+    handle = dlopen(
+      "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
+      RTLD_LAZY | RTLD_LOCAL
+    );
+  });
+  return handle;
+}
 
 static MediaRemoteIsPlayingFunction media_remote_is_playing_function(void) {
   static MediaRemoteIsPlayingFunction function = NULL;
@@ -501,10 +904,7 @@ static MediaRemoteIsPlayingFunction media_remote_is_playing_function(void) {
     // macOS shared cache but has no public SDK import library. If Apple moves
     // or removes the symbol, voice input must fail closed and leave playback
     // untouched instead of falling back to a blind play/pause toggle.
-    void *handle = dlopen(
-      "/System/Library/PrivateFrameworks/MediaRemote.framework/MediaRemote",
-      RTLD_LAZY | RTLD_LOCAL
-    );
+    void *handle = media_remote_handle();
     if (handle == NULL) return;
     void *symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationIsPlaying");
     if (symbol == NULL) return;
@@ -513,7 +913,284 @@ static MediaRemoteIsPlayingFunction media_remote_is_playing_function(void) {
   return function;
 }
 
+static MediaRemoteGetNowPlayingInfoFunction media_remote_now_playing_info_function(void) {
+  static MediaRemoteGetNowPlayingInfoFunction function = NULL;
+  static dispatch_once_t once_token;
+  dispatch_once(&once_token, ^{
+    void *handle = media_remote_handle();
+    if (handle == NULL) return;
+    void *symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingInfo");
+    if (symbol == NULL) return;
+    memcpy(&function, &symbol, sizeof(function));
+  });
+  return function;
+}
+
+static MediaRemoteGetPlaybackStateFunction media_remote_playback_state_function(void) {
+  static MediaRemoteGetPlaybackStateFunction function = NULL;
+  static dispatch_once_t once_token;
+  dispatch_once(&once_token, ^{
+    void *handle = media_remote_handle();
+    if (handle == NULL) return;
+    void *symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationPlaybackState");
+    if (symbol == NULL) return;
+    memcpy(&function, &symbol, sizeof(function));
+  });
+  return function;
+}
+
+static MediaRemoteGetDisplayIDFunction media_remote_display_id_function(void) {
+  static MediaRemoteGetDisplayIDFunction function = NULL;
+  static dispatch_once_t once_token;
+  dispatch_once(&once_token, ^{
+    void *handle = media_remote_handle();
+    if (handle == NULL) return;
+    void *symbol = dlsym(handle, "MRMediaRemoteGetNowPlayingApplicationDisplayID");
+    if (symbol == NULL) return;
+    memcpy(&function, &symbol, sizeof(function));
+  });
+  return function;
+}
+
+static void register_media_remote_notifications(void) {
+  static dispatch_once_t once_token;
+  dispatch_once(&once_token, ^{
+    void *handle = media_remote_handle();
+    if (handle == NULL) return;
+    MediaRemoteRegisterNotificationsFunction function = NULL;
+    void *symbol = dlsym(handle, "MRMediaRemoteRegisterForNowPlayingNotifications");
+    if (symbol == NULL) return;
+    memcpy(&function, &symbol, sizeof(function));
+    if (function != NULL) {
+      function(dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0));
+      usleep(25000);
+    }
+  });
+}
+
+static CFStringRef copy_system_now_playing_bundle_id(void) {
+  MediaRemoteGetDisplayIDFunction function = media_remote_display_id_function();
+  if (function == NULL) return NULL;
+  register_media_remote_notifications();
+  __block CFStringRef bundle_identifier = NULL;
+  dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+  function(
+    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+    ^(CFStringRef display_identifier) {
+      if (display_identifier != NULL
+          && CFGetTypeID(display_identifier) == CFStringGetTypeID()) {
+        bundle_identifier = CFStringCreateCopy(kCFAllocatorDefault, display_identifier);
+      }
+      dispatch_semaphore_signal(completed);
+    }
+  );
+  long timed_out = dispatch_semaphore_wait(
+    completed,
+    dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC)
+  );
+  if (timed_out != 0 && bundle_identifier != NULL) {
+    CFRelease(bundle_identifier);
+    bundle_identifier = NULL;
+  }
+  return bundle_identifier;
+}
+
+static CFStringRef media_remote_string_constant(const char *name) {
+  void *handle = media_remote_handle();
+  if (handle == NULL || name == NULL) return NULL;
+  void *symbol = dlsym(handle, name);
+  return symbol == NULL ? NULL : *(CFStringRef *)symbol;
+}
+
+typedef struct {
+  bool rate_available;
+  double rate;
+  bool default_rate_available;
+  double default_rate;
+  bool elapsed_available;
+  double elapsed;
+  bool timestamp_available;
+  double timestamp;
+} SystemMediaNowPlayingMetrics;
+
+static bool dictionary_number(
+  CFDictionaryRef dictionary,
+  CFStringRef key,
+  double *value
+) {
+  if (dictionary == NULL || key == NULL || value == NULL) return false;
+  CFTypeRef item = CFDictionaryGetValue(dictionary, key);
+  return item != NULL
+    && CFGetTypeID(item) == CFNumberGetTypeID()
+    && CFNumberGetValue((CFNumberRef)item, kCFNumberDoubleType, value);
+}
+
+static SystemMediaNowPlayingMetrics system_media_now_playing_metrics(void) {
+  __block SystemMediaNowPlayingMetrics metrics = {0};
+  MediaRemoteGetNowPlayingInfoFunction function = media_remote_now_playing_info_function();
+  if (function == NULL) return metrics;
+  register_media_remote_notifications();
+
+  CFStringRef rate_key = media_remote_string_constant(
+    "kMRMediaRemoteNowPlayingInfoPlaybackRate"
+  );
+  CFStringRef default_rate_key = media_remote_string_constant(
+    "kMRMediaRemoteNowPlayingInfoDefaultPlaybackRate"
+  );
+  CFStringRef elapsed_key = media_remote_string_constant(
+    "kMRMediaRemoteNowPlayingInfoElapsedTime"
+  );
+  CFStringRef timestamp_key = media_remote_string_constant(
+    "kMRMediaRemoteNowPlayingInfoTimestamp"
+  );
+
+  dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+  function(
+    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+    ^(CFDictionaryRef information) {
+      if (information != NULL && CFGetTypeID(information) == CFDictionaryGetTypeID()) {
+        metrics.rate_available = dictionary_number(information, rate_key, &metrics.rate);
+        metrics.default_rate_available = dictionary_number(
+          information,
+          default_rate_key,
+          &metrics.default_rate
+        );
+        metrics.elapsed_available = dictionary_number(
+          information,
+          elapsed_key,
+          &metrics.elapsed
+        );
+        if (timestamp_key != NULL) {
+          CFTypeRef timestamp = CFDictionaryGetValue(information, timestamp_key);
+          if (timestamp != NULL && CFGetTypeID(timestamp) == CFDateGetTypeID()) {
+            metrics.timestamp = CFDateGetAbsoluteTime((CFDateRef)timestamp);
+            metrics.timestamp_available = true;
+          } else {
+            metrics.timestamp_available = dictionary_number(
+              information,
+              timestamp_key,
+              &metrics.timestamp
+            );
+          }
+        }
+      }
+      dispatch_semaphore_signal(completed);
+    }
+  );
+  long timed_out = dispatch_semaphore_wait(
+    completed,
+    dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC)
+  );
+  if (timed_out != 0) memset(&metrics, 0, sizeof(metrics));
+  return metrics;
+}
+
+static NSInteger system_media_remote_playback_code(void) {
+  MediaRemoteGetPlaybackStateFunction function = media_remote_playback_state_function();
+  if (function == NULL) return -1;
+  register_media_remote_notifications();
+  __block NSInteger playback_state = -1;
+  dispatch_semaphore_t completed = dispatch_semaphore_create(0);
+  function(
+    dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
+    ^(NSInteger state) {
+      playback_state = state;
+      dispatch_semaphore_signal(completed);
+    }
+  );
+  long timed_out = dispatch_semaphore_wait(
+    completed,
+    dispatch_time(DISPATCH_TIME_NOW, 350 * NSEC_PER_MSEC)
+  );
+  return timed_out == 0 ? playback_state : -1;
+}
+
+static SystemMediaPlaybackState playback_state_from_remote_code(NSInteger playback_state) {
+  // MRPlaybackState: 0 unknown, 1 playing, 2 paused, 3 stopped. Seeking states
+  // continue playback and are conservatively treated as playing.
+  if (playback_state == 1 || playback_state == 5 || playback_state == 6) {
+    return SYSTEM_MEDIA_PLAYBACK_PLAYING;
+  }
+  if (playback_state == 2 || playback_state == 3 || playback_state == 4) {
+    return SYSTEM_MEDIA_PLAYBACK_PAUSED;
+  }
+  return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+}
+
+static SystemMediaPlaybackState playback_state_from_observations(
+  bool rate_available,
+  double playback_rate,
+  bool playing_available,
+  bool is_playing
+) {
+  // Recent macOS releases can leave the legacy IsPlaying callback pinned to
+  // false even while the active player is audibly advancing. The Now Playing
+  // playback rate is the stronger signal and is also zero for a genuinely
+  // paused player. Keep the legacy callback only as a compatibility fallback.
+  if (rate_available) {
+    return playback_rate > 0.0001
+      ? SYSTEM_MEDIA_PLAYBACK_PLAYING
+      : SYSTEM_MEDIA_PLAYBACK_PAUSED;
+  }
+  if (playing_available) {
+    return is_playing
+      ? SYSTEM_MEDIA_PLAYBACK_PLAYING
+      : SYSTEM_MEDIA_PLAYBACK_PAUSED;
+  }
+  return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+}
+
+static SystemMediaPlaybackState system_media_playback_rate_state(void) {
+  SystemMediaNowPlayingMetrics metrics = system_media_now_playing_metrics();
+  return playback_state_from_observations(
+    metrics.rate_available,
+    metrics.rate,
+    false,
+    false
+  );
+}
+
+static int print_system_media_playback_debug(void) {
+  CFStringRef bundle_identifier = copy_system_now_playing_bundle_id();
+  char bundle[256] = "unknown";
+  if (bundle_identifier != NULL) {
+    CFStringGetCString(bundle_identifier, bundle, sizeof(bundle), kCFStringEncodingUTF8);
+    CFRelease(bundle_identifier);
+  }
+  NSInteger playback_code = system_media_remote_playback_code();
+  SystemMediaNowPlayingMetrics metrics = system_media_now_playing_metrics();
+  printf(
+    "bundle=%s playback_code=%ld rate_available=%d rate=%.3f "
+    "default_rate_available=%d default_rate=%.3f "
+    "elapsed_available=%d elapsed=%.3f timestamp_available=%d timestamp=%.3f\n",
+    bundle,
+    (long)playback_code,
+    metrics.rate_available ? 1 : 0,
+    metrics.rate,
+    metrics.default_rate_available ? 1 : 0,
+    metrics.default_rate,
+    metrics.elapsed_available ? 1 : 0,
+    metrics.elapsed,
+    metrics.timestamp_available ? 1 : 0,
+    metrics.timestamp
+  );
+  return metrics.rate_available || metrics.elapsed_available ? 0 : 2;
+}
+
 static SystemMediaPlaybackState system_media_playback_state(void) {
+  SystemMediaPlaybackState output_accessibility_state =
+    supported_media_output_accessibility_state();
+  if (output_accessibility_state != SYSTEM_MEDIA_PLAYBACK_UNKNOWN) {
+    return output_accessibility_state;
+  }
+  SystemMediaPlaybackState accessibility_state = system_media_accessibility_playback_state();
+  if (accessibility_state != SYSTEM_MEDIA_PLAYBACK_UNKNOWN) return accessibility_state;
+  SystemMediaPlaybackState remote_state = playback_state_from_remote_code(
+    system_media_remote_playback_code()
+  );
+  if (remote_state != SYSTEM_MEDIA_PLAYBACK_UNKNOWN) return remote_state;
+  SystemMediaPlaybackState rate_state = system_media_playback_rate_state();
+  if (rate_state != SYSTEM_MEDIA_PLAYBACK_UNKNOWN) return rate_state;
   MediaRemoteIsPlayingFunction function = media_remote_is_playing_function();
   if (function == NULL) return SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
 
@@ -522,9 +1199,7 @@ static SystemMediaPlaybackState system_media_playback_state(void) {
   function(
     dispatch_get_global_queue(QOS_CLASS_USER_INITIATED, 0),
     ^(Boolean is_playing) {
-      state = is_playing
-        ? SYSTEM_MEDIA_PLAYBACK_PLAYING
-        : SYSTEM_MEDIA_PLAYBACK_PAUSED;
+      state = playback_state_from_observations(false, 0, true, is_playing);
       dispatch_semaphore_signal(completed);
     }
   );
@@ -541,6 +1216,67 @@ static bool should_pause_media(
 ) {
   return supported_output_running
     && playback_state == SYSTEM_MEDIA_PLAYBACK_PLAYING;
+}
+
+static NSURL *media_pause_lease_url(void) {
+  NSURL *application_support = [NSFileManager.defaultManager
+    URLsForDirectory:NSApplicationSupportDirectory
+    inDomains:NSUserDomainMask
+  ].firstObject;
+  if (application_support == nil) return nil;
+  NSURL *directory = [application_support URLByAppendingPathComponent:@"ThreadDeck" isDirectory:YES];
+  [NSFileManager.defaultManager
+    createDirectoryAtURL:directory
+    withIntermediateDirectories:YES
+    attributes:nil
+    error:nil
+  ];
+  return [directory URLByAppendingPathComponent:@"media-pause-lease-v1.plist"];
+}
+
+static void clear_media_pause_lease(void) {
+  NSURL *url = media_pause_lease_url();
+  if (url != nil) [NSFileManager.defaultManager removeItemAtURL:url error:nil];
+}
+
+static bool write_media_pause_lease(NSArray<NSString *> *bundles) {
+  if (bundles.count == 0) {
+    clear_media_pause_lease();
+    return false;
+  }
+  NSURL *url = media_pause_lease_url();
+  if (url == nil) return false;
+  NSDictionary *payload = @{
+    @"version": @1,
+    @"pausedAt": @([NSDate.date timeIntervalSince1970]),
+    @"bundles": bundles
+  };
+  return [payload writeToURL:url atomically:YES];
+}
+
+static NSArray<NSString *> *read_media_pause_lease(void) {
+  NSURL *url = media_pause_lease_url();
+  NSDictionary *payload = url == nil ? nil : [NSDictionary dictionaryWithContentsOfURL:url];
+  NSNumber *paused_at = [payload[@"pausedAt"] isKindOfClass:NSNumber.class]
+    ? payload[@"pausedAt"]
+    : nil;
+  NSArray *stored = [payload[@"bundles"] isKindOfClass:NSArray.class]
+    ? payload[@"bundles"]
+    : nil;
+  NSTimeInterval age = paused_at == nil
+    ? DBL_MAX
+    : [NSDate.date timeIntervalSince1970] - paused_at.doubleValue;
+  if (stored == nil || age < 0 || age > 10 * 60) {
+    clear_media_pause_lease();
+    return @[];
+  }
+  NSMutableArray<NSString *> *bundles = [NSMutableArray array];
+  for (id value in stored) {
+    if ([value isKindOfClass:NSString.class] && [value length] > 0) {
+      [bundles addObject:value];
+    }
+  }
+  return bundles;
 }
 
 static int print_system_media_playback_state(void) {
@@ -560,50 +1296,130 @@ static int print_system_media_playback_state(void) {
 }
 
 static int pause_media_if_playing(void) {
-  bool supported_output_running = supported_media_output_is_running();
-  if (!supported_output_running) return 2;
-  SystemMediaPlaybackState playback_state = system_media_playback_state();
-  if (!should_pause_media(supported_output_running, playback_state)) {
-    return playback_state == SYSTEM_MEDIA_PLAYBACK_UNKNOWN ? 3 : 2;
+  clear_media_pause_lease();
+  bool saw_unresolved = false;
+  NSArray<NSString *> *bundles = active_media_application_bundles(&saw_unresolved);
+  if (bundles.count == 0) return saw_unresolved ? 3 : 2;
+
+  NSMutableArray<NSString *> *paused = [NSMutableArray array];
+  bool saw_playing_without_control = false;
+  for (NSString *bundle in bundles) {
+    SystemMediaPlaybackState state = media_bundle_accessibility_playback_state(bundle, NULL);
+    if (state != SYSTEM_MEDIA_PLAYBACK_PLAYING) {
+      if (state == SYSTEM_MEDIA_PLAYBACK_UNKNOWN) saw_unresolved = true;
+      continue;
+    }
+    if (perform_media_accessibility_action(bundle, true)) {
+      [paused addObject:bundle];
+    } else {
+      saw_playing_without_control = true;
+    }
   }
-  // Use the normal system media command instead of freezing a process with
-  // SIGSTOP. Players can drain their audio buffer cleanly, avoiding a click,
-  // and the matching resume command remains independent of screen layout.
-  // Crucially, never treat a merely alive CoreAudio process as proof of
-  // playback: a blind toggle would start media that was already paused.
-  tap_media_key(MEDIA_PLAY_PAUSE);
-  return 0;
+
+  if (paused.count > 0) {
+    return write_media_pause_lease(paused) ? 0 : 3;
+  }
+  if (saw_playing_without_control) {
+    // Fall back to the standard Now Playing command only when no semantic
+    // pause control could be activated. Never combine the blind toggle with a
+    // direct pause, because it could immediately resume the player we stopped.
+    tap_media_key(MEDIA_PLAY_PAUSE);
+    return write_media_pause_lease(@[@"__system_media_session__"]) ? 0 : 3;
+  }
+  return saw_unresolved ? 3 : 2;
+}
+
+static int resume_media_paused_for_voice(void) {
+  NSArray<NSString *> *bundles = read_media_pause_lease();
+  if (bundles.count == 0) return 2;
+  bool failed = false;
+  for (NSString *bundle in bundles) {
+    if ([bundle isEqualToString:@"__system_media_session__"]) {
+      tap_media_key(MEDIA_PLAY_PAUSE);
+      continue;
+    }
+    NSArray<NSRunningApplication *> *applications =
+      [NSRunningApplication runningApplicationsWithBundleIdentifier:bundle];
+    if (applications.count == 0) continue;
+    SystemMediaPlaybackState state = media_bundle_accessibility_playback_state(bundle, NULL);
+    if (state == SYSTEM_MEDIA_PLAYBACK_PLAYING) continue;
+    if (state != SYSTEM_MEDIA_PLAYBACK_PAUSED
+        || !perform_media_accessibility_action(bundle, false)) {
+      failed = true;
+    }
+  }
+  if (!failed) clear_media_pause_lease();
+  return failed ? 3 : 0;
 }
 
 static int media_bundle_selftest(void) {
-  bool direct = pausable_media_bundle(CFSTR("com.apple.Music"));
-  bool helper = pausable_media_bundle(CFSTR("com.google.Chrome.helper"));
-  bool rejects_codex = !pausable_media_bundle(CFSTR("com.openai.codex"));
-  bool rejects_unknown = !pausable_media_bundle(CFSTR("example.unrelated.audio"));
+  bool generic_helper = media_helper_belongs_to_application(
+    @"org.example.Player.audio-helper",
+    @"org.example.Player"
+  );
+  bool unrelated_helper_rejected = !media_helper_belongs_to_application(
+    @"org.example.Other.audio-helper",
+    @"org.example.Player"
+  );
+  bool webkit_parent = [media_parent_bundle_identifier(CFSTR("com.apple.WebKit.GPU"))
+    isEqualToString:@"com.apple.Safari"];
   bool playing_pauses = should_pause_media(true, SYSTEM_MEDIA_PLAYBACK_PLAYING);
   bool paused_stays_paused = !should_pause_media(true, SYSTEM_MEDIA_PLAYBACK_PAUSED);
   bool unknown_fails_closed = !should_pause_media(true, SYSTEM_MEDIA_PLAYBACK_UNKNOWN);
   bool unsupported_stays_untouched = !should_pause_media(false, SYSTEM_MEDIA_PLAYBACK_PLAYING);
+  bool rate_wins_playing = playback_state_from_observations(true, 1.0, true, false)
+    == SYSTEM_MEDIA_PLAYBACK_PLAYING;
+  bool rate_wins_paused = playback_state_from_observations(true, 0.0, true, true)
+    == SYSTEM_MEDIA_PLAYBACK_PAUSED;
+  bool legacy_fallback = playback_state_from_observations(false, 0.0, true, true)
+    == SYSTEM_MEDIA_PLAYBACK_PLAYING;
+  bool remote_playing = playback_state_from_remote_code(1)
+    == SYSTEM_MEDIA_PLAYBACK_PLAYING;
+  bool remote_paused = playback_state_from_remote_code(2)
+    == SYSTEM_MEDIA_PLAYBACK_PAUSED;
+  bool remote_unknown = playback_state_from_remote_code(0)
+    == SYSTEM_MEDIA_PLAYBACK_UNKNOWN;
+  bool youtube_pause = media_action_label(CFSTR("Pause (k)"), true)
+    && media_action_label(CFSTR("일시정지 (k)"), true);
+  bool browser_audio = media_audio_playing_label(CFSTR("Mute tab"))
+    && media_audio_playing_label(CFSTR("이 탭 음소거"));
   printf(
-    "direct=%d helper=%d codex_rejected=%d unknown_rejected=%d "
-    "playing_pauses=%d paused_safe=%d unknown_safe=%d unsupported_safe=%d\n",
-    direct ? 1 : 0,
-    helper ? 1 : 0,
-    rejects_codex ? 1 : 0,
-    rejects_unknown ? 1 : 0,
+    "generic_helper=%d unrelated_rejected=%d webkit_parent=%d "
+    "playing_pauses=%d paused_safe=%d unknown_safe=%d unsupported_safe=%d "
+    "rate_playing=%d rate_paused=%d legacy_fallback=%d "
+    "remote_playing=%d remote_paused=%d remote_unknown=%d "
+    "youtube_pause=%d browser_audio=%d\n",
+    generic_helper ? 1 : 0,
+    unrelated_helper_rejected ? 1 : 0,
+    webkit_parent ? 1 : 0,
     playing_pauses ? 1 : 0,
     paused_stays_paused ? 1 : 0,
     unknown_fails_closed ? 1 : 0,
-    unsupported_stays_untouched ? 1 : 0
+    unsupported_stays_untouched ? 1 : 0,
+    rate_wins_playing ? 1 : 0,
+    rate_wins_paused ? 1 : 0,
+    legacy_fallback ? 1 : 0,
+    remote_playing ? 1 : 0,
+    remote_paused ? 1 : 0,
+    remote_unknown ? 1 : 0,
+    youtube_pause ? 1 : 0,
+    browser_audio ? 1 : 0
   );
-  return direct
-    && helper
-    && rejects_codex
-    && rejects_unknown
+  return generic_helper
+    && unrelated_helper_rejected
+    && webkit_parent
     && playing_pauses
     && paused_stays_paused
     && unknown_fails_closed
     && unsupported_stays_untouched
+    && rate_wins_playing
+    && rate_wins_paused
+    && legacy_fallback
+    && remote_playing
+    && remote_paused
+    && remote_unknown
+    && youtube_pause
+    && browser_audio
     ? 0
     : 1;
 }
@@ -1177,6 +1993,126 @@ static AXUIElementRef copy_codex_application(void) {
     }
   }
   return NULL;
+}
+
+static int permission_exit_code(bool accessibility, bool post_event) {
+  if (!accessibility && !post_event) return 79;
+  if (!accessibility) return 77;
+  if (!post_event) return 78;
+  return 0;
+}
+
+static int print_permission_health(bool request) {
+  bool accessibility = false;
+  bool post_event = false;
+  @autoreleasepool {
+    if (request) {
+      const void *keys[] = { kAXTrustedCheckOptionPrompt };
+      const void *values[] = { kCFBooleanTrue };
+      CFDictionaryRef options = CFDictionaryCreate(
+        kCFAllocatorDefault,
+        keys,
+        values,
+        1,
+        &kCFTypeDictionaryKeyCallBacks,
+        &kCFTypeDictionaryValueCallBacks
+      );
+      accessibility = AXIsProcessTrustedWithOptions(options);
+      CFRelease(options);
+      post_event = CGPreflightPostEventAccess();
+      if (!post_event) post_event = CGRequestPostEventAccess();
+    } else {
+      accessibility = AXIsProcessTrusted();
+      post_event = CGPreflightPostEventAccess();
+    }
+  }
+
+  bool codex_running = false;
+  bool codex_access = false;
+  AXError ax_error = kAXErrorSuccess;
+  AXUIElementRef application = copy_codex_application();
+  if (application != NULL) {
+    codex_running = true;
+    AXUIElementSetMessagingTimeout(application, 0.5);
+    CFTypeRef role_value = NULL;
+    ax_error = AXUIElementCopyAttributeValue(application, kAXRoleAttribute, &role_value);
+    codex_access = ax_error == kAXErrorSuccess
+      && role_value != NULL
+      && CFGetTypeID(role_value) == CFStringGetTypeID();
+    if (role_value != NULL) CFRelease(role_value);
+    CFRelease(application);
+  }
+
+  printf(
+    "accessibility=%d post_event=%d codex_running=%d codex_access=%d ax_error=%d\n",
+    accessibility ? 1 : 0,
+    post_event ? 1 : 0,
+    codex_running ? 1 : 0,
+    codex_access ? 1 : 0,
+    (int)ax_error
+  );
+  int permission_code = permission_exit_code(accessibility, post_event);
+  if (permission_code != 0) return permission_code;
+  return codex_running && !codex_access ? 70 : 0;
+}
+
+static bool command_needs_accessibility(const char *command) {
+  if (strstr(command, "selftest") != NULL) return false;
+  if (strncmp(command, "fast-mode-", strlen("fast-mode-")) == 0) return true;
+  if (strncmp(command, "codex-", strlen("codex-")) == 0
+      && strcmp(command, "codex-wait-frontmost") != 0) return true;
+  return strcmp(command, "focused-text-state") == 0
+    || strcmp(command, "editable-text-state") == 0
+    || strcmp(command, "focused-element-info") == 0
+    || strcmp(command, "editable-element-info") == 0
+    || strcmp(command, "selected-element-info") == 0
+    || strcmp(command, "media-pause-if-playing") == 0
+    || strcmp(command, "media-resume-paused") == 0
+    || strcmp(command, "media-playback-state") == 0
+    || strcmp(command, "media-playback-debug") == 0
+    || strcmp(command, "media-accessibility-state") == 0
+    || strcmp(command, "media-active-debug") == 0;
+}
+
+static bool command_needs_post_event_access(const char *command) {
+  if (strstr(command, "selftest") != NULL) return false;
+  if (strncmp(command, "fast-mode-", strlen("fast-mode-")) == 0) return true;
+  if (strncmp(command, "codex-open-thread", strlen("codex-open-thread")) == 0
+      || strncmp(command, "codex-find-thread", strlen("codex-find-thread")) == 0
+      || strncmp(command, "codex-search-thread", strlen("codex-search-thread")) == 0) return true;
+  return strcmp(command, "voice-down") == 0
+    || strcmp(command, "send") == 0
+    || strcmp(command, "send-command") == 0
+    || strcmp(command, "app-switch") == 0
+    || strcmp(command, "new-thread") == 0
+    || strcmp(command, "side-chat") == 0
+    || strcmp(command, "media-previous") == 0
+    || strcmp(command, "media-rewind") == 0
+    || strcmp(command, "media-pause-if-playing") == 0
+    || strcmp(command, "media-resume-paused") == 0
+    || strcmp(command, "media-play-pause") == 0
+    || strcmp(command, "media-forward") == 0
+    || strcmp(command, "media-mute") == 0
+    || strcmp(command, "media-volume-down") == 0
+    || strcmp(command, "media-volume-up") == 0
+    || strcmp(command, "media-next") == 0;
+}
+
+static int command_permission_gate(const char *command) {
+  bool needs_accessibility = command_needs_accessibility(command);
+  bool needs_post_event = command_needs_post_event_access(command);
+  bool accessibility = !needs_accessibility || AXIsProcessTrusted();
+  bool post_event = !needs_post_event || CGPreflightPostEventAccess();
+  int code = permission_exit_code(accessibility, post_event);
+  if (code != 0) {
+    fprintf(
+      stderr,
+      "permission_denied accessibility=%d post_event=%d\n",
+      accessibility ? 1 : 0,
+      post_event ? 1 : 0
+    );
+  }
+  return code;
 }
 
 static bool string_fingerprint(CFTypeRef value, size_t *length, uint64_t *hash) {
@@ -5929,6 +6865,16 @@ static int search_and_open_codex_thread(
 
 int main(int argc, char **argv) {
   if (argc < 2) return 64;
+  if (strcmp(argv[1], "permission-health") == 0) {
+    if (argc != 2) return 64;
+    return print_permission_health(false);
+  }
+  if (strcmp(argv[1], "permission-request") == 0) {
+    if (argc != 2) return 64;
+    return print_permission_health(true);
+  }
+  int permission_gate = command_permission_gate(argv[1]);
+  if (permission_gate != 0) return permission_gate;
   if (strcmp(argv[1], "fast-mode-set") == 0) {
     if (argc != 3) return 64;
     if (strcmp(argv[2], "on") == 0) {
@@ -6065,6 +7011,9 @@ int main(int argc, char **argv) {
     return restore_codex_composer_after_fast_mode() ? 0 : 1;
   }
   if (strcmp(argv[1], "media-playback-state") == 0) return print_system_media_playback_state();
+  if (strcmp(argv[1], "media-playback-debug") == 0) return print_system_media_playback_debug();
+  if (strcmp(argv[1], "media-accessibility-state") == 0) return print_media_accessibility_state();
+  if (strcmp(argv[1], "media-active-debug") == 0) return print_active_media_accessibility_state();
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) return voice_up() ? 0 : 1;
   else if (strcmp(argv[1], "send") == 0) tap_key(KEY_RETURN, 0);
@@ -6075,6 +7024,7 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "media-previous") == 0) tap_media_key(MEDIA_PREVIOUS);
   else if (strcmp(argv[1], "media-rewind") == 0) tap_media_key(MEDIA_REWIND);
   else if (strcmp(argv[1], "media-pause-if-playing") == 0) return pause_media_if_playing();
+  else if (strcmp(argv[1], "media-resume-paused") == 0) return resume_media_paused_for_voice();
   else if (strcmp(argv[1], "media-play-pause") == 0) tap_media_key(MEDIA_PLAY_PAUSE);
   else if (strcmp(argv[1], "media-forward") == 0) tap_media_key(MEDIA_FAST_FORWARD);
   else if (strcmp(argv[1], "media-mute") == 0) tap_media_key(MEDIA_MUTE);

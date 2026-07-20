@@ -18,7 +18,15 @@ The Neo profile is installed with the plugin but is not forced over your current
 
 ## No shortcut, media, or remote-switch action works
 
-This usually means Stream Deck does not have Accessibility permission. Remove and re-add Stream Deck in the Accessibility list if necessary, then quit and reopen the app. The plugin reports **Accessibility** on keys when the native helper is blocked.
+ThreadDeck checks three layers independently at startup and every 30 seconds:
+
+- **`권한 필요`** — Stream Deck lacks macOS Accessibility authorization;
+- **`입력 권한`** — macOS is discarding synthesized key events even if Accessibility appears enabled;
+- **`Codex 권한`** — both preflights pass, but two consecutive read-only Codex AX probes fail;
+- **`Codex 점검` / `입력 점검`** — permissions pass, but the corresponding real operation failed twice within 30 seconds;
+- **`미디어 점검`** — an active media owner was found, but its state or pause command could not be confirmed.
+
+For either missing permission, ThreadDeck invokes the official macOS request at most once per ten minutes and keeps the warning visible. It rechecks automatically and shows the Stream Deck success acknowledgement when access recovers. If a permission switch already looks enabled but `Codex 권한` remains, remove and re-add Stream Deck in the Accessibility list, then quit and reopen Stream Deck. A `점검` warning instead points to a Codex UI or shortcut compatibility problem that should be reported with the current versions.
 
 ## Task-key hold does not start recording
 
@@ -35,7 +43,7 @@ The keyboard layout can stay Korean or another non-Latin input source. ThreadDec
 
 That is the intended behavior. The microphone is a review-first push-to-talk key: press to record immediately, hold while speaking, and release to leave the transcript in the Codex composer. Use the Send key afterward, or hold a task key when you want automatic submission.
 
-If a supported media app is actively producing audio, ThreadDeck sends the normal macOS play/pause command asynchronously and sends the matching resume only after the final held voice key is released. It no longer freezes media processes. A browser's currently active media session can still represent more than one tab.
+ThreadDeck does not use a media-app allowlist. It resolves each active Core Audio process to its GUI owner, activates only a visible semantic pause/play control it can verify, and uses the normal macOS media command only as a conservative fallback. The exact app bundles it paused are kept in a ten-minute local lease so release resumes only those apps after the final voice key is released. Apple Music, Chrome YouTube, and Safari YouTube are physically tested. It never freezes a process or stores a PID, title, URL, or media text. A browser session can still represent more than one tab. If `미디어 점검` remains visible, bring the playing tab or app forward once and verify Stream Deck Accessibility permission.
 
 ## The Send key uses the wrong shortcut
 

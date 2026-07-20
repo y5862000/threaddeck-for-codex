@@ -55,7 +55,7 @@ The overview and ThreadDeck gesture demos below are generated from the plugin's 
 1. Download `com.yechan.threaddeck.streamDeckPlugin` from [Releases](https://github.com/y5862000/threaddeck-for-codex/releases). Beta builds are marked as pre-releases.
 2. Double-click the file and approve installation in Stream Deck.
 3. The **ThreadDeck for Codex** profile is installed with the plugin but intentionally does not replace your current profile. Select it from the profile selector at the top of the Stream Deck app.
-4. Open **System Settings → Privacy & Security → Accessibility** and allow **Stream Deck**, then quit and reopen Stream Deck completely.
+4. Open **System Settings → Privacy & Security → Accessibility** and allow **Stream Deck**, then quit and reopen Stream Deck completely. ThreadDeck also checks macOS event-posting access; if either permission is missing, it invokes the official system request and marks the visible keys until recovery.
 5. Allow microphone access when Codex asks. ThreadDeck does not require Screen Recording or Full Disk Access.
 6. In **Codex → Settings → Keyboard Shortcuts**, confirm the three bindings below, then test a task key and the microphone key.
 
@@ -96,7 +96,7 @@ The Dashboard's Current Task key follows the task selected in Codex's active win
 
 ![Task key hold-to-talk sequence: hold, speak, release, transcribe, submit, and verify](docs/media/task-hold-to-talk.gif)
 
-Tap a task key to open it. Hold for at least **0.55 seconds** and wait for `말하는 중` (speaking) before talking; a slow remote switch first shows `전환 준비` while the exact task and composer are verified. Releasing stops dictation; ThreadDeck waits for a stable transcript, activates Codex's visible Send control, and only shows `전송 완료` after the composer reset is confirmed. Supported active media is paused and resumed with the normal macOS media command. The selected task card shows every stage. A task switch and composer activation use accessibility focus plus keyboard activation, so the pointer does not move.
+Tap a task key to open it. Hold for at least **0.55 seconds** and wait for `말하는 중` (speaking) before talking; a slow remote switch first shows `전환 준비` while the exact task and composer are verified. Releasing stops dictation; ThreadDeck waits for a stable transcript, activates Codex's visible Send control, and only shows `전송 완료` after the composer reset is confirmed. ThreadDeck discovers the GUI owner of active Core Audio output, activates only a semantic pause control it can verify, and falls back to the normal macOS media command when needed. The selected task card shows every stage. A task switch and composer activation use accessibility focus plus keyboard activation, so the pointer does not move.
 
 ### Dedicated microphone: dictate a draft, do not send it
 
@@ -178,6 +178,7 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 | `~/.codex` and Codex Desktop logs | Read-only | User task titles, pins, cached remote summaries, lifecycle, goal status and accumulated time, activity, timing, service metadata, and temporary Side Chat lifecycle |
 | `~/Library/Application Support/ThreadDeck/remote-goals-v1.json` | Local read/write | Last observed remote goal status and numeric time for at most seven days; no objective, title, or conversation text |
 | `~/Library/Application Support/ThreadDeck/unread-completions-v1.json` | Local read/write | Task UUID and numeric completion/notice timestamps for unviewed completion cues; no title or conversation text |
+| `~/Library/Application Support/ThreadDeck/media-pause-lease-v1.plist` | Temporary local read/write | Bundle identifiers of media apps paused by the current voice hold; expires after ten minutes and contains no title, URL, PID, or media text |
 | CodexBar CLI | Optional child process | Weekly remaining quota only; CodexBar has its own provider behavior |
 | Stream Deck plugin socket | Localhost | Receive key events and send rendered key images |
 | macOS Accessibility and Core Audio | Local system APIs | Keyboard/media actions, focused-composer checks, fixed goal status/time labels, queue counts, remote selection, and push-to-talk audio handling |
@@ -188,7 +189,8 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 
 | Symptom | First check |
 |---|---|
-| No key actions work | Re-enable Stream Deck under Accessibility, then quit and reopen Stream Deck completely |
+| No key actions work | Follow the key warning: `권한 필요` means Accessibility, `입력 권한` means event posting, `Codex 점검` means confirmed Codex-operation failures, and `미디어 점검` means active playback could not be safely controlled. ThreadDeck rechecks permissions every 30 seconds and clears operation warnings after a verified recovery. |
+| Music or browser audio keeps playing during dictation | Update to the latest build. ThreadDeck now resolves any active Core Audio process to its GUI owner and uses verified semantic controls; Apple Music plus Chrome and Safari YouTube were physically tested. |
 | Korean input source blocks dictation | Confirm Codex Start dictation is `⌃⇧D`; ThreadDeck sends a Latin `D` independently of the active layout |
 | Microphone release does not send | This is expected for the dedicated microphone; it leaves a draft. Use a task-key hold for auto-submit or press Send afterward |
 | Task-key hold does not record | Hold past 0.55 s until the speaking state appears; keep Codex available, grant microphone permission, and check `⌃⇧D` |
@@ -228,7 +230,7 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 - Task and Side Chat detection depend on private Codex file and log formats and can lag behind a Codex release.
 - Queue counts are observed from the currently open task; Korean and English accessibility labels are recognized.
 - Shortcut actions currently assume the Codex bindings listed above.
-- Supported active media is paused with the normal macOS media command during push-to-talk and resumed only after the final held voice key is released. A browser's media session can still affect more than one tab.
+- Active media is discovered from Core Audio rather than an app allowlist. ThreadDeck uses a verified semantic pause/play control when available, falls back to the normal macOS media command conservatively, and resumes only apps it paused after the final voice key is released. A browser session can still represent more than one tab.
 - Configurable shortcuts and additional Stream Deck models are planned for later betas.
 
 ## Project documents
