@@ -48,7 +48,18 @@ function permissionIssueLabel(issue) {
   return t(`permission.${issue}`, t("permission.unknown", "Check setup"));
 }
 
+function bridgeFailureStaysLocal(command) {
+  // Effort selection can fail because a particular Codex model picker has
+  // changed shape or does not expose the requested option. That is a local
+  // control failure, not evidence that every ThreadDeck input action lost
+  // permission. Real Accessibility / event-posting failures are classified
+  // from permission-health (or native exit codes 77-79) before this helper is
+  // consulted.
+  return String(command ?? "").startsWith("reasoning-effort-");
+}
+
 module.exports = {
+  bridgeFailureStaysLocal,
   parsePermissionHealth,
   permissionIssueForHealth,
   permissionIssueLabel

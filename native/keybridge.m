@@ -4429,6 +4429,41 @@ static void consider_codex_reasoning_control(
   }
 }
 
+static AXUIElementRef copy_codex_reasoning_pressable_ancestor(
+  AXUIElementRef element
+) {
+  if (element == NULL) return NULL;
+  AXUIElementRef current = (AXUIElementRef)CFRetain(element);
+  for (unsigned depth = 0; depth < 6 && current != NULL; depth += 1) {
+    // Electron/Chromium has exposed this exact row as AXButton, AXMenuItem,
+    // AXGroup, and even a pressable static child across Codex builds. The
+    // fixed short `Advanced` vocabulary plus popup geometry/trigger anchoring
+    // make the press action trustworthy; requiring a particular role does
+    // not, and would strand the compact-slider layout shown by Codex.
+    if (codex_accessibility_element_supports_press(current)) {
+      return current;
+    }
+
+    CFTypeRef parent_value = NULL;
+    AXError error = AXUIElementCopyAttributeValue(
+      current,
+      kAXParentAttribute,
+      &parent_value
+    );
+    CFRelease(current);
+    current = NULL;
+    if (error != kAXErrorSuccess
+        || parent_value == NULL
+        || CFGetTypeID(parent_value) != AXUIElementGetTypeID()) {
+      if (parent_value != NULL) CFRelease(parent_value);
+      break;
+    }
+    current = (AXUIElementRef)parent_value;
+  }
+  if (current != NULL) CFRelease(current);
+  return NULL;
+}
+
 static void consider_codex_reasoning_option(
   CodexFastModeScan *scan,
   AXUIElementRef element,
@@ -4557,12 +4592,8 @@ static void collect_codex_fast_mode_controls(
   for (size_t index = 0; index < sizeof(text_indices) / sizeof(text_indices[0]); index += 1) {
     CFTypeRef text_value = CFArrayGetValueAtIndex(values, text_indices[index]);
     if (text_value != NULL && CFGetTypeID(text_value) == CFStringGetTypeID()) {
-      NSString *normalized = [[(__bridge NSString *)text_value lowercaseString]
-        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
-      advanced_reasoning_control |= [normalized isEqualToString:@"advanced"]
-        || [normalized isEqualToString:@"advanced settings"]
-        || [normalized isEqualToString:@"고급 설정"]
-        || [normalized isEqualToString:@"고급 옵션"];
+      advanced_reasoning_control |=
+        accessibility_string_is_advanced_reasoning_label(text_value);
     }
     merge_codex_fast_signals(
       &signals,
@@ -4710,6 +4741,52 @@ static void collect_codex_fast_mode_controls(
     consider_codex_reasoning_slider(
       scan, element, score, position, size, is_reasoning_track
     );
+  }
+
+  if (scan->allow_popup_options && advanced_reasoning_control
+      && plausible_option && !supports_press) {
+    // Chromium can expose the fixed `Advanced` label as a static child while
+    // its enclosing menu item carries the press action but no text. Walk only
+    // that label's short parent chain and retain the first exact press target;
+    // the normal composer/popover geometry checks below still reject anything
+    // that is not anchored to the intelligence trigger.
+    AXUIElementRef advanced_target =
+      copy_codex_reasoning_pressable_ancestor(element);
+    if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+      printf(
+        "reasoning_stage=advanced_label target=%d x=%.0f y=%.0f w=%.0f h=%.0f\n",
+        advanced_target != NULL ? 1 : 0,
+        position.x - scan->window_origin.x,
+        position.y - scan->window_origin.y,
+        size.width,
+        size.height
+      );
+    }
+    if (advanced_target != NULL) {
+      CGPoint advanced_position = CGPointZero;
+      CGSize advanced_size = CGSizeZero;
+      bool advanced_geometry = copy_element_position(
+        advanced_target,
+        &advanced_position
+      ) && copy_element_size(advanced_target, &advanced_size)
+        && codex_fast_option_geometry_is_plausible(
+          advanced_position,
+          advanced_size,
+          scan->window_origin,
+          scan->window_size
+        );
+      if (advanced_geometry) {
+        consider_codex_reasoning_control(
+          scan,
+          advanced_target,
+          820,
+          advanced_position,
+          advanced_size,
+          true
+        );
+      }
+      CFRelease(advanced_target);
+    }
   }
 
   if (scan->allow_popup_options && supports_press && plausible_option
@@ -5447,41 +5524,6 @@ static const char *codex_reasoning_direction_name(
   return direction == CODEX_REASONING_DIRECTION_DOWN ? "down" : "up";
 }
 
-static bool copy_codex_numeric_attribute(
-  AXUIElementRef element,
-  CFStringRef attribute,
-  double *number_out
-) {
-  if (element == NULL || attribute == NULL || number_out == NULL) return false;
-  CFTypeRef value = NULL;
-  AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
-  bool copied = error == kAXErrorSuccess && value != NULL
-    && CFGetTypeID(value) == CFNumberGetTypeID()
-    && CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, number_out);
-  if (value != NULL) CFRelease(value);
-  return copied;
-}
-
-static bool copy_codex_reasoning_slider_range(
-  AXUIElementRef slider,
-  double *value_out,
-  double *minimum_out,
-  double *maximum_out
-) {
-  double value = 0;
-  double minimum = 0;
-  double maximum = 0;
-  bool copied = copy_codex_numeric_attribute(slider, kAXValueAttribute, &value)
-    && copy_codex_numeric_attribute(slider, kAXMinValueAttribute, &minimum)
-    && copy_codex_numeric_attribute(slider, kAXMaxValueAttribute, &maximum)
-    && maximum > minimum;
-  if (!copied) return false;
-  if (value_out != NULL) *value_out = value;
-  if (minimum_out != NULL) *minimum_out = minimum;
-  if (maximum_out != NULL) *maximum_out = maximum;
-  return true;
-}
-
 static bool codex_reasoning_effort_is_minimum(const char *effort) {
   return effort != NULL && (
     strcmp(effort, "none") == 0
@@ -5521,87 +5563,60 @@ static CodexReasoningDirection codex_reasoning_direction_for_boundary(
   return requested;
 }
 
-enum { CODEX_VISIBLE_REASONING_EFFORT_COUNT = 6 };
-
-static int codex_visible_reasoning_effort_index(const char *effort) {
-  if (effort == NULL) return -1;
-  const char *ordered[CODEX_VISIBLE_REASONING_EFFORT_COUNT] = {
-    "low", "medium", "high", "xhigh", "max", "ultra"
-  };
-  for (int index = 0; index < CODEX_VISIBLE_REASONING_EFFORT_COUNT; index += 1) {
-    if (strcmp(effort, ordered[index]) == 0) return index;
-  }
-  return strcmp(effort, "none") == 0 || strcmp(effort, "minimal") == 0 ? 0 : -1;
-}
-
 static bool codex_reasoning_effort_is_visible_target(const char *effort) {
   int rank = codex_reasoning_effort_rank(effort);
   return rank >= codex_reasoning_effort_rank("low")
     && rank <= codex_reasoning_effort_rank("ultra");
 }
 
-static int codex_reasoning_track_target_index(
-  const char *effort,
-  CodexReasoningDirection *direction_in_out
+static bool codex_reasoning_scan_has_slider(
+  const CodexFastModeScan *scan
 ) {
-  if (direction_in_out == NULL) return -1;
-  int current = codex_visible_reasoning_effort_index(effort);
-  if (current < 0) return -1;
-  CodexReasoningDirection direction = *direction_in_out;
-  if (direction == CODEX_REASONING_DIRECTION_UP
-      && current >= CODEX_VISIBLE_REASONING_EFFORT_COUNT - 1) {
-    direction = CODEX_REASONING_DIRECTION_DOWN;
-  } else if (direction == CODEX_REASONING_DIRECTION_DOWN && current <= 0) {
-    direction = CODEX_REASONING_DIRECTION_UP;
-  }
-  int target = current + (direction == CODEX_REASONING_DIRECTION_UP ? 1 : -1);
-  if (target < 0 || target >= CODEX_VISIBLE_REASONING_EFFORT_COUNT) return -1;
-  *direction_in_out = direction;
-  return target;
+  // Any anchored compact-slider evidence requires the exact Advanced route.
+  // Uniqueness mattered only when ThreadDeck manipulated the slider itself,
+  // which it deliberately no longer does.
+  return scan != NULL && scan->reasoning_slider != NULL
+    && scan->reasoning_slider_count >= 1;
 }
 
-static bool step_codex_reasoning_track(
-  AXUIElementRef track,
-  CGSize size,
-  CodexReasoningDirection direction
+static bool codex_reasoning_options_route_allowed(
+  bool has_slider,
+  bool has_control,
+  bool control_is_advanced
 ) {
-  if (!codex_is_frontmost()
-      || track == NULL
-      || size.width < 72 || size.width > 520 || size.height <= 0 || size.height > 4) {
-    return false;
-  }
-  // Chromium may visually render this as a slider while exposing only an
-  // anonymous AXGroup. Setting AXFocused still routes an ordinary arrow key
-  // to the underlying range widget and preserves the user's pointer.
-  bool focused = focus_accessibility_element(track);
-  AXUIElementRef parent = NULL;
-  if (!focused) {
-    CFTypeRef parent_value = NULL;
-    if (AXUIElementCopyAttributeValue(track, kAXParentAttribute, &parent_value)
-          == kAXErrorSuccess
-        && parent_value != NULL
-        && CFGetTypeID(parent_value) == AXUIElementGetTypeID()) {
-      parent = (AXUIElementRef)parent_value;
-      focused = focus_accessibility_element(parent);
-    } else if (parent_value != NULL) {
-      CFRelease(parent_value);
-    }
-  }
-  // Never guess the next keyboard-focus target. In the current Codex layout
-  // the microphone follows the intelligence trigger, so a Tab-based fallback
-  // can route the subsequent key event into dictation. Only manipulate a
-  // track that Accessibility explicitly focused; otherwise fail closed and
-  // let the caller report that the control could not be changed.
-  if (!focused) {
-    if (parent != NULL) CFRelease(parent);
-    return false;
-  }
-  usleep(12000);
-  tap_key(
-    direction == CODEX_REASONING_DIRECTION_DOWN ? KEY_LEFT : KEY_RIGHT,
-    0
+  return has_control && (!has_slider || control_is_advanced);
+}
+
+static bool codex_reasoning_scan_can_open_options(
+  const CodexFastModeScan *scan
+) {
+  if (scan == NULL) return false;
+  bool has_control = scan->reasoning_control != NULL
+    && scan->reasoning_control_count == 1;
+  // A compact slider deliberately exposes only a subset of the model's
+  // levels. Never synthesize slider notches. Its exact Advanced action is the
+  // sole route to the complete Light..Ultra option list.
+  return codex_reasoning_options_route_allowed(
+    codex_reasoning_scan_has_slider(scan),
+    has_control,
+    scan->reasoning_control_is_advanced
   );
-  if (parent != NULL) CFRelease(parent);
+}
+
+static bool open_codex_reasoning_options(
+  const CodexFastModeScan *scan
+) {
+  if (!codex_reasoning_scan_can_open_options(scan)) return false;
+  if (scan->reasoning_control_is_advanced) {
+    // Prefer the control's native press action. It changes the compact slider
+    // into Codex's complete Effort list without leaving keyboard focus on the
+    // slider or the adjacent microphone.
+    return activate_accessibility_element_with_return(scan->reasoning_control)
+      || perform_codex_accessibility_press(scan->reasoning_control);
+  }
+  if (!focus_accessibility_element(scan->reasoning_control)) return false;
+  usleep(12000);
+  tap_key(KEY_RIGHT, 0);
   return true;
 }
 
@@ -5673,23 +5688,19 @@ static bool copy_codex_reasoning_control_scan(
       if (have_last) release_codex_fast_mode_scan(&last);
       last = candidate;
       have_last = true;
-      if ((last.reasoning_slider != NULL
-            && last.reasoning_slider_count == 1)
-          || (last.reasoning_control != NULL
-            && last.reasoning_control_count == 1)) break;
+      // A slider can paint before its Advanced action appears in Chromium's
+      // Accessibility tree. Keep polling until the complete-list route is
+      // available instead of accepting the first partial slider frame.
+      if (codex_reasoning_scan_can_open_options(&last)) break;
     }
     usleep(35000);
   } while (CFAbsoluteTimeGetCurrent() < deadline);
 
-  bool has_slider = have_last && last.reasoning_slider != NULL
-    && last.reasoning_slider_count == 1;
-  bool has_control = have_last && last.reasoning_control != NULL
-    && last.reasoning_control_count == 1;
   // Do not retry by tabbing away from the verified intelligence trigger and
   // pressing Return. The next focusable control can be Codex's microphone.
-  // A missing anchored slider/Advanced control is an ordinary fail-closed
+  // A missing anchored Advanced/option control is an ordinary fail-closed
   // result; no unrelated composer control may be activated as a fallback.
-  if (!have_last || (!has_slider && !has_control)) {
+  if (!have_last || !codex_reasoning_scan_can_open_options(&last)) {
     if (have_last) release_codex_fast_mode_scan(&last);
     if (opened_here) close_codex_intelligence_popover_if_opened(trigger);
     CFRelease(trigger);
@@ -5729,14 +5740,58 @@ static const char *wait_for_codex_reasoning_effort_change(
   return last;
 }
 
-static unsigned codex_reasoning_option_count(const CodexFastModeScan *scan) {
+static unsigned codex_reasoning_option_ranks(
+  const CodexFastModeScan *scan,
+  int *ranks,
+  unsigned capacity
+) {
   if (scan == NULL) return 0;
   unsigned count = 0;
   for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
-    if (scan->reasoning_options[index] != NULL
-        && scan->reasoning_option_counts[index] == 1) count += 1;
+    const char *effort = codex_reasoning_effort_at_rank(index);
+    if (!codex_reasoning_effort_is_visible_target(effort)
+        || scan->reasoning_options[index] == NULL
+        || scan->reasoning_option_counts[index] != 1) continue;
+    if (ranks != NULL && count < capacity) ranks[count] = index;
+    count += 1;
   }
   return count;
+}
+
+static unsigned codex_reasoning_option_count(const CodexFastModeScan *scan) {
+  return codex_reasoning_option_ranks(scan, NULL, 0);
+}
+
+static void codex_reasoning_option_csv(
+  const CodexFastModeScan *scan,
+  char *buffer,
+  size_t capacity
+) {
+  if (buffer == NULL || capacity == 0) return;
+  buffer[0] = '\0';
+  int ranks[CODEX_REASONING_EFFORT_COUNT] = { 0 };
+  unsigned count = codex_reasoning_option_ranks(
+    scan,
+    ranks,
+    CODEX_REASONING_EFFORT_COUNT
+  );
+  size_t offset = 0;
+  for (unsigned index = 0; index < count && offset < capacity; index += 1) {
+    const char *effort = codex_reasoning_effort_at_rank(ranks[index]);
+    int written = snprintf(
+      buffer + offset,
+      capacity - offset,
+      "%s%s",
+      index == 0 ? "" : ",",
+      effort != NULL ? effort : ""
+    );
+    if (written < 0 || (size_t)written >= capacity - offset) {
+      buffer[capacity - 1] = '\0';
+      return;
+    }
+    offset += (size_t)written;
+  }
+  if (buffer[0] == '\0') snprintf(buffer, capacity, "unknown");
 }
 
 static bool copy_codex_reasoning_options_scan(CodexFastModeScan *scan) {
@@ -5762,76 +5817,64 @@ static bool copy_codex_reasoning_options_scan(CodexFastModeScan *scan) {
   return true;
 }
 
+static int codex_reasoning_ping_pong_target(
+  const int *ranks,
+  unsigned count,
+  int current_rank,
+  CodexReasoningDirection *direction_in_out,
+  unsigned step_count,
+  bool *at_minimum_out,
+  bool *at_maximum_out
+) {
+  if (ranks == NULL || count < 2 || direction_in_out == NULL
+      || step_count == 0) return -1;
+  int position = -1;
+  for (unsigned index = 0; index < count; index += 1) {
+    if (ranks[index] == current_rank) {
+      position = (int)index;
+      break;
+    }
+  }
+  if (position < 0) return -1;
+  CodexReasoningDirection direction = *direction_in_out;
+  for (unsigned step = 0; step < step_count; step += 1) {
+    if (direction == CODEX_REASONING_DIRECTION_UP
+        && position >= (int)count - 1) {
+      direction = CODEX_REASONING_DIRECTION_DOWN;
+    } else if (direction == CODEX_REASONING_DIRECTION_DOWN && position <= 0) {
+      direction = CODEX_REASONING_DIRECTION_UP;
+    }
+    position += direction == CODEX_REASONING_DIRECTION_UP ? 1 : -1;
+  }
+  *direction_in_out = direction;
+  if (at_minimum_out != NULL) *at_minimum_out = position == 0;
+  if (at_maximum_out != NULL) *at_maximum_out = position == (int)count - 1;
+  return ranks[position];
+}
+
 static int codex_reasoning_target_option(
   const CodexFastModeScan *scan,
   const char *current_effort,
   CodexReasoningDirection *direction_in_out,
+  unsigned step_count,
   bool *at_minimum_out,
   bool *at_maximum_out
 ) {
-  if (scan == NULL || direction_in_out == NULL) return -1;
-  int first = -1;
-  int last = -1;
-  for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
-    if (scan->reasoning_options[index] == NULL
-        || scan->reasoning_option_counts[index] != 1) continue;
-    if (first < 0) first = index;
-    last = index;
-  }
-  if (first < 0 || last <= first) return -1;
-
-  int current = codex_reasoning_effort_rank(current_effort);
-  CodexReasoningDirection direction = *direction_in_out;
-  if (direction == CODEX_REASONING_DIRECTION_UP && current >= last) {
-    direction = CODEX_REASONING_DIRECTION_DOWN;
-  } else if (direction == CODEX_REASONING_DIRECTION_DOWN
-      && current >= 0 && current <= first) {
-    direction = CODEX_REASONING_DIRECTION_UP;
-  }
-
-  int target = -1;
-  if (direction == CODEX_REASONING_DIRECTION_UP) {
-    for (int index = current + 1; index <= last; index += 1) {
-      if (index >= 0 && scan->reasoning_options[index] != NULL
-          && scan->reasoning_option_counts[index] == 1) {
-        target = index;
-        break;
-      }
-    }
-    if (target < 0) {
-      direction = CODEX_REASONING_DIRECTION_DOWN;
-      for (int index = current - 1; index >= first; index -= 1) {
-        if (scan->reasoning_options[index] != NULL
-            && scan->reasoning_option_counts[index] == 1) {
-          target = index;
-          break;
-        }
-      }
-    }
-  } else {
-    for (int index = current - 1; index >= first; index -= 1) {
-      if (scan->reasoning_options[index] != NULL
-          && scan->reasoning_option_counts[index] == 1) {
-        target = index;
-        break;
-      }
-    }
-    if (target < 0) {
-      direction = CODEX_REASONING_DIRECTION_UP;
-      for (int index = current + 1; index <= last; index += 1) {
-        if (index >= 0 && scan->reasoning_options[index] != NULL
-            && scan->reasoning_option_counts[index] == 1) {
-          target = index;
-          break;
-        }
-      }
-    }
-  }
-  if (target < 0) return -1;
-  *direction_in_out = direction;
-  if (at_minimum_out != NULL) *at_minimum_out = target == first;
-  if (at_maximum_out != NULL) *at_maximum_out = target == last;
-  return target;
+  int ranks[CODEX_REASONING_EFFORT_COUNT] = { 0 };
+  unsigned count = codex_reasoning_option_ranks(
+    scan,
+    ranks,
+    CODEX_REASONING_EFFORT_COUNT
+  );
+  return codex_reasoning_ping_pong_target(
+    ranks,
+    count,
+    codex_reasoning_effort_rank(current_effort),
+    direction_in_out,
+    step_count,
+    at_minimum_out,
+    at_maximum_out
+  );
 }
 
 enum {
@@ -6099,13 +6142,17 @@ static CodexUltraConfirmationResult confirm_codex_ultra_full_access_warning(
     : CODEX_ULTRA_CONFIRMATION_ABSENT;
 }
 
-static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
+static int step_codex_reasoning_effort(
+  CodexReasoningDirection requested,
+  unsigned step_count
+) {
   CodexFastModeScan scan = { 0 };
   AXUIElementRef trigger = NULL;
   if (!copy_codex_reasoning_control_scan(&scan, &trigger)) {
     bool composer_focused = restore_codex_composer_after_fast_mode();
     printf(
-      "reasoning=unknown available=0 changed=0 verified=0 direction=%s composer_focused=%d\n",
+      "reasoning=unknown options=unknown steps=%u available=0 changed=0 verified=0 direction=%s composer_focused=%d\n",
+      step_count,
       codex_reasoning_direction_name(requested),
       composer_focused ? 1 : 0
     );
@@ -6113,14 +6160,7 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
   }
 
   const char *previous = scan.reasoning_effort;
-  double before_value = 0;
-  double minimum = 0;
-  double maximum = 0;
-  bool has_slider = scan.reasoning_slider != NULL
-    && scan.reasoning_slider_count == 1;
-  bool has_advanced_control = scan.reasoning_control != NULL
-    && scan.reasoning_control_count == 1
-    && scan.reasoning_control_is_advanced;
+  bool has_slider = codex_reasoning_scan_has_slider(&scan);
   if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
     printf(
       "reasoning_stage=control slider=%d track=%d slider_count=%u control=%d control_count=%u\n",
@@ -6131,107 +6171,63 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
       scan.reasoning_control_count
     );
   }
-  bool range_known = has_slider && copy_codex_reasoning_slider_range(
-      scan.reasoning_slider,
-      &before_value,
-      &minimum,
-      &maximum
-    );
-  CodexReasoningDirection direction = codex_reasoning_direction_for_boundary(
-    requested,
-    previous,
-    range_known,
-    before_value,
-    minimum,
-    maximum
-  );
+  CodexReasoningDirection direction = requested;
   bool acted = false;
+  bool selection_performed = false;
   bool at_minimum = false;
   bool at_maximum = false;
   bool option_boundaries_known = false;
-  double after_value = before_value;
-  double after_minimum = minimum;
-  double after_maximum = maximum;
-  bool after_range_known = false;
   const char *expected_reasoning = NULL;
-  if (has_slider && !has_advanced_control) {
-    if (scan.reasoning_slider_is_track) {
-      int target = codex_reasoning_track_target_index(previous, &direction);
-      expected_reasoning = codex_reasoning_effort_at_rank(target);
-      acted = target >= 0 && step_codex_reasoning_track(
-        scan.reasoning_slider,
-        scan.reasoning_slider_size,
-        direction
-      );
-      if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
-        printf(
-          "reasoning_stage=track target=%d acted=%d direction=%s\n",
-          target,
-          acted ? 1 : 0,
-          codex_reasoning_direction_name(direction)
-        );
-      }
-    } else {
-      CFStringRef action = direction == CODEX_REASONING_DIRECTION_DOWN
-        ? kAXDecrementAction
-        : kAXIncrementAction;
-      acted = codex_is_frontmost()
-        && AXUIElementPerformAction(scan.reasoning_slider, action) == kAXErrorSuccess;
-    }
-    if (acted) usleep(70000);
-    after_range_known = copy_codex_reasoning_slider_range(
-      scan.reasoning_slider,
-      &after_value,
-      &after_minimum,
-      &after_maximum
-    );
-  } else if (scan.reasoning_control != NULL
-      && scan.reasoning_control_count == 1) {
+  char option_csv[96] = "unknown";
+  if (codex_reasoning_scan_can_open_options(&scan)) {
     // The available effort levels vary by model. Open Codex's own Effort
     // submenu, enumerate only the options it exposes for this task, and move
-    // one visible notch in the requested ping-pong direction.
-    bool opened_options = scan.reasoning_control_is_advanced
-      ? activate_accessibility_element_with_return(scan.reasoning_control)
-        || perform_codex_accessibility_press(scan.reasoning_control)
-      : focus_accessibility_element(scan.reasoning_control);
-    if (opened_options && !scan.reasoning_control_is_advanced) {
-      usleep(12000);
-      tap_key(KEY_RIGHT, 0);
-    }
+    // the requested number of visible notches in one transaction. The final
+    // target is derived only from this exact user/model-specific list, so a
+    // hidden Max (or any other missing level) can never become a target.
+    // Compact slider layouts arrive here only through exact Advanced.
+    bool opened_options = open_codex_reasoning_options(&scan);
     usleep(65000);
     CodexFastModeScan options = { 0 };
     if (opened_options && copy_codex_reasoning_options_scan(&options)) {
+      codex_reasoning_option_csv(&options, option_csv, sizeof(option_csv));
       int target = codex_reasoning_target_option(
         &options,
         previous,
         &direction,
+        step_count,
         &at_minimum,
         &at_maximum
       );
       option_boundaries_known = target >= 0;
       if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
         printf(
-          "reasoning_stage=options count=%u target=%d direction=%s\n",
+          "reasoning_stage=options count=%u target=%d steps=%u direction=%s\n",
           codex_reasoning_option_count(&options),
           target,
+          step_count,
           codex_reasoning_direction_name(direction)
         );
       }
       if (target >= 0) {
         expected_reasoning = codex_reasoning_effort_at_rank(target);
-        acted = activate_accessibility_element_with_return(
-          options.reasoning_options[target]
-        );
+        bool already_target = previous != NULL && expected_reasoning != NULL
+          && strcmp(previous, expected_reasoning) == 0;
+        selection_performed = !already_target
+          && activate_accessibility_element_with_return(
+            options.reasoning_options[target]
+          );
+        acted = already_target || selection_performed;
         if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
           printf("reasoning_stage=select acted=%d\n", acted ? 1 : 0);
         }
-        if (acted) usleep(70000);
+        if (selection_performed) usleep(70000);
       }
       release_codex_fast_mode_scan(&options);
     }
   }
   CodexUltraConfirmationResult ultra_confirmation = CODEX_ULTRA_CONFIRMATION_ABSENT;
-  if (acted && expected_reasoning != NULL
+  if (selection_performed && expected_reasoning != NULL
       && strcmp(expected_reasoning, "ultra") == 0) {
     // Codex deliberately gates Ultra + Full access behind a warning. This
     // path runs only after ThreadDeck selected the exact Ultra option and
@@ -6241,21 +6237,12 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
     ultra_confirmation = confirm_codex_ultra_full_access_warning(1.1);
     if (ultra_confirmation == CODEX_ULTRA_CONFIRMATION_BLOCKED) acted = false;
   }
-  double epsilon = after_range_known
-    ? fmax((after_maximum - after_minimum) / 1000.0, 0.000001)
-    : 0;
-  bool numeric_changed = acted && range_known && after_range_known
-    && fabs(after_value - before_value) > epsilon;
-  if (after_range_known) {
-    at_minimum = after_value <= after_minimum + epsilon;
-    at_maximum = after_value >= after_maximum - epsilon;
-  }
   CodexFastModeValue fast_value = scan.value;
 
   if (ultra_confirmation != CODEX_ULTRA_CONFIRMATION_BLOCKED) {
     close_codex_intelligence_popover_if_opened(trigger);
   }
-  const char *reasoning = acted
+  const char *reasoning = selection_performed
     ? wait_for_codex_reasoning_effort_change(
       previous,
       expected_reasoning,
@@ -6265,11 +6252,14 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
     : previous;
   bool label_changed = reasoning != NULL
     && (previous == NULL || strcmp(reasoning, previous) != 0);
-  bool changed = numeric_changed || label_changed;
+  bool changed = label_changed;
   bool expected_verified = expected_reasoning == NULL
     || (reasoning != NULL && strcmp(reasoning, expected_reasoning) == 0);
-  bool verified = acted && changed && reasoning != NULL && expected_verified;
-  if (!after_range_known && !option_boundaries_known) {
+  // A coalesced even-length ping-pong sequence can legitimately finish on
+  // the starting level. It is verified by the freshly scanned option list
+  // even though no UI selection or label change is necessary.
+  bool verified = acted && reasoning != NULL && expected_verified;
+  if (!option_boundaries_known) {
     at_minimum = codex_reasoning_effort_is_minimum(reasoning);
     at_maximum = codex_reasoning_effort_is_maximum(reasoning);
   }
@@ -6280,9 +6270,11 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
       ? "default"
       : "unknown";
   printf(
-    "previous=%s reasoning=%s service_tier=%s available=1 changed=%d verified=%d direction=%s at_min=%d at_max=%d composer_focused=%d\n",
+    "previous=%s reasoning=%s options=%s steps=%u service_tier=%s available=1 changed=%d verified=%d direction=%s at_min=%d at_max=%d composer_focused=%d\n",
     previous != NULL ? previous : "unknown",
     reasoning != NULL ? reasoning : "unknown",
+    option_csv,
+    step_count,
     service_tier,
     changed ? 1 : 0,
     verified ? 1 : 0,
@@ -6304,7 +6296,7 @@ static int set_codex_reasoning_effort(const char *requested) {
   if (!copy_codex_reasoning_control_scan(&scan, &trigger)) {
     bool composer_focused = restore_codex_composer_after_fast_mode();
     printf(
-      "requested=%s reasoning=unknown available=0 changed=0 verified=0 direction=up at_min=0 at_max=0 composer_focused=%d\n",
+      "requested=%s reasoning=unknown options=unknown available=0 changed=0 verified=0 direction=up at_min=0 at_max=0 composer_focused=%d\n",
       requested,
       composer_focused ? 1 : 0
     );
@@ -6312,61 +6304,48 @@ static int set_codex_reasoning_effort(const char *requested) {
   }
 
   const char *previous = scan.reasoning_effort;
-  int previous_index = codex_visible_reasoning_effort_index(previous);
-  int requested_index = codex_visible_reasoning_effort_index(requested);
-  CodexReasoningDirection direction = requested_index < previous_index
+  int previous_rank = codex_reasoning_effort_rank(previous);
+  int requested_rank = codex_reasoning_effort_rank(requested);
+  CodexReasoningDirection direction = requested_rank < previous_rank
     ? CODEX_REASONING_DIRECTION_DOWN
     : CODEX_REASONING_DIRECTION_UP;
   bool already_selected = previous != NULL && strcmp(previous, requested) == 0;
   bool acted = false;
-  bool at_minimum = requested_index == 0;
-  bool at_maximum = requested_index == CODEX_VISIBLE_REASONING_EFFORT_COUNT - 1;
+  bool selection_performed = false;
+  bool at_minimum = false;
+  bool at_maximum = false;
   bool boundaries_known = false;
-  bool range_known = false;
-  bool after_range_known = false;
-  double before_value = 0;
-  double minimum = 0;
-  double maximum = 0;
-  double after_value = 0;
-  double after_minimum = 0;
-  double after_maximum = 0;
+  char option_csv[96] = "unknown";
 
-  if (!already_selected
-      && scan.reasoning_control != NULL
-      && scan.reasoning_control_count == 1) {
+  if (codex_reasoning_scan_can_open_options(&scan)) {
     // Prefer Codex's exact Effort option list. One activation selects the
     // final debounced target directly, no matter how many hardware taps led
-    // to it, so intermediate menu transactions never run.
-    bool opened_options = scan.reasoning_control_is_advanced
-      ? activate_accessibility_element_with_return(scan.reasoning_control)
-        || perform_codex_accessibility_press(scan.reasoning_control)
-      : focus_accessibility_element(scan.reasoning_control);
-    if (opened_options && !scan.reasoning_control_is_advanced) {
-      usleep(12000);
-      tap_key(KEY_RIGHT, 0);
-    }
+    // to it, so intermediate menu transactions never run. When Codex shows a
+    // compact slider, this opens its exact Advanced action first.
+    bool opened_options = open_codex_reasoning_options(&scan);
     usleep(65000);
     CodexFastModeScan options = { 0 };
     if (opened_options && copy_codex_reasoning_options_scan(&options)) {
-      int requested_rank = codex_reasoning_effort_rank(requested);
-      int first = -1;
-      int last = -1;
-      for (int rank = 0; rank < CODEX_REASONING_EFFORT_COUNT; rank += 1) {
-        if (options.reasoning_options[rank] == NULL
-            || options.reasoning_option_counts[rank] != 1) continue;
-        if (first < 0) first = rank;
-        last = rank;
-      }
-      boundaries_known = first >= 0 && last >= first;
-      at_minimum = boundaries_known && requested_rank == first;
-      at_maximum = boundaries_known && requested_rank == last;
+      codex_reasoning_option_csv(&options, option_csv, sizeof(option_csv));
+      int ranks[CODEX_REASONING_EFFORT_COUNT] = { 0 };
+      unsigned option_count = codex_reasoning_option_ranks(
+        &options,
+        ranks,
+        CODEX_REASONING_EFFORT_COUNT
+      );
+      boundaries_known = option_count >= 2;
+      at_minimum = boundaries_known && requested_rank == ranks[0];
+      at_maximum = boundaries_known
+        && requested_rank == ranks[option_count - 1];
       if (requested_rank >= 0
           && options.reasoning_options[requested_rank] != NULL
           && options.reasoning_option_counts[requested_rank] == 1) {
-        acted = activate_accessibility_element_with_return(
-          options.reasoning_options[requested_rank]
-        );
-        if (acted) usleep(70000);
+        selection_performed = !already_selected
+          && activate_accessibility_element_with_return(
+            options.reasoning_options[requested_rank]
+          );
+        acted = already_selected || selection_performed;
+        if (selection_performed) usleep(70000);
       }
       if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
         printf(
@@ -6378,60 +6357,10 @@ static int set_codex_reasoning_effort(const char *requested) {
       }
       release_codex_fast_mode_scan(&options);
     }
-  } else if (!already_selected
-      && scan.reasoning_slider != NULL
-      && scan.reasoning_slider_count == 1
-      && previous_index >= 0
-      && requested_index >= 0) {
-    // Some Codex builds expose only the compact slider. Keep this in one
-    // verified transaction too. A real AXSlider is assigned its final value
-    // directly; the anonymous Chromium track needs ordinary arrow notches.
-    range_known = copy_codex_reasoning_slider_range(
-      scan.reasoning_slider,
-      &before_value,
-      &minimum,
-      &maximum
-    );
-    if (!scan.reasoning_slider_is_track && range_known) {
-      double target_value = minimum + (maximum - minimum)
-        * ((double)requested_index
-          / (double)(CODEX_VISIBLE_REASONING_EFFORT_COUNT - 1));
-      CFNumberRef value = CFNumberCreate(
-        kCFAllocatorDefault,
-        kCFNumberDoubleType,
-        &target_value
-      );
-      acted = codex_is_frontmost()
-        && AXUIElementSetAttributeValue(
-          scan.reasoning_slider,
-          kAXValueAttribute,
-          value
-        ) == kAXErrorSuccess;
-      CFRelease(value);
-    } else {
-      int distance = abs(requested_index - previous_index);
-      acted = distance > 0;
-      for (int step = 0; acted && step < distance; step += 1) {
-        acted = step_codex_reasoning_track(
-          scan.reasoning_slider,
-          scan.reasoning_slider_size,
-          direction
-        );
-        if (acted) usleep(35000);
-      }
-    }
-    if (acted) usleep(70000);
-    after_range_known = copy_codex_reasoning_slider_range(
-      scan.reasoning_slider,
-      &after_value,
-      &after_minimum,
-      &after_maximum
-    );
-    boundaries_known = true;
   }
 
   CodexUltraConfirmationResult ultra_confirmation = CODEX_ULTRA_CONFIRMATION_ABSENT;
-  if (acted && strcmp(requested, "ultra") == 0) {
+  if (selection_performed && strcmp(requested, "ultra") == 0) {
     ultra_confirmation = confirm_codex_ultra_full_access_warning(1.1);
     if (ultra_confirmation == CODEX_ULTRA_CONFIRMATION_BLOCKED) acted = false;
   }
@@ -6440,7 +6369,7 @@ static int set_codex_reasoning_effort(const char *requested) {
   if (ultra_confirmation != CODEX_ULTRA_CONFIRMATION_BLOCKED) {
     close_codex_intelligence_popover_if_opened(trigger);
   }
-  const char *reasoning = acted
+  const char *reasoning = selection_performed
     ? wait_for_codex_reasoning_effort_change(
       previous,
       requested,
@@ -6450,12 +6379,7 @@ static int set_codex_reasoning_effort(const char *requested) {
     : previous;
   bool label_changed = reasoning != NULL
     && (previous == NULL || strcmp(reasoning, previous) != 0);
-  double epsilon = range_known && after_range_known
-    ? fmax((after_maximum - after_minimum) / 1000.0, 0.000001)
-    : 0;
-  bool numeric_changed = acted && range_known && after_range_known
-    && fabs(after_value - before_value) > epsilon;
-  bool changed = label_changed || numeric_changed;
+  bool changed = label_changed;
   bool verified = reasoning != NULL
     && strcmp(reasoning, requested) == 0
     && (already_selected || acted);
@@ -6470,10 +6394,11 @@ static int set_codex_reasoning_effort(const char *requested) {
       ? "default"
       : "unknown";
   printf(
-    "requested=%s previous=%s reasoning=%s service_tier=%s available=1 changed=%d verified=%d direction=%s at_min=%d at_max=%d composer_focused=%d\n",
+    "requested=%s previous=%s reasoning=%s options=%s service_tier=%s available=1 changed=%d verified=%d direction=%s at_min=%d at_max=%d composer_focused=%d\n",
     requested,
     previous != NULL ? previous : "unknown",
     reasoning != NULL ? reasoning : "unknown",
+    option_csv,
     service_tier,
     changed ? 1 : 0,
     verified ? 1 : 0,
@@ -6540,18 +6465,112 @@ static int codex_reasoning_effort_selftest(void) {
     && (codex_ultra_warning_text_flags(CFSTR("Continue"))
       & CODEX_ULTRA_WARNING_CONTINUE) != 0
     && codex_ultra_warning_text_flags(CFSTR("Confirm another setting")) == 0;
+  bool compact_slider_requires_advanced =
+    codex_reasoning_options_route_allowed(true, true, true)
+    && !codex_reasoning_options_route_allowed(true, true, false)
+    && !codex_reasoning_options_route_allowed(true, false, false)
+    && codex_reasoning_options_route_allowed(false, true, false);
+  bool advanced_label_vocabulary =
+    accessibility_string_is_advanced_reasoning_label(CFSTR("Advanced"))
+    && accessibility_string_is_advanced_reasoning_label(CFSTR("Advanced ›"))
+    && accessibility_string_is_advanced_reasoning_label(CFSTR("고급 설정 〉"))
+    && !accessibility_string_is_advanced_reasoning_label(
+      CFSTR("Advanced reasoning discussion")
+    );
+  int without_max[] = {
+    codex_reasoning_effort_rank("low"),
+    codex_reasoning_effort_rank("medium"),
+    codex_reasoning_effort_rank("high"),
+    codex_reasoning_effort_rank("xhigh"),
+    codex_reasoning_effort_rank("ultra")
+  };
+  CodexReasoningDirection without_max_direction = CODEX_REASONING_DIRECTION_UP;
+  bool without_max_at_minimum = false;
+  bool without_max_at_maximum = false;
+  int without_max_target = codex_reasoning_ping_pong_target(
+    without_max,
+    sizeof(without_max) / sizeof(without_max[0]),
+    codex_reasoning_effort_rank("xhigh"),
+    &without_max_direction,
+    1,
+    &without_max_at_minimum,
+    &without_max_at_maximum
+  );
+  bool hidden_max_is_skipped = without_max_target
+      == codex_reasoning_effort_rank("ultra")
+    && without_max_at_maximum && !without_max_at_minimum;
+  int with_max[] = {
+    codex_reasoning_effort_rank("low"),
+    codex_reasoning_effort_rank("medium"),
+    codex_reasoning_effort_rank("high"),
+    codex_reasoning_effort_rank("xhigh"),
+    codex_reasoning_effort_rank("max"),
+    codex_reasoning_effort_rank("ultra")
+  };
+  CodexReasoningDirection with_max_direction = CODEX_REASONING_DIRECTION_UP;
+  int with_max_target = codex_reasoning_ping_pong_target(
+    with_max,
+    sizeof(with_max) / sizeof(with_max[0]),
+    codex_reasoning_effort_rank("xhigh"),
+    &with_max_direction,
+    1,
+    NULL,
+    NULL
+  );
+  bool visible_max_is_selected = with_max_target
+    == codex_reasoning_effort_rank("max");
+  CodexReasoningDirection coalesced_direction = CODEX_REASONING_DIRECTION_UP;
+  int coalesced_target = codex_reasoning_ping_pong_target(
+    without_max,
+    sizeof(without_max) / sizeof(without_max[0]),
+    codex_reasoning_effort_rank("xhigh"),
+    &coalesced_direction,
+    2,
+    NULL,
+    NULL
+  );
+  bool coalesced_steps_use_scanned_list = coalesced_target
+      == codex_reasoning_effort_rank("xhigh")
+    && coalesced_direction == CODEX_REASONING_DIRECTION_DOWN;
+  int limited_model[] = {
+    codex_reasoning_effort_rank("medium"),
+    codex_reasoning_effort_rank("high"),
+    codex_reasoning_effort_rank("xhigh")
+  };
+  CodexReasoningDirection limited_direction = CODEX_REASONING_DIRECTION_UP;
+  int limited_target = codex_reasoning_ping_pong_target(
+    limited_model,
+    sizeof(limited_model) / sizeof(limited_model[0]),
+    codex_reasoning_effort_rank("xhigh"),
+    &limited_direction,
+    1,
+    NULL,
+    NULL
+  );
+  bool model_specific_endpoints_reverse = limited_target
+      == codex_reasoning_effort_rank("high")
+    && limited_direction == CODEX_REASONING_DIRECTION_DOWN;
   printf(
-    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_set_targets_are_bounded=%d exact_ultra_warning_vocabulary=%d\n",
+    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_set_targets_are_bounded=%d exact_ultra_warning_vocabulary=%d compact_slider_requires_advanced=%d advanced_label_vocabulary=%d hidden_max_is_skipped=%d visible_max_is_selected=%d coalesced_steps_use_scanned_list=%d model_specific_endpoints_reverse=%d\n",
     upper_reverses ? 1 : 0,
     lower_reverses ? 1 : 0,
     middle_preserves ? 1 : 0,
     max_can_advance_to_ultra ? 1 : 0,
     exact_set_targets_are_bounded ? 1 : 0,
-    exact_ultra_warning_vocabulary ? 1 : 0
+    exact_ultra_warning_vocabulary ? 1 : 0,
+    compact_slider_requires_advanced ? 1 : 0,
+    advanced_label_vocabulary ? 1 : 0,
+    hidden_max_is_skipped ? 1 : 0,
+    visible_max_is_selected ? 1 : 0,
+    coalesced_steps_use_scanned_list ? 1 : 0,
+    model_specific_endpoints_reverse ? 1 : 0
   );
   return upper_reverses && lower_reverses && middle_preserves
     && max_can_advance_to_ultra && exact_set_targets_are_bounded
-    && exact_ultra_warning_vocabulary ? 0 : 1;
+    && exact_ultra_warning_vocabulary && compact_slider_requires_advanced
+    && advanced_label_vocabulary && hidden_max_is_skipped
+    && visible_max_is_selected && coalesced_steps_use_scanned_list
+    && model_specific_endpoints_reverse ? 0 : 1;
 }
 
 static int toggle_codex_fast_mode(void) {
@@ -8659,12 +8678,25 @@ int main(int argc, char **argv) {
     return 64;
   }
   if (strcmp(argv[1], "reasoning-effort-step") == 0) {
-    if (argc != 3) return 64;
+    if (argc != 3 && argc != 4) return 64;
+    unsigned step_count = 1;
+    if (argc == 4) {
+      char *end = NULL;
+      unsigned long parsed = strtoul(argv[3], &end, 10);
+      if (end == argv[3] || *end != '\0' || parsed < 1 || parsed > 64) return 64;
+      step_count = (unsigned)parsed;
+    }
     if (strcmp(argv[2], "up") == 0) {
-      return step_codex_reasoning_effort(CODEX_REASONING_DIRECTION_UP);
+      return step_codex_reasoning_effort(
+        CODEX_REASONING_DIRECTION_UP,
+        step_count
+      );
     }
     if (strcmp(argv[2], "down") == 0) {
-      return step_codex_reasoning_effort(CODEX_REASONING_DIRECTION_DOWN);
+      return step_codex_reasoning_effort(
+        CODEX_REASONING_DIRECTION_DOWN,
+        step_count
+      );
     }
     return 64;
   }

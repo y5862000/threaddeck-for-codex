@@ -4,6 +4,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
+  bridgeFailureStaysLocal,
   parsePermissionHealth,
   permissionIssueForHealth,
   permissionIssueLabel
@@ -45,4 +46,11 @@ test("uses short default English labels that fit a Neo key", () => {
   assert.equal(permissionIssueLabel("post-event"), "Input access");
   assert.equal(permissionIssueLabel("codex-operation"), "Check Codex");
   assert.equal(permissionIssueLabel("media-operation"), "Check media");
+});
+
+test("keeps semantic Effort picker failures on the Effort key", () => {
+  assert.equal(bridgeFailureStaysLocal("reasoning-effort-set"), true);
+  assert.equal(bridgeFailureStaysLocal("reasoning-effort-step"), true);
+  assert.equal(bridgeFailureStaysLocal("send"), false);
+  assert.equal(bridgeFailureStaysLocal("fast-mode-set"), false);
 });

@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Changed Effort handling to scan the exact levels exposed by the current Codex model/account before every update and move only inside that list, so optional levels such as `Max` are skipped when absent and used when present. Rapid taps are folded into one ping-pong traversal over that same scanned list. Compact-slider layouts press Codex's exact `Advanced` action instead of manipulating or estimating slider notches, and a picker-shape failure stays on the Reasoning key rather than escalating into a deck-wide `Check input` warning while input permissions are healthy.
 - Discover every live Side Chat from Codex's exact `thread/fork` → `thread/inject_items` identity pair as well as prompt history. Multiple Side Chats under one parent task now keep separate keys, and `thread/unsubscribe` removes only the Side Chat that actually closed.
 - Split queued-follow-up counts by the enclosing main-task or Side Chat pane instead of assigning a window-wide total to the focused task. A dequeue transition now decrements only its owning task key.
 - Added a provisional Side Chat composer lease for the dedicated microphone. Before Codex publishes the new ephemeral task UUID, ThreadDeck verifies the right-side composer from its Accessibility control pair and window geometry, starts dictation there, and hands that exact recording session to the real task identity when it appears. Identity-sensitive Send, Fast, and reasoning actions continue to wait rather than fall through to the parent task.

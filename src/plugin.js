@@ -83,6 +83,7 @@ const {
 const { consumeLifecycleLines } = require("./local-lifecycle");
 const { ensureKeyBridgeExecutable } = require("./keybridge-permissions");
 const {
+  bridgeFailureStaysLocal,
   parsePermissionHealth,
   permissionIssueForHealth,
   permissionIssueLabel
@@ -362,11 +363,15 @@ const fastModeLongPressArmedContexts = new Set();
 const fastModeLongPressUpdates = new Map();
 const reasoningBusyContexts = new Set();
 const reasoningDirectionByThreadId = new Map();
+const reasoningAvailableEffortsByThreadId = new Map();
 const reasoningVisualOverrideByThreadId = new Map();
 const reasoningPendingCountByThreadId = new Map();
 const reasoningPendingCountByContext = new Map();
 const reasoningInputBatchByKey = new Map();
-const REASONING_EFFORT_STEPS = ["low", "medium", "high", "xhigh", "max", "ultra"];
+// This is an ordering vocabulary, not an assumption that every Codex user or
+// model exposes all six levels. Actual traversal always uses the freshly
+// scanned per-task subset stored in `reasoningAvailableEffortsByThreadId`.
+const REASONING_EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const threadPressByContext = new Map();
 const currentVoicePressByContext = new Map();
 let socket = null;
@@ -1669,7 +1674,9 @@ function commandPermissionRequirements(command) {
     return { accessibility: false, postEvent: false, codex: false };
   }
   const codexCommand = command.startsWith("codex-") && command !== "codex-wait-frontmost";
+  const reasoningCommand = command.startsWith("reasoning-effort-");
   const accessibility = command.startsWith("fast-mode-")
+    || reasoningCommand
     || codexCommand
     || [
       "focused-text-state",
@@ -1685,6 +1692,7 @@ function commandPermissionRequirements(command) {
       "media-active-debug"
     ].includes(command);
   const postEvent = command.startsWith("fast-mode-")
+    || reasoningCommand
     || command.startsWith("codex-open-thread")
     || command.startsWith("codex-find-thread")
     || command.startsWith("codex-search-thread")
@@ -1711,7 +1719,9 @@ function commandPermissionRequirements(command) {
   return {
     accessibility,
     postEvent,
-    codex: (accessibility && codexCommand) || command.startsWith("fast-mode-")
+    codex: (accessibility && codexCommand)
+      || command.startsWith("fast-mode-")
+      || reasoningCommand
   };
 }
 
@@ -1808,7 +1818,9 @@ function ensureCommandPermissions(command, context = null, quiet = false) {
 }
 
 function bridgeCapability(command) {
-  if (command.startsWith("codex-") || command.startsWith("fast-mode-")) return "codex";
+  if (command.startsWith("codex-")
+      || command.startsWith("fast-mode-")
+      || command.startsWith("reasoning-effort-")) return "codex";
   if (command.startsWith("media-") || command.startsWith("audio-")) return "media";
   return "input";
 }
@@ -1834,6 +1846,14 @@ function noteBridgeFailure(command, error, context = null, quiet = false) {
     requestSystemPermissions(context);
     if (!quiet && context) showFeedback(context, "error", "권한 요청", 2400);
     return true;
+  }
+  if (bridgeFailureStaysLocal(command)) {
+    runtimeTrace("bridge-health", {
+      result: "failed",
+      reason: command.slice(0, 48),
+      issue: "local-control"
+    });
+    return false;
   }
   const capability = bridgeCapability(command);
   const mediaHealthFailure = capability === "media" && exitCode !== 2;
@@ -3297,6 +3317,7 @@ function releaseVoiceKeysSync(rawOptions = {}) {
   fastModeLongPressUpdates.clear();
   cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
+  reasoningAvailableEffortsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningPendingCountByThreadId.clear();
   reasoningPendingCountByContext.clear();
@@ -3545,6 +3566,34 @@ function parseFastModeState(output) {
   };
 }
 
+function normalizeReasoningEffortOptions(values) {
+  const observed = new Set(
+    (Array.isArray(values) ? values : String(values ?? "").split(","))
+      .map((value) => normalizedReasoningEffort(value))
+      .filter((value) => REASONING_EFFORT_ORDER.includes(value))
+  );
+  return REASONING_EFFORT_ORDER.filter((value) => observed.has(value));
+}
+
+function parseReasoningEffortOptions(output) {
+  const text = String(output ?? "");
+  const encoded = text.match(/(?:^|\s)options=([^\s]+)(?:\s|$)/i)?.[1] ?? "";
+  if (!encoded || encoded.toLowerCase() === "unknown") return [];
+  const options = normalizeReasoningEffortOptions(encoded);
+  return options.length >= 2 ? options : [];
+}
+
+function rememberReasoningEffortOptions(threadId, values) {
+  if (!threadId) return [];
+  const options = normalizeReasoningEffortOptions(values);
+  if (options.length >= 2) {
+    reasoningAvailableEffortsByThreadId.set(threadId, options);
+    return options;
+  }
+  reasoningAvailableEffortsByThreadId.delete(threadId);
+  return [];
+}
+
 function parseReasoningStepState(output) {
   const text = String(output ?? "");
   const composer = parseFastModeState(text);
@@ -3556,6 +3605,7 @@ function parseReasoningStepState(output) {
   const direction = text.match(/(?:^|\s)direction=(up|down)(?:\s|$)/i)?.[1]?.toLowerCase() ?? null;
   return {
     ...composer,
+    availableEfforts: parseReasoningEffortOptions(text),
     direction,
     changed: flag("changed"),
     verified: flag("verified"),
@@ -3565,29 +3615,43 @@ function parseReasoningStepState(output) {
 }
 
 function nextReasoningDirection(threadId, state = fastModeState) {
-  const cached = reasoningDirectionByThreadId.get(threadId);
-  if (cached === "up" || cached === "down") return cached;
   const effort = state?.threadId === threadId
     ? normalizedReasoningEffort(state?.reasoningEffort)
     : null;
-  return ["max", "ultra"].includes(effort) ? "down" : "up";
+  const available = reasoningAvailableEffortsByThreadId.get(threadId) ?? [];
+  if (available.length >= 2 && effort === available[0]) return "up";
+  if (available.length >= 2 && effort === available.at(-1)) return "down";
+  const cached = reasoningDirectionByThreadId.get(threadId);
+  if (cached === "up" || cached === "down") return cached;
+  // Before the first exact menu scan, only Ultra is a trustworthy universal
+  // upper endpoint. The first press itself is applied natively from the real
+  // list and then seeds the per-task cache.
+  return effort === "ultra" ? "down" : "up";
 }
 
-function optimisticReasoningStep(threadId, direction, state = fastModeState) {
+function optimisticReasoningStep(
+  threadId,
+  direction,
+  state = fastModeState,
+  availableEfforts = reasoningAvailableEffortsByThreadId.get(threadId)
+) {
   if (!threadId || state?.threadId !== threadId) return null;
   const current = normalizedReasoningEffort(state?.reasoningEffort);
-  const index = REASONING_EFFORT_STEPS.indexOf(current);
-  if (index < 0) return null;
-  const delta = direction === "down" ? -1 : 1;
-  const nextIndex = Math.max(0, Math.min(REASONING_EFFORT_STEPS.length - 1, index + delta));
-  const effort = REASONING_EFFORT_STEPS[nextIndex];
+  const options = normalizeReasoningEffortOptions(availableEfforts);
+  const index = options.indexOf(current);
+  if (options.length < 2 || index < 0) return null;
+  let nextDirection = direction === "down" ? "down" : "up";
+  if (nextDirection === "up" && index === options.length - 1) nextDirection = "down";
+  else if (nextDirection === "down" && index === 0) nextDirection = "up";
+  const nextIndex = index + (nextDirection === "down" ? -1 : 1);
+  const effort = options[nextIndex];
   return {
     effort,
-    direction: nextIndex === REASONING_EFFORT_STEPS.length - 1
+    direction: nextIndex === options.length - 1
       ? "down"
       : nextIndex === 0
         ? "up"
-        : direction
+        : nextDirection
   };
 }
 
@@ -3964,12 +4028,8 @@ function toggleFastMode(context, options = {}) {
 }
 
 function performReasoningEffortChange(context, options = {}) {
-  let requestedEffort = normalizedReasoningEffort(options.targetEffort);
-  let requestedTargetDirection = options.targetDirection;
-  const productionNativeAction = !options.stepEffort && !options.setEffort;
-  const bridgeCapability = requestedEffort || options.coalesced
-    ? "reasoning-effort-set"
-    : "reasoning-effort-step";
+  const productionNativeAction = !options.stepEffort;
+  const bridgeCapability = "reasoning-effort-step";
   const synchronizeCurrent = options.synchronizeCurrent
     ?? (productionNativeAction
       ? synchronizeCurrentCodexThread
@@ -4011,44 +4071,31 @@ function performReasoningEffortChange(context, options = {}) {
       const direction = options.direction ?? (threadId === initialThreadId
         ? initialDirection
         : nextReasoningDirection(threadId));
-      if (!requestedEffort && options.coalesced) {
-        const currentEffort = fastModeState?.threadId === threadId
-          ? normalizedReasoningEffort(fastModeState.reasoningEffort)
-          : normalizedReasoningEffort(thread?.nextReasoningEffort)
-            ?? normalizedReasoningEffort(thread?.reasoningEffort);
-        const planned = optimisticReasoningSequence(
-          threadId,
-          direction,
-          { threadId, reasoningEffort: currentEffort },
-          Math.max(1, options.tapCount ?? 1)
-        );
-        requestedEffort = planned?.effort ?? null;
-        requestedTargetDirection = planned?.direction ?? requestedTargetDirection;
-      }
+      const tapCount = Math.max(1, Math.min(64, Math.trunc(options.tapCount ?? 1)));
       const stepEffort = options.stepEffort
-        ?? ((stepDirection) => execFileAsync(
+        ?? ((stepDirection, count) => execFileAsync(
           KEY_BRIDGE,
-          ["reasoning-effort-step", stepDirection],
+          ["reasoning-effort-step", stepDirection, String(count)],
           { timeout: 6000, maxBuffer: 4096 }
         ));
-      const setEffort = options.setEffort
-        ?? ((targetEffort) => execFileAsync(
-          KEY_BRIDGE,
-          ["reasoning-effort-set", targetEffort],
-          { timeout: 6000, maxBuffer: 4096 }
-        ));
-      const result = requestedEffort
-        ? await setEffort(requestedEffort)
-        : await stepEffort(direction);
+      // The native transaction opens Advanced when necessary, scans this
+      // user's exact option set, walks `tapCount` notches through only that
+      // set, and selects the final target once. Never send a fixed level name
+      // derived from ThreadDeck's display vocabulary.
+      const result = await stepEffort(direction, tapCount);
       const confirmed = parseReasoningStepState(result?.stdout ?? result ?? "");
       const confirmedEffort = normalizedReasoningEffort(confirmed?.reasoningEffort);
+      const availableEfforts = normalizeReasoningEffortOptions(
+        confirmed?.availableEfforts
+      );
       if (primaryThreadId !== threadId
           || confirmed?.verified !== true
-          || (!requestedEffort && confirmed?.changed !== true)
           || !confirmedEffort
-          || (requestedEffort && confirmedEffort !== requestedEffort)) {
+          || availableEfforts.length < 2
+          || !availableEfforts.includes(confirmedEffort)) {
         throw new Error("Codex reasoning effort change was not confirmed");
       }
+      rememberReasoningEffortOptions(threadId, availableEfforts);
 
       const merged = mergeFastModeObservation(thread, confirmed, fastModeState);
       fastModeState = {
@@ -4062,7 +4109,7 @@ function performReasoningEffortChange(context, options = {}) {
         ? "down"
         : confirmed.atMinimum === true
           ? "up"
-          : requestedTargetDirection ?? confirmed.direction ?? direction;
+          : confirmed.direction ?? direction;
       reasoningDirectionByThreadId.set(threadId, nextDirection);
       applyFocusedComposerState(thread, fastModeState);
 
@@ -4095,23 +4142,6 @@ function performReasoningEffortChange(context, options = {}) {
 function incrementReasoningPending(map, key) {
   if (!key) return;
   map.set(key, (map.get(key) ?? 0) + 1);
-}
-
-function optimisticReasoningSequence(threadId, direction, state, count = 1) {
-  let currentState = state;
-  let currentDirection = direction;
-  let result = null;
-  for (let index = 0; index < count; index += 1) {
-    result = optimisticReasoningStep(threadId, currentDirection, currentState);
-    if (!result) return null;
-    currentDirection = result.direction;
-    currentState = {
-      ...currentState,
-      threadId,
-      reasoningEffort: result.effort
-    };
-  }
-  return result;
 }
 
 function reasoningInputBatchKey(context, threadId) {
@@ -4174,9 +4204,6 @@ function stepReasoningEffort(context, options = {}) {
     existingBatch.tapCount += 1;
     existingBatch.contexts.add(context);
     existingBatch.options = { ...existingBatch.options, ...options };
-    existingBatch.targetEffort = optimistic?.effort ?? existingBatch.targetEffort;
-    existingBatch.targetDirection = optimistic?.direction
-      ?? existingBatch.targetDirection;
     resetReasoningInputSettleTimer(
       existingBatch,
       options.settleMs ?? REASONING_INPUT_SETTLE_MS
@@ -4198,8 +4225,6 @@ function stepReasoningEffort(context, options = {}) {
     ]),
     queuedThreadId,
     startingDirection: direction,
-    targetDirection: optimistic?.direction ?? direction,
-    targetEffort: optimistic?.effort ?? null,
     tapCount: 1,
     options: { ...options, navigationPromise: pendingNavigation },
     timer: null,
@@ -4220,8 +4245,6 @@ function stepReasoningEffort(context, options = {}) {
           ...batch.options,
           queuedThreadId: batch.queuedThreadId,
           direction: batch.startingDirection,
-          targetDirection: batch.targetDirection,
-          targetEffort: batch.targetEffort,
           tapCount: batch.tapCount,
           coalesced: true
         });
@@ -7250,6 +7273,7 @@ function resetDemoEffects() {
   fastModeLongPressArmedContexts.clear();
   cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
+  reasoningAvailableEffortsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningPendingCountByThreadId.clear();
   reasoningPendingCountByContext.clear();
@@ -10329,28 +10353,34 @@ async function verifyInteractionPolicy() {
   const reasoningContext = "interaction-reasoning";
   contexts.set(reasoningContext, ACTIONS.reasoning);
   reasoningDirectionByThreadId.delete(localThreadB.id);
-  let requestedReasoningTarget = null;
+  reasoningAvailableEffortsByThreadId.set(
+    localThreadB.id,
+    [...REASONING_EFFORT_ORDER]
+  );
+  let requestedReasoningStep = null;
   const reasoningStepResult = await stepReasoningEffort(reasoningContext, {
     settleMs: 0,
+    direction: "down",
     synchronizeCurrent: async () => localThreadB,
     focusProbe: async () => ({ stdout: "match=uuid" }),
-    setEffort: async (target) => {
-      requestedReasoningTarget = target;
+    stepEffort: async (direction, count) => {
+      requestedReasoningStep = `${direction}:${count}`;
       return {
-        stdout: "previous=max reasoning=xhigh service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n"
+        stdout: "previous=max reasoning=xhigh options=low,medium,high,xhigh,max,ultra steps=1 service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n"
       };
     }
   });
   const minimumStep = parseReasoningStepState(
-    "previous=medium reasoning=low service_tier=default available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1"
+    "previous=medium reasoning=low options=low,medium,high,xhigh,ultra steps=1 service_tier=default available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1"
   );
   const maximumStep = parseReasoningStepState(
-    "previous=max reasoning=ultra service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=1 composer_focused=1"
+    "previous=max reasoning=ultra options=low,medium,high,xhigh,max,ultra steps=1 service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=1 composer_focused=1"
   );
   const reasoningPingPongStateIsVerified = reasoningStepResult
-    && requestedReasoningTarget === "xhigh"
+    && requestedReasoningStep === "down:1"
     && reasoningDirectionByThreadId.get(localThreadB.id) === "down"
     && fastModeState.reasoningEffort === "xhigh"
+    && reasoningAvailableEffortsByThreadId.get(localThreadB.id)?.includes("max")
     && minimumStep?.atMinimum === true
     && maximumStep?.atMaximum === true;
   const optimisticReasoningMovesBeforeNativeConfirmation = (() => {
@@ -10373,6 +10403,50 @@ async function verifyInteractionPolicy() {
       && downward?.effort === "max"
       && downward.direction === "down";
   })();
+  const userSpecificReasoningOptionsAreRespected = (() => {
+    const withoutMax = ["low", "medium", "high", "xhigh", "ultra"];
+    const parsed = parseReasoningStepState(
+      "previous=xhigh reasoning=ultra options=ultra,low,high,medium,xhigh,maxish,xhigh steps=1 service_tier=default available=1 changed=1 verified=1 direction=up at_min=0 at_max=1 composer_focused=1"
+    );
+    rememberReasoningEffortOptions(localThreadB.id, withoutMax);
+    const upward = optimisticReasoningStep(localThreadB.id, "up", {
+      threadId: localThreadB.id,
+      reasoningEffort: "xhigh"
+    });
+    const downward = optimisticReasoningStep(localThreadB.id, "down", {
+      threadId: localThreadB.id,
+      reasoningEffort: "ultra"
+    });
+    const limitedUpperBounce = optimisticReasoningStep(
+      localThreadB.id,
+      "up",
+      { threadId: localThreadB.id, reasoningEffort: "xhigh" },
+      ["medium", "high", "xhigh"]
+    );
+    const limitedLowerBounce = optimisticReasoningStep(
+      localThreadB.id,
+      "down",
+      { threadId: localThreadB.id, reasoningEffort: "medium" },
+      ["medium", "high", "xhigh"]
+    );
+    const coldThread = "00000000-0000-4000-8000-00000000c01d";
+    return parsed?.availableEfforts?.join(",") === "low,medium,high,xhigh,ultra"
+      && upward?.effort === "ultra"
+      && upward.direction === "down"
+      && downward?.effort === "xhigh"
+      && limitedUpperBounce?.effort === "high"
+      && limitedUpperBounce.direction === "down"
+      && limitedLowerBounce?.effort === "high"
+      && limitedLowerBounce.direction === "up"
+      && !optimisticReasoningStep(coldThread, "up", {
+        threadId: coldThread,
+        reasoningEffort: "xhigh"
+      });
+  })();
+  reasoningAvailableEffortsByThreadId.set(
+    localThreadB.id,
+    [...REASONING_EFFORT_ORDER]
+  );
   fastModeState = {
     threadId: localThreadB.id,
     enabled: true,
@@ -10382,17 +10456,17 @@ async function verifyInteractionPolicy() {
   };
   reasoningDirectionByThreadId.set(localThreadB.id, "down");
   reasoningVisualOverrideByThreadId.delete(localThreadB.id);
-  const rapidReasoningTargets = [];
+  const rapidReasoningRequests = [];
   let rapidReasoningCalls = 0;
   const rapidReasoningOptions = {
     settleMs: 0,
     synchronizeCurrent: async () => localThreadB,
     focusProbe: async () => ({ stdout: "match=uuid" }),
-    setEffort: async (target) => {
-      rapidReasoningTargets.push(target);
+    stepEffort: async (direction, count) => {
+      rapidReasoningRequests.push(`${direction}:${count}`);
       rapidReasoningCalls += 1;
       return {
-        stdout: "requested=low previous=xhigh reasoning=low service_tier=priority available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1\n"
+        stdout: "previous=xhigh reasoning=low options=low,medium,high,xhigh,max,ultra steps=3 service_tier=priority available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1\n"
       };
     }
   };
@@ -10412,7 +10486,7 @@ async function verifyInteractionPolicy() {
   const rapidReasoningCoalescesToFinalTarget = rapidReasoningPaintsEveryTapImmediately
     && rapidReasoningResults.every(Boolean)
     && rapidReasoningCalls === 1
-    && rapidReasoningTargets.join(",") === "low"
+    && rapidReasoningRequests.join(",") === "down:3"
     && fastModeState.reasoningEffort === "low"
     && reasoningDirectionByThreadId.get(localThreadB.id) === "up"
     && !reasoningVisualOverrideByThreadId.has(localThreadB.id)
@@ -10435,22 +10509,22 @@ async function verifyInteractionPolicy() {
   const firstReasoningApplyStarted = new Promise((resolve) => {
     markFirstReasoningApplyStarted = resolve;
   });
-  const duringApplyTargets = [];
+  const duringApplyRequests = [];
   const duringApplyOptions = {
     settleMs: 0,
     synchronizeCurrent: async () => localThreadB,
     focusProbe: async () => ({ stdout: "match=uuid" }),
-    setEffort: async (target) => {
-      duringApplyTargets.push(target);
-      if (duringApplyTargets.length === 1) {
+    stepEffort: async (direction, count) => {
+      duringApplyRequests.push(`${direction}:${count}`);
+      if (duringApplyRequests.length === 1) {
         markFirstReasoningApplyStarted();
         await firstReasoningApplyGate;
         return {
-          stdout: "requested=medium previous=low reasoning=medium service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
+          stdout: "previous=low reasoning=medium options=low,medium,high,xhigh,max,ultra steps=1 service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
         };
       }
       return {
-        stdout: "requested=xhigh previous=medium reasoning=xhigh service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
+        stdout: "previous=medium reasoning=xhigh options=low,medium,high,xhigh,max,ultra steps=2 service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
       };
     }
   };
@@ -10465,7 +10539,7 @@ async function verifyInteractionPolicy() {
     duringApplyThird
   ]);
   const reasoningInputDuringApplyStartsOneSuccessor = duringApplyResults.every(Boolean)
-    && duringApplyTargets.join(",") === "medium,xhigh"
+    && duringApplyRequests.join(",") === "up:1,up:2"
     && fastModeState.reasoningEffort === "xhigh"
     && !reasoningInputBatchByKey.size
     && !reasoningVisualOverrideByThreadId.has(localThreadB.id)
@@ -10745,7 +10819,7 @@ async function verifyInteractionPolicy() {
     stepEffort: async () => {
       sideChatReasoningSteps += 1;
       return {
-        stdout: "previous=low reasoning=medium service_tier=default available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
+        stdout: "previous=low reasoning=medium options=low,medium,high,xhigh,ultra steps=1 service_tier=default available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
       };
     }
   });
@@ -10984,6 +11058,7 @@ async function verifyInteractionPolicy() {
     && reasoningFastToggleStartsAtThreshold
     && reasoningPingPongStateIsVerified
     && optimisticReasoningMovesBeforeNativeConfirmation
+    && userSpecificReasoningOptionsAreRespected
     && rapidReasoningCoalescesToFinalTarget
     && reasoningInputDuringApplyStartsOneSuccessor
     && reasoningControlUsesCenteredAnimatedTrack
@@ -11059,6 +11134,7 @@ async function verifyInteractionPolicy() {
     reasoningFastToggleStartsAtThreshold,
     reasoningPingPongStateIsVerified,
     optimisticReasoningMovesBeforeNativeConfirmation,
+    userSpecificReasoningOptionsAreRespected,
     rapidReasoningCoalescesToFinalTarget,
     reasoningInputDuringApplyStartsOneSuccessor,
     reasoningControlUsesCenteredAnimatedTrack,
@@ -11100,6 +11176,7 @@ async function verifyInteractionPolicy() {
   cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
   reasoningDirectionByThreadId.clear();
+  reasoningAvailableEffortsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningPendingCountByThreadId.clear();
   reasoningPendingCountByContext.clear();

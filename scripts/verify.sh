@@ -52,9 +52,10 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" side-chat-composer-selftest
 "$BRIDGE" command-palette-selftest
 "$BRIDGE" media-bundle-selftest
-node - "$ROOT_DIR/native/keybridge.m" <<'NODE'
+node - "$ROOT_DIR/native/keybridge.m" "$ROOT_DIR/src/plugin.js" <<'NODE'
 const fs = require("node:fs");
 const source = fs.readFileSync(process.argv[2], "utf8");
+const pluginSource = fs.readFileSync(process.argv[3], "utf8");
 
 function functionBody(name) {
   const start = source.indexOf(`static int ${name}(void)`);
@@ -97,12 +98,25 @@ if (!toggleBody.includes("restore_codex_composer_after_fast_mode()")
 }
 
 for (const signature of [
-  "static bool step_codex_reasoning_track(",
+  "static bool open_codex_reasoning_options(",
   "static bool copy_codex_reasoning_control_scan("
 ]) {
   const body = functionBodyFromSignature(signature);
   if (body.includes("tap_key(KEY_TAB") || body.includes("tap_key(KEY_RETURN")) {
     throw new Error(`${signature} must not guess a focus target with Tab/Return`);
+  }
+}
+
+for (const signature of [
+  "static int step_codex_reasoning_effort(",
+  "static int set_codex_reasoning_effort("
+]) {
+  const body = functionBodyFromSignature(signature);
+  if (!body.includes("open_codex_reasoning_options(&scan)")
+      || body.includes("kAXIncrementAction")
+      || body.includes("kAXDecrementAction")
+      || body.includes("kAXValueAttribute")) {
+    throw new Error(`${signature} must use Codex's exact option list, never the compact slider`);
   }
 }
 
@@ -124,6 +138,23 @@ const reasoningStepBody = functionBodyFromSignature(
 if (!reasoningStepBody.includes('strcmp(expected_reasoning, "ultra") == 0')
     || !reasoningStepBody.includes("confirm_codex_ultra_full_access_warning(1.1)")) {
   throw new Error("Ultra confirmation must be scoped to an exact Ultra effort request");
+}
+if (!reasoningStepBody.includes("codex_reasoning_option_csv(&options")
+    || !reasoningStepBody.includes("codex_reasoning_target_option(")
+    || !reasoningStepBody.includes("step_count")) {
+  throw new Error("Reasoning step must scan and traverse the current exact option list");
+}
+
+const effortUpdateStart = pluginSource.indexOf("function performReasoningEffortChange(");
+const effortUpdateEnd = pluginSource.indexOf("\nfunction incrementReasoningPending(", effortUpdateStart);
+if (effortUpdateStart < 0 || effortUpdateEnd < 0) {
+  throw new Error("Missing JavaScript reasoning update transaction");
+}
+const effortUpdateBody = pluginSource.slice(effortUpdateStart, effortUpdateEnd);
+if (!effortUpdateBody.includes('["reasoning-effort-step", stepDirection, String(count)]')
+    || !effortUpdateBody.includes("confirmed?.availableEfforts")
+    || effortUpdateBody.includes("reasoning-effort-set")) {
+  throw new Error("Reasoning updates must send step counts and trust only native-scanned options");
 }
 const ultraConfirmationBody = functionBodyFromSignature(
   "static CodexUltraConfirmationResult confirm_codex_ultra_full_access_warning("
