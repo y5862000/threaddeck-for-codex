@@ -3922,6 +3922,29 @@ static bool wait_for_codex_intelligence_popover_closed(
   return false;
 }
 
+static bool restore_codex_composer_after_fast_mode(void) {
+  // A keyboard-selected speed option can update successfully while Chromium
+  // leaves focus on the model picker. If its exact speed choices are still
+  // visible, dismiss only that verified popover before restoring the composer.
+  CodexFastModeScan popup = { 0 };
+  bool speed_options_visible = copy_codex_fast_mode_scan(true, &popup)
+    && (popup.on_option_count > 0 || popup.off_option_count > 0);
+  release_codex_fast_mode_scan(&popup);
+  if (speed_options_visible && codex_is_frontmost()) {
+    tap_key(KEY_ESCAPE, 0);
+    usleep(30000);
+  }
+
+  // The composer subtree can be replaced as the model setting is applied.
+  // Retry the exact Accessibility focus briefly so the next hardware Send,
+  // dictation, or shortcut action never lands on the old model control.
+  for (unsigned attempt = 0; attempt < 3; attempt += 1) {
+    if (focus_codex_composer_if_visible()) return true;
+    usleep(45000);
+  }
+  return false;
+}
+
 static int toggle_codex_fast_mode(void) {
   CodexFastModeScan scan = { 0 };
   AXUIElementRef opened_trigger = NULL;
@@ -3929,7 +3952,11 @@ static int toggle_codex_fast_mode(void) {
         &scan,
         &opened_trigger
       )) {
-    printf("state=unknown available=0 changed=0 verified=0\n");
+    bool composer_focused = restore_codex_composer_after_fast_mode();
+    printf(
+      "state=unknown available=0 changed=0 verified=0 composer_focused=%d\n",
+      composer_focused ? 1 : 0
+    );
     return 2;
   }
 
@@ -3962,12 +3989,13 @@ static int toggle_codex_fast_mode(void) {
   if (!verified && opened_trigger != NULL) {
     close_codex_intelligence_popover_if_opened(opened_trigger);
   }
+  bool composer_focused = restore_codex_composer_after_fast_mode();
 
   const char *reasoning = scan.reasoning_effort != NULL
     ? scan.reasoning_effort
     : "unknown";
   printf(
-    "requested=%s state=%s available=%d changed=%d verified=%d reasoning=%s service_tier=%s\n",
+    "requested=%s state=%s available=%d changed=%d verified=%d reasoning=%s service_tier=%s composer_focused=%d\n",
     codex_fast_mode_value_name(requested),
     verified ? codex_fast_mode_value_name(requested) : codex_fast_mode_value_name(observed),
     scan.available ? 1 : 0,
@@ -3976,7 +4004,8 @@ static int toggle_codex_fast_mode(void) {
     reasoning,
     verified && requested == CODEX_FAST_MODE_ON ? "priority"
       : verified && requested == CODEX_FAST_MODE_OFF ? "default"
-        : "unknown"
+        : "unknown",
+    composer_focused ? 1 : 0
   );
   if (opened_trigger != NULL) CFRelease(opened_trigger);
   bool available = scan.available;
@@ -6032,6 +6061,9 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "fast-mode-toggle") == 0) return toggle_codex_fast_mode();
   if (strcmp(argv[1], "fast-mode-state") == 0) return print_codex_fast_mode_state();
   if (strcmp(argv[1], "codex-composer-state") == 0) return print_codex_composer_state();
+  if (strcmp(argv[1], "codex-restore-composer") == 0) {
+    return restore_codex_composer_after_fast_mode() ? 0 : 1;
+  }
   if (strcmp(argv[1], "media-playback-state") == 0) return print_system_media_playback_state();
   if (strcmp(argv[1], "voice-down") == 0) voice_down();
   else if (strcmp(argv[1], "voice-up") == 0) return voice_up() ? 0 : 1;

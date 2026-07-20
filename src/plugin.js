@@ -2639,6 +2639,9 @@ function parseFastModeState(output) {
   const text = String(output ?? "");
   const state = text.match(/(?:^|\s)state=(on|off|unknown)(?:\s|$)/i)?.[1]?.toLowerCase() ?? null;
   const availableMatch = text.match(/(?:^|\s)available=([01])(?:\s|$)/i)?.[1] ?? null;
+  const composerFocusedMatch = text.match(
+    /(?:^|\s)composer_focused=([01])(?:\s|$)/i
+  )?.[1] ?? null;
   const serviceTierAvailableMatch = text.match(
     /(?:^|\s)service_tier_available=([01])(?:\s|$)/i
   )?.[1] ?? null;
@@ -2668,7 +2671,12 @@ function parseFastModeState(output) {
   return {
     enabled,
     available: speedAvailable,
-    reasoningEffort: composerState.reasoningEffort
+    reasoningEffort: composerState.reasoningEffort,
+    composerFocused: composerFocusedMatch === "1"
+      ? true
+      : composerFocusedMatch === "0"
+        ? false
+        : null
   };
 }
 
@@ -2871,12 +2879,17 @@ function toggleFastMode(context, options = {}) {
     // once, reads the live state, selects its exact inverse, and returns the
     // applied state. The injected stateProbe/setMode pair remains available
     // for deterministic legacy contract tests.
+    const usesNativeToggle = !options.toggleMode && !options.stateProbe && !options.setMode;
     const toggleMode = options.toggleMode
-      ?? (!options.stateProbe && !options.setMode
+      ?? (usesNativeToggle
         ? () => execFileAsync(KEY_BRIDGE, ["fast-mode-toggle"], {
           timeout: 5000,
           maxBuffer: 4096
         })
+        : null);
+    const focusComposer = options.focusComposer
+      ?? (usesNativeToggle
+        ? () => runKeyBridgeAwaited("codex-restore-composer", null, { quiet: true })
         : null);
     if (toggleMode) {
       try {
@@ -2890,11 +2903,25 @@ function toggleFastMode(context, options = {}) {
         fastModeState = { threadId, ...confirmed, failed: false };
         applyFocusedRemoteComposerState(thread, confirmed);
         renderFastModeContexts();
+        // New native helpers restore focus inside the same transaction. Keep
+        // this fallback for a transient Chromium focus failure and for users
+        // whose plugin JavaScript is briefly ahead of the bundled helper.
+        if (confirmed.composerFocused !== true
+            && focusComposer
+            && !await focusComposer()) {
+          feedback(context, "error", "입력창 확인", 1600);
+          console.error("Codex Fast mode changed, but composer focus was not restored");
+          return false;
+        }
+        if (confirmed.composerFocused !== true && focusComposer) {
+          fastModeState = { ...fastModeState, composerFocused: true };
+        }
         // The verified icon itself is the success acknowledgement. Keep text
         // overlays for actionable failures instead of restating on/off.
         clearFeedback(context);
         return true;
       } catch (error) {
+        if (focusComposer) await focusComposer();
         if (primaryThreadId === threadId) {
           fastModeState = {
             threadId,
@@ -8326,6 +8353,24 @@ async function verifyInteractionPolicy() {
     && fastModeState.enabled === true
     && fastModeState.available === true;
 
+  let fastComposerFocusRecoveries = 0;
+  const fastComposerFocusRecoveryResult = await toggleFastMode(fastContext, {
+    feedback: () => {},
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    toggleMode: async () => ({
+      stdout: "requested=off state=off available=1 changed=1 verified=1 reasoning=max service_tier=default composer_focused=0\n"
+    }),
+    focusComposer: async () => {
+      fastComposerFocusRecoveries += 1;
+      return true;
+    }
+  });
+  const fastToggleRestoresComposerAfterNativeFocusMiss = fastComposerFocusRecoveryResult
+    && fastComposerFocusRecoveries === 1
+    && fastModeState.threadId === localThreadB.id
+    && fastModeState.enabled === false
+    && fastModeState.composerFocused === true;
+
   let resolveStaleFastRefresh;
   const staleFastRefreshState = new Promise((resolve) => { resolveStaleFastRefresh = resolve; });
   const staleFastRefresh = refreshFastMode({
@@ -8636,6 +8681,7 @@ async function verifyInteractionPolicy() {
     && fastToggleIsCoalescedAndConfirmed
     && fastSetTimeoutIsReconciled
     && singleShotFastToggleUsesOneNativeAction
+    && fastToggleRestoresComposerAfterNativeFocusMiss
     && staleFastRefreshCannotOverwriteToggle
     && fastRefreshRecoversWithoutPageReentry
     && navigationWaitsForFastToggle
@@ -8695,6 +8741,7 @@ async function verifyInteractionPolicy() {
     fastToggleIsCoalescedAndConfirmed,
     fastSetTimeoutIsReconciled,
     singleShotFastToggleUsesOneNativeAction,
+    fastToggleRestoresComposerAfterNativeFocusMiss,
     staleFastRefreshCannotOverwriteToggle,
     passiveUnknownFastRefreshPreservesConfirmedState,
     fastRefreshRecoversWithoutPageReentry,

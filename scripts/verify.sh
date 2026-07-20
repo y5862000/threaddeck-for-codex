@@ -67,8 +67,15 @@ for (const name of ["print_codex_fast_mode_state", "print_codex_composer_state"]
     throw new Error(`${name} must never open or interact with the model picker`);
   }
 }
+
+const toggleBody = functionBody("toggle_codex_fast_mode");
+if (!toggleBody.includes("restore_codex_composer_after_fast_mode()")
+    || !toggleBody.includes("composer_focused=%d")) {
+  throw new Error("Fast mode toggle must restore and report Codex composer focus");
+}
 NODE
 echo "Passive composer reads are interaction-free."
+echo "Fast mode composer-focus restoration is wired."
 if grep -Eq 'CGEventCreateMouseEvent|CGWarpMouseCursorPosition|kCGEventLeftMouse(Down|Up)' "$ROOT_DIR/native/keybridge.m"; then
   echo "keybridge must not synthesize mouse events" >&2
   exit 1
