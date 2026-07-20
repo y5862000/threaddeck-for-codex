@@ -1,6 +1,6 @@
 # Support
 
-> [한국어 지원 안내](SUPPORT.ko.md)
+> [Korean support guide](SUPPORT.ko.md)
 
 ThreadDeck is a community beta maintained in spare time.
 

@@ -2230,15 +2230,103 @@ static const char *reasoning_effort_from_popup_option_string(CFTypeRef value) {
   return NULL;
 }
 
+static bool accessibility_string_is_advanced_reasoning_label(CFTypeRef value) {
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return false;
+  @autoreleasepool {
+    NSString *text = [[(__bridge NSString *)value lowercaseString]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([text isEqualToString:@"advanced"]
+        || [text isEqualToString:@"advanced settings"]
+        || [text isEqualToString:@"고급 설정"]
+        || [text isEqualToString:@"고급 옵션"]) return true;
+    // Chromium may append a visual chevron to the static child label. Keep
+    // this deliberately short so arbitrary task or conversation text that
+    // happens to begin with "Advanced" can never become a control target.
+    return text.length <= 24 && (
+      [text hasPrefix:@"advanced "]
+      || [text hasPrefix:@"advanced›"]
+      || [text hasPrefix:@"advanced〉"]
+      || [text hasPrefix:@"고급 설정 "]
+      || [text hasPrefix:@"고급 옵션 "]
+    );
+  }
+}
+
+typedef struct {
+  bool advanced;
+  const char *effort;
+  bool effort_conflict;
+  unsigned visited;
+} CodexReasoningPopupTextState;
+
+static void collect_codex_reasoning_popup_text_state(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexReasoningPopupTextState *state
+) {
+  if (element == NULL || state == NULL || depth > 4 || state->visited >= 48) return;
+  state->visited += 1;
+  CFStringRef attributes[] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    CFSTR("AXDOMIdentifier")
+  };
+  for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyAttributeValue(element, attributes[index], &value) != kAXErrorSuccess
+        || value == NULL) {
+      if (value != NULL) CFRelease(value);
+      continue;
+    }
+    state->advanced |= accessibility_string_is_advanced_reasoning_label(value);
+    const char *effort = reasoning_effort_from_popup_option_string(value);
+    if (effort != NULL) {
+      if (state->effort == NULL) state->effort = effort;
+      else if (strcmp(state->effort, effort) != 0) state->effort_conflict = true;
+    }
+    CFRelease(value);
+  }
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value)
+        != kAXErrorSuccess
+      || children_value == NULL
+      || CFGetTypeID(children_value) != CFArrayGetTypeID()) {
+    if (children_value != NULL) CFRelease(children_value);
+    return;
+  }
+  CFArrayRef children = (CFArrayRef)children_value;
+  for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+    CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+    if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+      collect_codex_reasoning_popup_text_state(
+        (AXUIElementRef)child,
+        depth + 1,
+        state
+      );
+    }
+  }
+  CFRelease(children_value);
+}
+
 enum { CODEX_REASONING_EFFORT_COUNT = 8 };
+
+static const char *codex_reasoning_effort_at_rank(int rank) {
+  static const char *ordered[CODEX_REASONING_EFFORT_COUNT] = {
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+  };
+  return rank >= 0 && rank < CODEX_REASONING_EFFORT_COUNT
+    ? ordered[rank]
+    : NULL;
+}
 
 static int codex_reasoning_effort_rank(const char *effort) {
   if (effort == NULL) return -1;
-  const char *ordered[CODEX_REASONING_EFFORT_COUNT] = {
-    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
-  };
   for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
-    if (strcmp(effort, ordered[index]) == 0) return index;
+    if (strcmp(effort, codex_reasoning_effort_at_rank(index)) == 0) return index;
   }
   return -1;
 }
@@ -3640,6 +3728,8 @@ static bool focus_accessibility_element(AXUIElementRef element) {
   ) == kAXErrorSuccess;
 }
 
+static bool perform_codex_accessibility_press(AXUIElementRef element);
+
 static bool activate_accessibility_element_with_return(AXUIElementRef element) {
   if (!focus_accessibility_element(element)) return false;
   // Chromium exposes the task and composer controls as keyboard-focusable
@@ -3825,11 +3915,13 @@ typedef struct {
   bool intelligence_trigger_expanded_known;
   const char *reasoning_effort;
   AXUIElementRef reasoning_slider;
+  bool reasoning_slider_is_track;
   int reasoning_slider_score;
   unsigned reasoning_slider_count;
   CGPoint reasoning_slider_position;
   CGSize reasoning_slider_size;
   AXUIElementRef reasoning_control;
+  bool reasoning_control_is_advanced;
   int reasoning_control_score;
   unsigned reasoning_control_count;
   CGPoint reasoning_control_position;
@@ -4182,7 +4274,8 @@ static void consider_codex_reasoning_slider(
   AXUIElementRef element,
   int score,
   CGPoint position,
-  CGSize size
+  CGSize size,
+  bool is_track
 ) {
   if (scan == NULL || element == NULL || score <= 0) return;
   if (score > scan->reasoning_slider_score) {
@@ -4192,6 +4285,7 @@ static void consider_codex_reasoning_slider(
     scan->reasoning_slider_count = 1;
     scan->reasoning_slider_position = position;
     scan->reasoning_slider_size = size;
+    scan->reasoning_slider_is_track = is_track;
   } else if (score == scan->reasoning_slider_score
       && (scan->reasoning_slider == NULL
         || !CFEqual(scan->reasoning_slider, element))) {
@@ -4204,7 +4298,8 @@ static void consider_codex_reasoning_control(
   AXUIElementRef element,
   int score,
   CGPoint position,
-  CGSize size
+  CGSize size,
+  bool is_advanced
 ) {
   if (scan == NULL || element == NULL || score <= 0) return;
   if (score > scan->reasoning_control_score) {
@@ -4214,6 +4309,7 @@ static void consider_codex_reasoning_control(
     scan->reasoning_control_count = 1;
     scan->reasoning_control_position = position;
     scan->reasoning_control_size = size;
+    scan->reasoning_control_is_advanced = is_advanced;
   } else if (score == scan->reasoning_control_score
       && (scan->reasoning_control == NULL
         || !CFEqual(scan->reasoning_control, element))) {
@@ -4335,6 +4431,7 @@ static void collect_codex_fast_mode_controls(
 
   CodexFastTextSignals signals = { 0 };
   bool reasoning_context = false;
+  bool advanced_reasoning_control = false;
   const char *element_reasoning_effort = NULL;
   const CFIndex text_indices[] = {
     FAST_ATTR_TITLE,
@@ -4347,6 +4444,14 @@ static void collect_codex_fast_mode_controls(
   };
   for (size_t index = 0; index < sizeof(text_indices) / sizeof(text_indices[0]); index += 1) {
     CFTypeRef text_value = CFArrayGetValueAtIndex(values, text_indices[index]);
+    if (text_value != NULL && CFGetTypeID(text_value) == CFStringGetTypeID()) {
+      NSString *normalized = [[(__bridge NSString *)text_value lowercaseString]
+        stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+      advanced_reasoning_control |= [normalized isEqualToString:@"advanced"]
+        || [normalized isEqualToString:@"advanced settings"]
+        || [normalized isEqualToString:@"고급 설정"]
+        || [normalized isEqualToString:@"고급 옵션"];
+    }
     merge_codex_fast_signals(
       &signals,
       codex_fast_signals_from_string(text_value)
@@ -4415,10 +4520,26 @@ static void collect_codex_fast_mode_controls(
   bool supports_press = actionable_role && !hidden && enabled
     && codex_accessibility_element_supports_press(element);
 
+  if (scan->allow_popup_options && supports_press && plausible_option
+      && (is_button || is_popup || is_menu_item || is_radio)) {
+    // Current Codex Chromium builds often put `Advanced` and the individual
+    // effort name in static child nodes while the parent button carries no
+    // text at all. Read only the fixed, short popup vocabulary from that
+    // verified actionable subtree; never return or log arbitrary child text.
+    CodexReasoningPopupTextState popup_text = { 0 };
+    collect_codex_reasoning_popup_text_state(element, 0, &popup_text);
+    advanced_reasoning_control |= popup_text.advanced;
+    if (element_reasoning_effort == NULL
+        && popup_text.effort != NULL
+        && !popup_text.effort_conflict) {
+      element_reasoning_effort = popup_text.effort;
+    }
+  }
+
   bool plausible_reasoning_adjuster = scan->allow_popup_options
       && !hidden && enabled && has_geometry
       && size.width >= 72 && size.width <= 520
-      && size.height >= 8 && size.height <= 80
+      && size.height >= 0.5 && size.height <= 80
       && position.x + size.width >= scan->window_origin.x - 24
       && position.x <= scan->window_origin.x + scan->window_size.width + 24
       && position.y >= scan->window_origin.y + scan->window_size.height * 0.38
@@ -4426,12 +4547,22 @@ static void collect_codex_fast_mode_controls(
   bool supports_reasoning_step = plausible_reasoning_adjuster
     && codex_accessibility_element_supports_action(element, kAXIncrementAction)
     && codex_accessibility_element_supports_action(element, kAXDecrementAction);
+  // Recent Codex builds expose the compact reasoning slider as an anonymous
+  // one-pixel AXGroup child. It has neither AXSliderRole nor adjustable
+  // actions, but it retains the selected effort label and trustworthy track
+  // geometry inside the already-verified intelligence popover.
+  bool is_reasoning_track = plausible_reasoning_adjuster
+    && element_reasoning_effort != NULL
+    && size.height <= 4;
   if (scan->allow_popup_options && getenv("THREADDECK_REASONING_DEBUG") != NULL
       && has_geometry
       && position.y >= scan->window_origin.y + scan->window_size.height * 0.38
       && (element_reasoning_effort != NULL || is_slider
-        || supports_reasoning_step || (supports_press && plausible_option))) {
+        || reasoning_context || advanced_reasoning_control
+        || supports_reasoning_step
+        || (supports_press && plausible_option))) {
     const char *role_name = is_slider ? "slider"
+      : is_reasoning_track ? "track"
       : is_radio ? "radio"
         : is_menu_item ? "menuitem"
           : is_popup ? "popup"
@@ -4452,7 +4583,8 @@ static void collect_codex_fast_mode_controls(
       size.height
     );
   }
-  if (plausible_reasoning_adjuster && (is_slider || supports_reasoning_step)) {
+  if (plausible_reasoning_adjuster
+      && (is_slider || supports_reasoning_step || is_reasoning_track)) {
     // Codex exposes the discrete reasoning control as a horizontal AXSlider
     // or another increment/decrement-capable range inside the intelligence
     // popover. Prefer explicit adjustable actions and reasoning labels, while
@@ -4460,19 +4592,24 @@ static void collect_codex_fast_mode_controls(
     // both its title and role description.
     int score = supports_reasoning_step
       ? reasoning_context || element_reasoning_effort != NULL ? 640 : 600
-      : reasoning_context || element_reasoning_effort != NULL ? 520 : 360;
-    consider_codex_reasoning_slider(scan, element, score, position, size);
+      : is_slider
+        ? reasoning_context || element_reasoning_effort != NULL ? 520 : 360
+        : 500;
+    consider_codex_reasoning_slider(
+      scan, element, score, position, size, is_reasoning_track
+    );
   }
 
   if (scan->allow_popup_options && supports_press && plausible_option
-      && element_reasoning_effort != NULL && reasoning_context
+      && (reasoning_context || advanced_reasoning_control)
       && (is_menu_item || is_button || is_popup)) {
     consider_codex_reasoning_control(
       scan,
       element,
-      is_menu_item ? 720 : 620,
+      advanced_reasoning_control ? 780 : is_menu_item ? 720 : 620,
       position,
-      size
+      size,
+      advanced_reasoning_control
     );
   }
   if (scan->allow_popup_options && supports_press && plausible_option
@@ -5242,10 +5379,10 @@ static bool codex_reasoning_effort_is_minimum(const char *effort) {
 }
 
 static bool codex_reasoning_effort_is_maximum(const char *effort) {
-  return effort != NULL && (
-    strcmp(effort, "max") == 0
-    || strcmp(effort, "ultra") == 0
-  );
+  // `Max` is the endpoint for some models, but newer Codex model menus can
+  // expose `Ultra` above it. The exact option scan below determines whether
+  // Max is the model-specific endpoint; only Ultra is universally terminal.
+  return effort != NULL && strcmp(effort, "ultra") == 0;
 }
 
 static CodexReasoningDirection codex_reasoning_direction_for_boundary(
@@ -5270,6 +5407,84 @@ static CodexReasoningDirection codex_reasoning_direction_for_boundary(
     return CODEX_REASONING_DIRECTION_UP;
   }
   return requested;
+}
+
+enum { CODEX_VISIBLE_REASONING_EFFORT_COUNT = 6 };
+
+static int codex_visible_reasoning_effort_index(const char *effort) {
+  if (effort == NULL) return -1;
+  const char *ordered[CODEX_VISIBLE_REASONING_EFFORT_COUNT] = {
+    "low", "medium", "high", "xhigh", "max", "ultra"
+  };
+  for (int index = 0; index < CODEX_VISIBLE_REASONING_EFFORT_COUNT; index += 1) {
+    if (strcmp(effort, ordered[index]) == 0) return index;
+  }
+  return strcmp(effort, "none") == 0 || strcmp(effort, "minimal") == 0 ? 0 : -1;
+}
+
+static int codex_reasoning_track_target_index(
+  const char *effort,
+  CodexReasoningDirection *direction_in_out
+) {
+  if (direction_in_out == NULL) return -1;
+  int current = codex_visible_reasoning_effort_index(effort);
+  if (current < 0) return -1;
+  CodexReasoningDirection direction = *direction_in_out;
+  if (direction == CODEX_REASONING_DIRECTION_UP
+      && current >= CODEX_VISIBLE_REASONING_EFFORT_COUNT - 1) {
+    direction = CODEX_REASONING_DIRECTION_DOWN;
+  } else if (direction == CODEX_REASONING_DIRECTION_DOWN && current <= 0) {
+    direction = CODEX_REASONING_DIRECTION_UP;
+  }
+  int target = current + (direction == CODEX_REASONING_DIRECTION_UP ? 1 : -1);
+  if (target < 0 || target >= CODEX_VISIBLE_REASONING_EFFORT_COUNT) return -1;
+  *direction_in_out = direction;
+  return target;
+}
+
+static bool step_codex_reasoning_track(
+  AXUIElementRef track,
+  CGSize size,
+  CodexReasoningDirection direction
+) {
+  if (!codex_is_frontmost()
+      || track == NULL
+      || size.width < 72 || size.width > 520 || size.height <= 0 || size.height > 4) {
+    return false;
+  }
+  // Chromium may visually render this as a slider while exposing only an
+  // anonymous AXGroup. Setting AXFocused still routes an ordinary arrow key
+  // to the underlying range widget and preserves the user's pointer.
+  bool focused = focus_accessibility_element(track);
+  AXUIElementRef parent = NULL;
+  if (!focused) {
+    CFTypeRef parent_value = NULL;
+    if (AXUIElementCopyAttributeValue(track, kAXParentAttribute, &parent_value)
+          == kAXErrorSuccess
+        && parent_value != NULL
+        && CFGetTypeID(parent_value) == AXUIElementGetTypeID()) {
+      parent = (AXUIElementRef)parent_value;
+      focused = focus_accessibility_element(parent);
+    } else if (parent_value != NULL) {
+      CFRelease(parent_value);
+    }
+  }
+  // Never guess the next keyboard-focus target. In the current Codex layout
+  // the microphone follows the intelligence trigger, so a Tab-based fallback
+  // can route the subsequent key event into dictation. Only manipulate a
+  // track that Accessibility explicitly focused; otherwise fail closed and
+  // let the caller report that the control could not be changed.
+  if (!focused) {
+    if (parent != NULL) CFRelease(parent);
+    return false;
+  }
+  usleep(12000);
+  tap_key(
+    direction == CODEX_REASONING_DIRECTION_DOWN ? KEY_LEFT : KEY_RIGHT,
+    0
+  );
+  if (parent != NULL) CFRelease(parent);
+  return true;
 }
 
 static bool copy_codex_reasoning_control_scan(
@@ -5307,6 +5522,9 @@ static bool copy_codex_reasoning_control_scan(
   bool opened_here = !(expanded_known && expanded);
   bool opened = !opened_here;
   if (opened_here) {
+    // Act only on the uniquely identified intelligence trigger. Never infer
+    // a nearby chevron from geometry: the adjacent control can be Codex's
+    // microphone in compact layouts.
     opened = activate_accessibility_element_with_return(trigger)
       || perform_codex_accessibility_show_menu(trigger)
       || perform_codex_accessibility_press(trigger);
@@ -5349,6 +5567,10 @@ static bool copy_codex_reasoning_control_scan(
     && last.reasoning_slider_count == 1;
   bool has_control = have_last && last.reasoning_control != NULL
     && last.reasoning_control_count == 1;
+  // Do not retry by tabbing away from the verified intelligence trigger and
+  // pressing Return. The next focusable control can be Codex's microphone.
+  // A missing anchored slider/Advanced control is an ordinary fail-closed
+  // result; no unrelated composer control may be activated as a fallback.
   if (!have_last || (!has_slider && !has_control)) {
     if (have_last) release_codex_fast_mode_scan(&last);
     if (opened_here) close_codex_intelligence_popover_if_opened(trigger);
@@ -5362,6 +5584,7 @@ static bool copy_codex_reasoning_control_scan(
 
 static const char *wait_for_codex_reasoning_effort_change(
   const char *previous,
+  const char *expected,
   CFTimeInterval timeout_seconds,
   CodexFastModeValue *fast_value_out
 ) {
@@ -5377,8 +5600,11 @@ static const char *wait_for_codex_reasoning_effort_change(
       }
       bool changed = last != NULL
         && (previous == NULL || strcmp(last, previous) != 0);
+      bool expected_observed = expected != NULL
+        && last != NULL
+        && strcmp(last, expected) == 0;
       release_codex_fast_mode_scan(&scan);
-      if (changed) return last;
+      if (expected_observed || (expected == NULL && changed)) return last;
     }
     usleep(45000);
   } while (CFAbsoluteTimeGetCurrent() < deadline);
@@ -5490,6 +5716,271 @@ static int codex_reasoning_target_option(
   return target;
 }
 
+enum {
+  CODEX_ULTRA_WARNING_TITLE = 1 << 0,
+  CODEX_ULTRA_WARNING_BODY = 1 << 1,
+  CODEX_ULTRA_WARNING_FULL_ACCESS = 1 << 2,
+  CODEX_ULTRA_WARNING_CONTINUE = 1 << 3
+};
+
+typedef enum {
+  CODEX_ULTRA_CONFIRMATION_ABSENT = 0,
+  CODEX_ULTRA_CONFIRMATION_CONFIRMED = 1,
+  CODEX_ULTRA_CONFIRMATION_BLOCKED = 2
+} CodexUltraConfirmationResult;
+
+static unsigned codex_ultra_warning_text_flags(CFTypeRef value) {
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return 0;
+  @autoreleasepool {
+    NSString *text = [[(__bridge NSString *)value lowercaseString]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if (text.length == 0 || text.length > 520) return 0;
+    unsigned flags = 0;
+    if ([text isEqualToString:@"use ultra with full access?"]
+        || [text isEqualToString:@"전체 액세스로 ultra를 사용하시겠어요?"]
+        || [text isEqualToString:@"전체 액세스로 ultra를 사용하시겠습니까?"]) {
+      flags |= CODEX_ULTRA_WARNING_TITLE;
+    }
+    if (([text containsString:@"with ultra and full access on"]
+          && [text containsString:@"extended reasoning"]
+          && [text containsString:@"without asking"])
+        || ([text containsString:@"ultra"]
+          && [text containsString:@"전체 액세스"]
+          && [text containsString:@"확장"]
+          && [text containsString:@"묻지 않"])) {
+      flags |= CODEX_ULTRA_WARNING_BODY;
+    }
+    if ([text isEqualToString:@"use full access"]
+        || [text isEqualToString:@"전체 액세스 사용"]
+        || [text isEqualToString:@"전체 접근 권한 사용"]) {
+      flags |= CODEX_ULTRA_WARNING_FULL_ACCESS;
+    }
+    if ([text isEqualToString:@"continue"]
+        || [text isEqualToString:@"계속"]
+        || [text isEqualToString:@"계속하기"]) {
+      flags |= CODEX_ULTRA_WARNING_CONTINUE;
+    }
+    return flags;
+  }
+}
+
+static unsigned collect_codex_ultra_warning_subtree_flags(
+  AXUIElementRef element,
+  unsigned depth,
+  unsigned *visited
+) {
+  if (element == NULL || visited == NULL || depth > 4 || *visited >= 64) return 0;
+  *visited += 1;
+  unsigned flags = 0;
+  CFStringRef text_attributes[] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute
+  };
+  for (size_t index = 0;
+       index < sizeof(text_attributes) / sizeof(text_attributes[0]);
+       index += 1) {
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyAttributeValue(element, text_attributes[index], &value)
+          == kAXErrorSuccess
+        && value != NULL) {
+      flags |= codex_ultra_warning_text_flags(value);
+    }
+    if (value != NULL) CFRelease(value);
+  }
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value)
+        == kAXErrorSuccess
+      && children_value != NULL
+      && CFGetTypeID(children_value) == CFArrayGetTypeID()) {
+    CFArrayRef children = (CFArrayRef)children_value;
+    for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+      CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+      if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+        flags |= collect_codex_ultra_warning_subtree_flags(
+          (AXUIElementRef)child,
+          depth + 1,
+          visited
+        );
+      }
+    }
+  }
+  if (children_value != NULL) CFRelease(children_value);
+  return flags;
+}
+
+static unsigned codex_ultra_warning_direct_text_flags(AXUIElementRef element) {
+  if (element == NULL) return 0;
+  unsigned flags = 0;
+  CFStringRef text_attributes[] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute
+  };
+  for (size_t index = 0;
+       index < sizeof(text_attributes) / sizeof(text_attributes[0]);
+       index += 1) {
+    CFTypeRef value = NULL;
+    if (AXUIElementCopyAttributeValue(element, text_attributes[index], &value)
+          == kAXErrorSuccess
+        && value != NULL) {
+      flags |= codex_ultra_warning_text_flags(value);
+    }
+    if (value != NULL) CFRelease(value);
+  }
+  return flags;
+}
+
+typedef struct {
+  AXUIElementRef full_access_button;
+  unsigned full_access_button_count;
+  unsigned continue_button_count;
+  unsigned text_flags;
+  unsigned visited;
+} CodexUltraWarningScan;
+
+static void collect_codex_ultra_warning_controls(
+  AXUIElementRef element,
+  unsigned depth,
+  CodexUltraWarningScan *scan
+) {
+  if (element == NULL || scan == NULL || depth > 30 || scan->visited >= 6000) return;
+  scan->visited += 1;
+
+  CFTypeRef role = NULL;
+  CFTypeRef hidden_value = NULL;
+  CFTypeRef enabled_value = NULL;
+  AXUIElementCopyAttributeValue(element, kAXRoleAttribute, &role);
+  AXUIElementCopyAttributeValue(element, kAXHiddenAttribute, &hidden_value);
+  AXUIElementCopyAttributeValue(element, kAXEnabledAttribute, &enabled_value);
+  bool is_button = role != NULL
+    && CFGetTypeID(role) == CFStringGetTypeID()
+    && CFEqual(role, kAXButtonRole);
+  bool hidden = hidden_value != NULL
+    && CFGetTypeID(hidden_value) == CFBooleanGetTypeID()
+    && CFBooleanGetValue((CFBooleanRef)hidden_value);
+  bool enabled = enabled_value == NULL
+    || CFGetTypeID(enabled_value) != CFBooleanGetTypeID()
+    || CFBooleanGetValue((CFBooleanRef)enabled_value);
+
+  unsigned flags = codex_ultra_warning_direct_text_flags(element);
+  scan->text_flags |= flags;
+  if (is_button && !hidden && enabled
+      && codex_accessibility_element_supports_press(element)) {
+    unsigned subtree_visited = 0;
+    flags |= collect_codex_ultra_warning_subtree_flags(
+      element,
+      0,
+      &subtree_visited
+    );
+    if ((flags & CODEX_ULTRA_WARNING_FULL_ACCESS) != 0) {
+      scan->full_access_button_count += 1;
+      if (scan->full_access_button == NULL) {
+        scan->full_access_button = (AXUIElementRef)CFRetain(element);
+      }
+    }
+    if ((flags & CODEX_ULTRA_WARNING_CONTINUE) != 0) {
+      scan->continue_button_count += 1;
+    }
+  }
+
+  if (role != NULL) CFRelease(role);
+  if (hidden_value != NULL) CFRelease(hidden_value);
+  if (enabled_value != NULL) CFRelease(enabled_value);
+
+  CFTypeRef children_value = NULL;
+  if (AXUIElementCopyAttributeValue(element, kAXChildrenAttribute, &children_value)
+        == kAXErrorSuccess
+      && children_value != NULL
+      && CFGetTypeID(children_value) == CFArrayGetTypeID()) {
+    CFArrayRef children = (CFArrayRef)children_value;
+    for (CFIndex index = 0; index < CFArrayGetCount(children); index += 1) {
+      CFTypeRef child = CFArrayGetValueAtIndex(children, index);
+      if (child != NULL && CFGetTypeID(child) == AXUIElementGetTypeID()) {
+        collect_codex_ultra_warning_controls(
+          (AXUIElementRef)child,
+          depth + 1,
+          scan
+        );
+      }
+    }
+  }
+  if (children_value != NULL) CFRelease(children_value);
+}
+
+static void release_codex_ultra_warning_scan(CodexUltraWarningScan *scan) {
+  if (scan == NULL) return;
+  if (scan->full_access_button != NULL) CFRelease(scan->full_access_button);
+  scan->full_access_button = NULL;
+  scan->full_access_button_count = 0;
+  scan->continue_button_count = 0;
+  scan->text_flags = 0;
+  scan->visited = 0;
+}
+
+static CodexUltraConfirmationResult confirm_codex_ultra_full_access_warning(
+  CFTimeInterval timeout_seconds
+) {
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + timeout_seconds;
+  bool warning_seen = false;
+  do {
+    if (!codex_is_frontmost()) return warning_seen
+      ? CODEX_ULTRA_CONFIRMATION_BLOCKED
+      : CODEX_ULTRA_CONFIRMATION_ABSENT;
+    AXUIElementRef application = copy_codex_application();
+    if (application == NULL) break;
+    AXUIElementSetMessagingTimeout(application, 0.35);
+    AXUIElementRef root = application;
+    CFTypeRef focused_window_value = NULL;
+    if (AXUIElementCopyAttributeValue(
+          application,
+          kAXFocusedWindowAttribute,
+          &focused_window_value
+        ) == kAXErrorSuccess
+        && focused_window_value != NULL
+        && CFGetTypeID(focused_window_value) == AXUIElementGetTypeID()) {
+      root = (AXUIElementRef)focused_window_value;
+    }
+
+    CodexUltraWarningScan scan = { 0 };
+    collect_codex_ultra_warning_controls(root, 0, &scan);
+    bool title_seen = (scan.text_flags & CODEX_ULTRA_WARNING_TITLE) != 0;
+    bool body_seen = (scan.text_flags & CODEX_ULTRA_WARNING_BODY) != 0;
+    warning_seen |= title_seen;
+    bool exact_warning = title_seen
+      && body_seen
+      && scan.full_access_button != NULL
+      && scan.full_access_button_count == 1
+      && scan.continue_button_count == 1;
+    bool acted = exact_warning
+      && (activate_accessibility_element_with_return(scan.full_access_button)
+        || perform_codex_accessibility_press(scan.full_access_button));
+    if (getenv("THREADDECK_REASONING_DEBUG") != NULL && title_seen) {
+      printf(
+        "reasoning_stage=ultra_warning body=%d full_access=%u continue=%u acted=%d\n",
+        body_seen ? 1 : 0,
+        scan.full_access_button_count,
+        scan.continue_button_count,
+        acted ? 1 : 0
+      );
+    }
+    release_codex_ultra_warning_scan(&scan);
+    if (focused_window_value != NULL) CFRelease(focused_window_value);
+    CFRelease(application);
+    if (acted) {
+      usleep(50000);
+      return CODEX_ULTRA_CONFIRMATION_CONFIRMED;
+    }
+    usleep(20000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  return warning_seen
+    ? CODEX_ULTRA_CONFIRMATION_BLOCKED
+    : CODEX_ULTRA_CONFIRMATION_ABSENT;
+}
+
 static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
   CodexFastModeScan scan = { 0 };
   AXUIElementRef trigger = NULL;
@@ -5509,6 +6000,19 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
   double maximum = 0;
   bool has_slider = scan.reasoning_slider != NULL
     && scan.reasoning_slider_count == 1;
+  bool has_advanced_control = scan.reasoning_control != NULL
+    && scan.reasoning_control_count == 1
+    && scan.reasoning_control_is_advanced;
+  if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+    printf(
+      "reasoning_stage=control slider=%d track=%d slider_count=%u control=%d control_count=%u\n",
+      has_slider ? 1 : 0,
+      scan.reasoning_slider_is_track ? 1 : 0,
+      scan.reasoning_slider_count,
+      scan.reasoning_control != NULL ? 1 : 0,
+      scan.reasoning_control_count
+    );
+  }
   bool range_known = has_slider && copy_codex_reasoning_slider_range(
       scan.reasoning_slider,
       &before_value,
@@ -5526,16 +6030,36 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
   bool acted = false;
   bool at_minimum = false;
   bool at_maximum = false;
+  bool option_boundaries_known = false;
   double after_value = before_value;
   double after_minimum = minimum;
   double after_maximum = maximum;
   bool after_range_known = false;
-  if (has_slider) {
-    CFStringRef action = direction == CODEX_REASONING_DIRECTION_DOWN
-      ? kAXDecrementAction
-      : kAXIncrementAction;
-    acted = codex_is_frontmost()
-      && AXUIElementPerformAction(scan.reasoning_slider, action) == kAXErrorSuccess;
+  const char *expected_reasoning = NULL;
+  if (has_slider && !has_advanced_control) {
+    if (scan.reasoning_slider_is_track) {
+      int target = codex_reasoning_track_target_index(previous, &direction);
+      expected_reasoning = codex_reasoning_effort_at_rank(target);
+      acted = target >= 0 && step_codex_reasoning_track(
+        scan.reasoning_slider,
+        scan.reasoning_slider_size,
+        direction
+      );
+      if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+        printf(
+          "reasoning_stage=track target=%d acted=%d direction=%s\n",
+          target,
+          acted ? 1 : 0,
+          codex_reasoning_direction_name(direction)
+        );
+      }
+    } else {
+      CFStringRef action = direction == CODEX_REASONING_DIRECTION_DOWN
+        ? kAXDecrementAction
+        : kAXIncrementAction;
+      acted = codex_is_frontmost()
+        && AXUIElementPerformAction(scan.reasoning_slider, action) == kAXErrorSuccess;
+    }
     if (acted) usleep(70000);
     after_range_known = copy_codex_reasoning_slider_range(
       scan.reasoning_slider,
@@ -5544,16 +6068,21 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
       &after_maximum
     );
   } else if (scan.reasoning_control != NULL
-      && scan.reasoning_control_count == 1
-      && focus_accessibility_element(scan.reasoning_control)) {
+      && scan.reasoning_control_count == 1) {
     // The available effort levels vary by model. Open Codex's own Effort
     // submenu, enumerate only the options it exposes for this task, and move
     // one visible notch in the requested ping-pong direction.
-    usleep(12000);
-    tap_key(KEY_RIGHT, 0);
+    bool opened_options = scan.reasoning_control_is_advanced
+      ? activate_accessibility_element_with_return(scan.reasoning_control)
+        || perform_codex_accessibility_press(scan.reasoning_control)
+      : focus_accessibility_element(scan.reasoning_control);
+    if (opened_options && !scan.reasoning_control_is_advanced) {
+      usleep(12000);
+      tap_key(KEY_RIGHT, 0);
+    }
     usleep(65000);
     CodexFastModeScan options = { 0 };
-    if (copy_codex_reasoning_options_scan(&options)) {
+    if (opened_options && copy_codex_reasoning_options_scan(&options)) {
       int target = codex_reasoning_target_option(
         &options,
         previous,
@@ -5561,6 +6090,7 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
         &at_minimum,
         &at_maximum
       );
+      option_boundaries_known = target >= 0;
       if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
         printf(
           "reasoning_stage=options count=%u target=%d direction=%s\n",
@@ -5570,6 +6100,7 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
         );
       }
       if (target >= 0) {
+        expected_reasoning = codex_reasoning_effort_at_rank(target);
         acted = activate_accessibility_element_with_return(
           options.reasoning_options[target]
         );
@@ -5580,6 +6111,17 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
       }
       release_codex_fast_mode_scan(&options);
     }
+  }
+  CodexUltraConfirmationResult ultra_confirmation = CODEX_ULTRA_CONFIRMATION_ABSENT;
+  if (acted && expected_reasoning != NULL
+      && strcmp(expected_reasoning, "ultra") == 0) {
+    // Codex deliberately gates Ultra + Full access behind a warning. This
+    // path runs only after ThreadDeck selected the exact Ultra option and
+    // only activates the exact `Use Full access` action from that exact
+    // warning. `Continue` is intentionally not used because Codex defines it
+    // as switching the task to a restricted permission mode.
+    ultra_confirmation = confirm_codex_ultra_full_access_warning(1.1);
+    if (ultra_confirmation == CODEX_ULTRA_CONFIRMATION_BLOCKED) acted = false;
   }
   double epsilon = after_range_known
     ? fmax((after_maximum - after_minimum) / 1000.0, 0.000001)
@@ -5592,15 +6134,24 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
   }
   CodexFastModeValue fast_value = scan.value;
 
-  close_codex_intelligence_popover_if_opened(trigger);
+  if (ultra_confirmation != CODEX_ULTRA_CONFIRMATION_BLOCKED) {
+    close_codex_intelligence_popover_if_opened(trigger);
+  }
   const char *reasoning = acted
-    ? wait_for_codex_reasoning_effort_change(previous, 1.2, &fast_value)
+    ? wait_for_codex_reasoning_effort_change(
+      previous,
+      expected_reasoning,
+      2.4,
+      &fast_value
+    )
     : previous;
   bool label_changed = reasoning != NULL
     && (previous == NULL || strcmp(reasoning, previous) != 0);
   bool changed = numeric_changed || label_changed;
-  bool verified = acted && changed && reasoning != NULL;
-  if (!after_range_known) {
+  bool expected_verified = expected_reasoning == NULL
+    || (reasoning != NULL && strcmp(reasoning, expected_reasoning) == 0);
+  bool verified = acted && changed && reasoning != NULL && expected_verified;
+  if (!after_range_known && !option_boundaries_known) {
     at_minimum = codex_reasoning_effort_is_minimum(reasoning);
     at_maximum = codex_reasoning_effort_is_maximum(reasoning);
   }
@@ -5652,13 +6203,35 @@ static int codex_reasoning_effort_selftest(void) {
     0,
     4
   ) == CODEX_REASONING_DIRECTION_UP;
+  bool max_can_advance_to_ultra = codex_reasoning_direction_for_boundary(
+    CODEX_REASONING_DIRECTION_UP,
+    "max",
+    false,
+    0,
+    0,
+    0
+  ) == CODEX_REASONING_DIRECTION_UP;
+  bool exact_ultra_warning_vocabulary =
+    (codex_ultra_warning_text_flags(CFSTR("Use Ultra with Full access?"))
+      & CODEX_ULTRA_WARNING_TITLE) != 0
+    && (codex_ultra_warning_text_flags(CFSTR(
+      "With Ultra and Full access on, Codex can use extended reasoning while running commands, using the internet, and editing files anywhere on your computer without asking."
+    )) & CODEX_ULTRA_WARNING_BODY) != 0
+    && (codex_ultra_warning_text_flags(CFSTR("Use Full access"))
+      & CODEX_ULTRA_WARNING_FULL_ACCESS) != 0
+    && (codex_ultra_warning_text_flags(CFSTR("Continue"))
+      & CODEX_ULTRA_WARNING_CONTINUE) != 0
+    && codex_ultra_warning_text_flags(CFSTR("Confirm another setting")) == 0;
   printf(
-    "upper_reverses=%d lower_reverses=%d middle_preserves=%d\n",
+    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_ultra_warning_vocabulary=%d\n",
     upper_reverses ? 1 : 0,
     lower_reverses ? 1 : 0,
-    middle_preserves ? 1 : 0
+    middle_preserves ? 1 : 0,
+    max_can_advance_to_ultra ? 1 : 0,
+    exact_ultra_warning_vocabulary ? 1 : 0
   );
-  return upper_reverses && lower_reverses && middle_preserves ? 0 : 1;
+  return upper_reverses && lower_reverses && middle_preserves
+    && max_can_advance_to_ultra && exact_ultra_warning_vocabulary ? 0 : 1;
 }
 
 static int toggle_codex_fast_mode(void) {

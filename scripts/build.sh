@@ -4,6 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
 PLUGIN_DIR="$ROOT_DIR/com.yechan.threaddeck.sdPlugin"
 
+node "$ROOT_DIR/scripts/sync-localizations.mjs"
+
 mkdir -p "$PLUGIN_DIR/bin"
 for bundled in "$PLUGIN_DIR"/bin/*.js(N); do
   [[ -f "$ROOT_DIR/src/${bundled##*/}" ]] || rm -f "$bundled"

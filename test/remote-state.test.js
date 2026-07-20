@@ -67,7 +67,7 @@ test("typed remote log parsing separates lifecycle data from optional activity",
     turnId: TURN_ID,
     turnStartedAtMs: startedAtMs,
     status: "working",
-    activity: { kind: "edit", label: "구현 중" }
+    activity: { kind: "edit", code: "activity.implement" }
   });
 
   const empty = parseRemoteLogLine(activityLine(
@@ -144,10 +144,10 @@ test("activity parsing is cumulative, bounded, private, monotonic, and TTL scope
   );
   assert.deepEqual(remoteReasoningActivityFromLogLine(planningLine), {
     kind: "think",
-    label: "계획 중"
+    code: "activity.plan"
   });
   assert.equal(applyRemoteActivityLogLine(planningLine, activities), true);
-  assert.equal(activities.get(activityThreadId).activity.label, "계획 중");
+  assert.equal(activities.get(activityThreadId).activity.code, "activity.plan");
 
   const cumulativeLine = activityLine(
     activityThreadId,
@@ -161,7 +161,7 @@ test("activity parsing is cumulative, bounded, private, monotonic, and TTL scope
   assert.equal(applyRemoteActivityLogLine(cumulativeLine, activities), true);
   assert.deepEqual(activities.get(activityThreadId).activity, {
     kind: "edit",
-    label: "구현 중"
+    code: "activity.implement"
   });
 
   const stateBeforeIgnoredLines = structuredClone(activities.get(activityThreadId));
@@ -198,7 +198,7 @@ test("activity parsing is cumulative, bounded, private, monotonic, and TTL scope
     ["**Verifying release artifacts**"]
   );
   assert.equal(applyRemoteActivityLogLine(verificationLine, activities), true);
-  assert.equal(activities.get(activityThreadId).activity.label, "검증 중");
+  assert.equal(activities.get(activityThreadId).activity.code, "activity.verify");
   const verifiedState = structuredClone(activities.get(activityThreadId));
 
   assert.equal(applyRemoteActivityLogLine(verificationLine, activities), false);
@@ -228,7 +228,7 @@ test("activity parsing is cumulative, bounded, private, monotonic, and TTL scope
     lifecycle,
     reasoningObservedMs + 4_500,
     activities
-  ).label, "검증 중");
+  ).code, "activity.verify");
   assert.equal(remoteWorkingActivity(
     { id: activityThreadId },
     lifecycle,
@@ -236,15 +236,15 @@ test("activity parsing is cumulative, bounded, private, monotonic, and TTL scope
     activities
   ), null);
 
-  assert.equal(classifyRemoteReasoningSummary("Planning final validation tests").label, "계획 중");
-  assert.equal(classifyRemoteReasoningSummary("Searching current documentation").label, "검색 중");
-  assert.equal(classifyRemoteReasoningSummary("Summarizing final results").label, "정리 중");
+  assert.equal(classifyRemoteReasoningSummary("Planning final validation tests").code, "activity.plan");
+  assert.equal(classifyRemoteReasoningSummary("Searching current documentation").code, "activity.searching");
+  assert.equal(classifyRemoteReasoningSummary("Summarizing final results").code, "activity.wrapUp");
 
   const serialized = JSON.stringify(activities.get(activityThreadId));
   assert.doesNotMatch(serialized, /Planning final validation tests/);
   assert.doesNotMatch(serialized, /Implementing compact activity cache/);
   assert.doesNotMatch(serialized, /Verifying release artifacts/);
-  assert.deepEqual(Object.keys(activities.get(activityThreadId).activity).sort(), ["kind", "label"]);
+  assert.deepEqual(Object.keys(activities.get(activityThreadId).activity).sort(), ["code", "kind"]);
 });
 
 test("new activity turns reject prior-turn and post-terminal activity", () => {
@@ -267,14 +267,14 @@ test("new activity turns reject prior-turn and post-terminal activity", () => {
     activities
   ), true);
   assert.equal(activities.get(threadId).turnId, null);
-  assert.equal(activities.get(threadId).activity.label, "요청 분석");
+  assert.equal(activities.get(threadId).activity.code, "activity.request");
   assert.equal(activities.get(threadId).supersededTurnId, oldTurnId);
 
   assert.equal(applyRemoteActivityLogLine(
     activityLine(threadId, newStartMs + 1_000, oldTurnId, ["**Implementing stale prior turn**"]),
     activities
   ), false);
-  assert.equal(activities.get(threadId).activity.label, "요청 분석");
+  assert.equal(activities.get(threadId).activity.code, "activity.request");
 
   assert.equal(applyRemoteActivityLogLine(
     activityLine(threadId, newStartMs + 2_000, newTurnId, ["**Analyzing current turn**"]),
@@ -341,7 +341,7 @@ test("quick retry ignores delayed prior completion before and after the new turn
     activities
   ), true);
   assert.equal(activities.get(threadId).turnId, turnB);
-  assert.equal(activities.get(threadId).activity.label, "구현 중");
+  assert.equal(activities.get(threadId).activity.code, "activity.implement");
   assert.equal(activities.get(threadId).terminal, false);
 
   const identifiedState = structuredClone(activities.get(threadId));
@@ -472,7 +472,7 @@ test("activity storage is independent and runtime flags override its phase", () 
   assert.equal(active.status, "working");
   assert.equal(active.startedAtMs, startedAtMs);
   assert.equal(active.reasoningEffort, "high");
-  assert.equal(active.activity.label, "계획 중");
+  assert.equal(active.activity.code, "activity.plan");
 
   const approval = derive({
     id: THREAD_ID,
@@ -484,7 +484,7 @@ test("activity storage is independent and runtime flags override its phase", () 
     runtimeObservations: new Map(),
     activities
   });
-  assert.equal(approval.activity.label, "원격 승인 대기");
+  assert.equal(approval.activity.code, "activity.remoteApproval");
 
   const input = derive({
     id: THREAD_ID,
@@ -496,7 +496,7 @@ test("activity storage is independent and runtime flags override its phase", () 
     runtimeObservations: new Map(),
     activities
   });
-  assert.equal(input.activity.label, "원격 입력 대기");
+  assert.equal(input.activity.code, "activity.remoteInput");
 
   const error = derive({
     id: THREAD_ID,
@@ -509,7 +509,7 @@ test("activity storage is independent and runtime flags override its phase", () 
     activities
   });
   assert.equal(error.status, "error");
-  assert.equal(error.activity.label, "원격 오류");
+  assert.equal(error.activity.code, "activity.remoteError");
 });
 
 test("explicit completion freezes the accurate duration and resume cannot rewrite it", () => {

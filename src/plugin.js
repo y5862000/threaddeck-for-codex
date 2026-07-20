@@ -8,6 +8,19 @@ const path = require("node:path");
 const { promisify } = require("node:util");
 
 const {
+  activityLabel,
+  feedbackLabel,
+  localizeText,
+  setLanguage,
+  t
+} = require("./i18n");
+const {
+  parseRegistrationInfo,
+  runtimeCapabilities,
+  runtimeLanguage
+} = require("./runtime-info");
+
+const {
   compactLine,
   normalizeTitle,
   stringFingerprint,
@@ -271,6 +284,12 @@ function argument(name) {
 const port = argument("-port");
 const pluginUUID = argument("-pluginUUID");
 const registerEvent = argument("-registerEvent");
+const registrationInfo = parseRegistrationInfo(argument("-info"));
+const runtime = runtimeCapabilities(registrationInfo);
+const language = setLanguage(runtimeLanguage(
+  registrationInfo,
+  argument("--language") || process.env.THREADDECK_LANGUAGE
+));
 const snapshotMode = process.argv.includes("--snapshot");
 const completionContractMode = process.argv.includes("--verify-completion");
 const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
@@ -328,8 +347,12 @@ const activeSendDispatchByContext = new Map();
 const fastModePressStartedAt = new Map();
 const fastModeLongPressTimers = new Map();
 const fastModeLongPressArmedContexts = new Set();
+const fastModeLongPressUpdates = new Map();
 const reasoningBusyContexts = new Set();
 const reasoningDirectionByThreadId = new Map();
+const reasoningVisualOverrideByThreadId = new Map();
+const reasoningPendingCountByThreadId = new Map();
+const reasoningPendingCountByContext = new Map();
 const REASONING_EFFORT_STEPS = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const threadPressByContext = new Map();
 const currentVoicePressByContext = new Map();
@@ -505,7 +528,7 @@ function sendImage(context, svg) {
 
 function feedbackOverlaySvg(svg, feedback) {
   const accent = feedback.kind === "error" ? THEME.red : feedback.kind === "success" ? THEME.green : THEME.blue;
-  const label = compactLine(feedback.label, 6.2);
+  const label = compactLine(feedbackLabel(feedback.label), 6.2);
   const labelWidth = Math.max(1, titleVisualWidth(label));
   const labelFontSize = Math.max(12.5, Math.min(15.5, 76 / labelWidth)).toFixed(1);
   const icon = feedback.kind === "loading"
@@ -541,7 +564,7 @@ function setImage(context, svg) {
 
 function showFeedback(context, kind, label, durationMs) {
   const token = ++feedbackSerial;
-  const feedback = { kind, label, token };
+  const feedback = { kind, label: feedbackLabel(label), token };
   const duration = Number.isFinite(durationMs) ? durationMs : kind === "loading" ? 16_000 : kind === "error" ? 1_100 : 800;
   contextFeedback.set(context, feedback);
   const baseSvg = contextImages.get(context);
@@ -580,31 +603,7 @@ function escapeXml(value) {
 }
 
 function detailedActivityLabel(activity) {
-  const kind = typeof activity === "string" ? "idle" : activity?.kind;
-  const fallbacks = {
-    request: "요청 분석",
-    think: "생각 중",
-    search: "자료 검색",
-    inspect: "내용 확인",
-    edit: "코드 수정",
-    command: "명령 실행",
-    answer: "답변 작성",
-    complete: "작업 완료",
-    stopped: "작업 중단",
-    error: "오류 확인",
-    idle: "상태 확인"
-  };
-  const refinements = {
-    "요청 확인": "요청 분석",
-    "웹 확인": "웹 검색·확인",
-    "앱 확인": "앱 화면 확인",
-    "결과 확인": "도구 결과 확인",
-    "파일 수정": "코드 수정",
-    "진행 안내": "답변 작성"
-  };
-  const raw = String(typeof activity === "string" ? activity : activity?.label ?? "").trim();
-  if (refinements[raw]) return refinements[raw];
-  return raw || fallbacks[kind] || "상태 확인";
+  return activityLabel(activity);
 }
 
 function isFastServiceTier(value) {
@@ -675,8 +674,8 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
   const particleFlowWidth = Math.max(0, fillWidth - particlePadding * 2);
   const particleCycleMs = fast ? 820 : 2600;
   const particlePhase = (nowMs % particleCycleMs) / particleCycleMs;
-  const particleCount = fast ? 10 : 11;
-  const particles = !appearance.ultra || particleFlowWidth < 1 ? "" : Array.from({ length: particleCount }, (_, index) => {
+  const particleCount = 10;
+  const particles = !fast || particleFlowWidth < 1 ? "" : Array.from({ length: particleCount }, (_, index) => {
     const random = (channel) => seededParticleUnit(index, channel);
     const loopAngle = particlePhase * Math.PI * 2;
     let position;
@@ -696,28 +695,6 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
         + Math.sin(loopAngle * yWobbleFrequency + random(6) * Math.PI * 2) * (0.45 + random(7) * 0.8);
       radius = 0.94 + random(8) * 0.38;
       baseOpacity = 0.62 + random(9) * 0.2;
-    } else {
-      // Standard mode uses stable random resting positions plus independent
-      // amplitudes, phases, and integer frequencies. The particles feel
-      // organic without jumping, and every path still closes cleanly.
-      position = 0.04 + random(0) * 0.92;
-      const xFrequency = 1 + Math.floor(random(1) * 4);
-      const yFrequency = 1 + Math.floor(random(2) * 4);
-      const shimmerFrequency = 1 + Math.floor(random(3) * 3);
-      const xAmplitude = 0.65 + random(4) * 1.15;
-      const yAmplitude = 0.7 + random(5) * 1.2;
-      const baseX = trackX + particlePadding + position * particleFlowWidth;
-      const baseY = trackCenterY + (random(6) - 0.5) * 11.5;
-      x = baseX
-        + Math.sin(loopAngle * xFrequency + random(7) * Math.PI * 2) * xAmplitude
-        + Math.sin(loopAngle * (xFrequency + 2) + random(8) * Math.PI * 2) * xAmplitude * 0.28;
-      y = baseY
-        + Math.sin(loopAngle * yFrequency + random(9) * Math.PI * 2) * yAmplitude
-        + Math.sin(loopAngle * (yFrequency + 1) + random(10) * Math.PI * 2) * yAmplitude * 0.22;
-      radius = 1.02 + random(11) * 0.42
-        + Math.sin(loopAngle * shimmerFrequency + random(12) * Math.PI * 2) * 0.08;
-      baseOpacity = 0.7 + random(13) * 0.18
-        + Math.sin(loopAngle * shimmerFrequency + random(14) * Math.PI * 2) * 0.08;
     }
     const opacity = Math.max(0, Math.min(0.94, baseOpacity * edgeFade(position, fast ? 0.12 : 0.08)));
     return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(2)}" fill="#FFFFFF" opacity="${opacity.toFixed(2)}"/>`;
@@ -756,17 +733,25 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
   </g>`;
 }
 
+function smootherStep01(value) {
+  const x = Math.max(0, Math.min(1, Number(value) || 0));
+  return x * x * x * (x * (x * 6 - 15) + 10);
+}
+
 function completionPulseState(threadId, nowMs = renderTimeMs()) {
   const startedAtMs = completionPulseStartedAt.get(threadId);
   if (!Number.isFinite(startedAtMs)) return null;
   const elapsedMs = Math.max(0, nowMs - startedAtMs);
   if (elapsedMs >= THREAD_COMPLETION_PULSE_DURATION_MS) return null;
   const progress = elapsedMs / THREAD_COMPLETION_PULSE_DURATION_MS;
-  // The completed thread gets three deliberate pulses with a slow tail so it
-  // remains unmistakable even when the deck is only in peripheral vision.
+  // Three deliberate breaths keep the completed task unmistakable. A short
+  // quintic attack and release remove the hard first/last-frame jump, while a
+  // small floor prevents the troughs from reading as dropped frames.
   const wave = 0.5 + 0.5 * Math.cos(progress * Math.PI * 6);
-  const envelope = Math.pow(1 - progress, 0.38);
-  const strength = wave * envelope;
+  const attack = 0.14 + 0.86 * smootherStep01(elapsedMs / 180);
+  const release = smootherStep01((1 - progress) / 0.14);
+  const envelope = 0.78 + 0.22 * (1 - progress);
+  const strength = attack * (0.16 + 0.84 * wave) * release * envelope;
   return { elapsedMs, progress, strength };
 }
 
@@ -778,9 +763,10 @@ function unreadCompletionPulseState(threadId, nowMs = renderTimeMs()) {
   const phase = (elapsedMs % UNREAD_COMPLETION_PULSE_PERIOD_MS)
     / UNREAD_COMPLETION_PULSE_PERIOD_MS;
   const breath = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
-  // Keep a visible green floor between breaths. The initial completion fan-out
-  // is deliberately stronger; this slower task-only pulse means "not viewed".
-  const strength = 0.3 + 0.5 * breath;
+  // Ease into the persistent task-only breath as the initial animation ends,
+  // then keep a visible green floor between peaks to mean "not viewed".
+  const attack = smootherStep01(elapsedMs / 320);
+  const strength = attack * (0.22 + 0.5 * breath);
   return {
     elapsedMs,
     progress: phase,
@@ -801,13 +787,14 @@ function globalCompletionPulseState(nowMs = renderTimeMs()) {
   const elapsedMs = Math.max(0, nowMs - globalCompletionStartedAtMs);
   if (elapsedMs >= GLOBAL_COMPLETION_PULSE_DURATION_MS) return null;
   const progress = elapsedMs / GLOBAL_COMPLETION_PULSE_DURATION_MS;
-  // Never drop fully to black between the two breaths. A shallow floor looks
-  // smoother on Neo's LCD keys and avoids making sparse frames feel like a
-  // stutter while the whole deck is being updated.
+  // Two coordinated breaths acknowledge the completion across every key.
+  // Quintic attack/release keeps opacity and stroke width velocity continuous.
   const breath = 0.5 + 0.5 * Math.cos(progress * Math.PI * 4);
-  const wave = 0.28 + 0.72 * breath;
-  const envelope = Math.pow(1 - progress, 0.62);
-  return { elapsedMs, progress, strength: wave * envelope };
+  const attack = 0.18 + 0.82 * smootherStep01(elapsedMs / 160);
+  const release = smootherStep01((1 - progress) / 0.2);
+  const envelope = 0.82 + 0.18 * (1 - progress);
+  const strength = attack * (0.22 + 0.78 * breath) * release * envelope;
+  return { elapsedMs, progress, strength };
 }
 
 function globalCompletionChrome(effect) {
@@ -876,7 +863,7 @@ function threadHeader(accent, status, statusLabel, activity, pulsing = false, re
   const info = typeof activity === "string" ? { kind: "idle", label: activity } : activity ?? { kind: "idle", label: "상태 확인 중" };
   const opacity = pulsing ? (pulse ? 1 : 0.5) : 1;
   const activityLabel = detailedActivityLabel(info);
-  const label = compactLine(status === "working" ? activityLabel : statusLabel, fast ? 5.7 : 6.8);
+  const label = compactLine(status === "working" ? activityLabel : localizeText(statusLabel), fast ? 5.7 : 6.8);
   if (status === "working") {
     return flowingReasoningSlider(accent, { text: label, effort: reasoningEffort }, fast);
   }
@@ -1036,18 +1023,18 @@ function voiceTargetOverlaySvg(state, nowMs = renderTimeMs()) {
         ? `<path d="M120 29V16M115 21L120 16L125 21" fill="none" stroke="${THEME.text}" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"/>`
       : `<rect x="117" y="14" width="6" height="11" rx="3" fill="#FFFFFF"/><path d="M113.5 22V23C113.5 26.6 116.4 29.5 120 29.5C123.6 29.5 126.5 26.6 126.5 23V22M120 29.5V33" fill="none" stroke="#FFFFFF" stroke-width="2" stroke-linecap="round"/>`;
   const bannerLabel = state === "recording"
-    ? "말하는 중"
+    ? t("voice.recording")
     : state === "preparing"
-      ? "전환 준비"
+      ? t("voice.preparing")
       : state === "transcribing"
-        ? "받아쓰기 중"
+        ? t("voice.transcribing")
         : state === "submitting"
-          ? "제출 중"
+          ? t("voice.submitting")
           : state === "sent"
-            ? "전송 완료"
+            ? t("voice.sent")
             : state === "complete"
-              ? "입력 완료"
-              : "입력 실패";
+              ? t("voice.complete")
+              : t("voice.error");
   const bannerTextColor = state === "recording" || state === "error"
     ? THEME.amber
     : state === "complete" || state === "sent"
@@ -1309,12 +1296,12 @@ function fastModeSvg(
           ? "error"
           : "unknown";
   const warningLabel = unavailable
-    ? "사용 불가"
+    ? t("fast.unavailable")
     : failed
-      ? "상태 오류"
+      ? t("fast.error")
       : confirmed
         ? ""
-        : "확인 필요";
+        : t("fast.unknown");
   const warning = Boolean(warningLabel);
   const accent = enabled ? THEME.green : warning ? THEME.amber : THEME.muted;
   // Keep one sharp apex instead of closing the path across a horizontal top
@@ -1353,15 +1340,26 @@ function reasoningControlSvg(
   const accent = effort === "ultra"
     ? appearanceMode === "light" ? "#7040C7" : "#B15CE8"
     : effort ? THEME.blue : THEME.amber;
+  const levelLabel = {
+    none: "LIGHT",
+    minimal: "LIGHT",
+    low: "LIGHT",
+    medium: "MEDIUM",
+    high: "HIGH",
+    xhigh: "EXTRA HIGH",
+    max: "MAX",
+    ultra: "ULTRA"
+  }[effort] ?? "EFFORT";
+  const levelFontSize = levelLabel === "EXTRA HIGH" ? 17 : 22;
   const slider = flowingReasoningSlider(
     accent,
     { effort },
     fast,
     {
-      trackX: 15,
-      trackY: 53,
+      trackX: 16,
+      trackY: 79,
       trackWidth: 114,
-      trackHeight: 38,
+      trackHeight: 24,
       trackFill: THEME.raised,
       trackStroke: THEME.borderStrong,
       trackStrokeWidth: 1,
@@ -1369,26 +1367,17 @@ function reasoningControlSvg(
       idSuffix: "Control"
     }
   );
-  const ascending = direction !== "down";
-  const leftOpacity = ascending ? ".28" : ".94";
-  const rightOpacity = ascending ? ".94" : ".28";
-  const unknownGlyph = effort ? "" : `
-    <circle cx="72" cy="72" r="14" fill="${THEME.raised}" stroke="${THEME.amber}" stroke-opacity=".78"/>
-    <path d="M68 67C68.5 62.5 76 61.8 77 66.2C77.6 69.2 73.2 70.2 72 73V75" fill="none" stroke="${THEME.amber}" stroke-width="2.6" stroke-linecap="round"/>
-    <circle cx="72" cy="80" r="1.7" fill="${THEME.amber}"/>`;
   const speedGlyph = fast
-    ? `<path data-reasoning-fast="on" d="M75 15L62 34H70L66 48L84 27H75Z" fill="${THEME.green}"/>`
-    : `<path data-reasoning-fast="off" d="M75 15L62 34H70L66 48L84 27H75Z" fill="none" stroke="${THEME.muted}" stroke-width="2.4" stroke-linejoin="round"/>`;
+    ? `<path data-reasoning-fast="on" d="M117 15L108 29H114L111 39L124 24H117Z" fill="${accent}"/>`
+    : "";
   const chrome = busy
     ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.blue}" fill-opacity=".05" stroke="${THEME.blue}" stroke-opacity=".78" stroke-width="2.6"/>`
     : "";
   return shell(accent, `
-    <g data-reasoning-state="${status}" data-reasoning-direction="${ascending ? "up" : "down"}" data-fast-state="${fast ? "on" : "off"}">
+    <g data-reasoning-state="${status}" data-reasoning-direction="${direction !== "down" ? "up" : "down"}" data-fast-state="${fast ? "on" : "off"}">
       ${speedGlyph}
+      <text data-reasoning-label="${status}" x="72" y="58" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${levelFontSize + 1}" font-weight="760" text-anchor="middle">${levelLabel}</text>
       ${slider}
-      ${unknownGlyph}
-      <path d="M59 109L50 100L59 91" fill="none" stroke="${THEME.text}" stroke-opacity="${leftOpacity}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
-      <path d="M85 91L94 100L85 109" fill="none" stroke="${THEME.text}" stroke-opacity="${rightOpacity}" stroke-width="3.2" stroke-linecap="round" stroke-linejoin="round"/>
     </g>`, "", chrome);
 }
 
@@ -1398,26 +1387,64 @@ function cancelFastModePress(context, restoreImage = false) {
   fastModeLongPressTimers.delete(context);
   fastModePressStartedAt.delete(context);
   fastModeLongPressArmedContexts.delete(context);
-  if (restoreImage && contexts.get(context) === ACTIONS.fastMode) {
-    setImage(context, fastModeSvg());
+  if (restoreImage) {
+    const action = contexts.get(context);
+    if (action === ACTIONS.fastMode) setImage(context, fastModeSvg());
+    else if (action === ACTIONS.reasoning) {
+      const svg = staticActionSvg(action, context);
+      if (svg) setImage(context, svg);
+    }
   }
 }
 
-function beginFastModePress(context) {
-  if (fastModePressStartedAt.has(context) || activeFastModeUpdate) return;
+function triggerReasoningFastModeHold(context, options = {}) {
+  if (!fastModePressStartedAt.has(context)
+      || contexts.get(context) !== ACTIONS.reasoning) return Promise.resolve(false);
+  const existing = fastModeLongPressUpdates.get(context);
+  if (fastModeLongPressArmedContexts.has(context)) {
+    return existing ?? Promise.resolve(true);
+  }
+  fastModeLongPressArmedContexts.add(context);
+  const svg = staticActionSvg(ACTIONS.reasoning, context);
+  if (svg) setImage(context, svg);
+
+  // Once the physical hold crosses its threshold, it is unambiguously a Fast
+  // gesture. Start the verified toggle now instead of adding key-up latency.
+  // key-up only clears the press bookkeeping and returns this same operation.
+  const update = afterFastModeUpdate(
+    () => toggleFastMode(context, options.fastMode ?? options)
+  );
+  fastModeLongPressUpdates.set(context, update);
+  update.then(
+    () => {
+      if (fastModeLongPressUpdates.get(context) === update) {
+        fastModeLongPressUpdates.delete(context);
+      }
+    },
+    () => {
+      if (fastModeLongPressUpdates.get(context) === update) {
+        fastModeLongPressUpdates.delete(context);
+      }
+    }
+  );
+  return update;
+}
+
+function beginFastModePress(context, options = {}) {
+  const action = contexts.get(context);
+  if (fastModePressStartedAt.has(context)
+      || (activeFastModeUpdate && action !== ACTIONS.reasoning)) return;
   fastModePressStartedAt.set(context, Date.now());
   const timer = setTimeout(() => {
     if (!fastModePressStartedAt.has(context)
         || ![ACTIONS.fastMode, ACTIONS.reasoning].includes(contexts.get(context))) return;
-    fastModeLongPressArmedContexts.add(context);
-    setImage(context, contexts.get(context) === ACTIONS.reasoning
-      ? reasoningControlSvg(
-        fastModeState,
-        primaryThreadId,
-        reasoningDirectionByThreadId.get(primaryThreadId) ?? "up",
-        true
-      )
-      : fastModeSvg(fastModeState, primaryThreadId, true));
+    const action = contexts.get(context);
+    if (action === ACTIONS.reasoning) {
+      void triggerReasoningFastModeHold(context, options);
+    } else {
+      fastModeLongPressArmedContexts.add(context);
+      setImage(context, fastModeSvg(fastModeState, primaryThreadId, true));
+    }
   }, FAST_MODE_LONG_PRESS_MS);
   fastModeLongPressTimers.set(context, timer);
 }
@@ -1432,10 +1459,21 @@ function endFastModePress(context, options = {}) {
 function endReasoningControlPress(context, options = {}) {
   const startedAtMs = fastModePressStartedAt.get(context);
   if (!Number.isFinite(startedAtMs)) return Promise.resolve(false);
-  const longPress = Date.now() - startedAtMs >= FAST_MODE_LONG_PRESS_MS;
-  cancelFastModePress(context, true);
+  const triggeredAtThreshold = fastModeLongPressArmedContexts.has(context);
+  const thresholdUpdate = fastModeLongPressUpdates.get(context);
+  const longPress = triggeredAtThreshold
+    || Date.now() - startedAtMs >= FAST_MODE_LONG_PRESS_MS;
+  // A short tap is immediately replaced by its optimistic effort frame, so
+  // avoid sending an unnecessary old-state frame first. Long press still
+  // clears its armed border while waiting to toggle Fast mode.
+  cancelFastModePress(context, longPress && !triggeredAtThreshold);
+  if (triggeredAtThreshold) {
+    return thresholdUpdate ?? Promise.resolve(true);
+  }
   return longPress
-    ? toggleFastMode(context, options.fastMode ?? options)
+    // Event-loop starvation can deliver key-up before the matured timer. Keep
+    // a release-time fallback, but the normal path starts exactly at 0.6 s.
+    ? afterFastModeUpdate(() => toggleFastMode(context, options.fastMode ?? options))
     : stepReasoningEffort(context, options.reasoning ?? options);
 }
 
@@ -1495,10 +1533,19 @@ function staticActionSvg(action, context = null) {
     );
   }
   if (action === ACTIONS.reasoning) {
+    const visual = reasoningVisualOverrideByThreadId.get(primaryThreadId);
+    const displayState = visual
+      ? {
+        ...fastModeState,
+        threadId: primaryThreadId,
+        reasoningEffort: visual.effort,
+        failed: false
+      }
+      : fastModeState;
     return reasoningControlSvg(
-      fastModeState,
+      displayState,
       primaryThreadId,
-      reasoningDirectionByThreadId.get(primaryThreadId) ?? "up",
+      visual?.direction ?? reasoningDirectionByThreadId.get(primaryThreadId) ?? "up",
       context ? reasoningBusyContexts.has(context) : false
     );
   }
@@ -3139,7 +3186,11 @@ function releaseVoiceKeysSync(rawOptions = {}) {
   fastModeLongPressTimers.clear();
   fastModePressStartedAt.clear();
   fastModeLongPressArmedContexts.clear();
+  fastModeLongPressUpdates.clear();
   reasoningBusyContexts.clear();
+  reasoningVisualOverrideByThreadId.clear();
+  reasoningPendingCountByThreadId.clear();
+  reasoningPendingCountByContext.clear();
   if (released && voiceMediaPaused && bridge("media-resume-paused", null, { quiet: true })) {
     voiceMediaPaused = false;
   }
@@ -3439,16 +3490,36 @@ function fastModeStateFromThread(thread, fallback = null) {
   const fallbackReasoning = fallback?.threadId === threadId
     ? normalizedReasoningEffort(fallback?.reasoningEffort)
     : null;
-  const serviceTier = normalizedServiceTier(thread?.serviceTier);
-  const metadataEnabled = serviceTier ? isFastServiceTier(serviceTier) : null;
-  const enabled = fallbackMatches ? fallback.enabled : metadataEnabled;
+  const nextReasoning = normalizedReasoningEffort(thread?.nextReasoningEffort);
+  const activeReasoning = normalizedReasoningEffort(thread?.reasoningEffort);
+  const nextServiceTier = normalizedServiceTier(thread?.nextServiceTier);
+  const activeServiceTier = normalizedServiceTier(thread?.serviceTier);
+  const hasNextSettingsSnapshot = Number.isFinite(thread?.nextSettingsAtMs);
+  const activeMetadataEnabled = activeServiceTier
+    ? isFastServiceTier(activeServiceTier)
+    : null;
+  const nextMetadataEnabled = hasNextSettingsSnapshot && nextServiceTier
+    ? isFastServiceTier(nextServiceTier)
+    : null;
+  // An explicit next-turn snapshot beats the cache. When no such snapshot is
+  // available, keep a verified composer observation instead of replacing it
+  // with the already-running turn's older speed.
+  const enabled = typeof nextMetadataEnabled === "boolean"
+    ? nextMetadataEnabled
+    : fallbackMatches
+      ? fallback.enabled
+      : activeMetadataEnabled;
   return {
     threadId,
     enabled,
     available: typeof enabled === "boolean"
-      ? fallbackMatches ? fallback.available ?? true : true
+      ? typeof nextMetadataEnabled !== "boolean" && fallbackMatches
+        ? fallback.available ?? true
+        : true
       : null,
-    reasoningEffort: fallbackReasoning ?? normalizedReasoningEffort(thread?.reasoningEffort),
+    reasoningEffort: hasNextSettingsSnapshot
+      ? nextReasoning ?? fallbackReasoning ?? activeReasoning
+      : fallbackReasoning ?? activeReasoning,
     failed: false
   };
 }
@@ -3783,9 +3854,7 @@ function toggleFastMode(context, options = {}) {
   return update;
 }
 
-function stepReasoningEffort(context, options = {}) {
-  if (activeFastModeUpdate) return activeFastModeUpdate;
-  fastModeRevision += 1;
+function performReasoningEffortStep(context, options = {}) {
   const productionNativeAction = !options.stepEffort;
   const synchronizeCurrent = options.synchronizeCurrent
     ?? (productionNativeAction
@@ -3795,28 +3864,10 @@ function stepReasoningEffort(context, options = {}) {
     ?? (productionNativeAction
       ? () => runKeyBridgeAwaited("codex-restore-composer", null, { quiet: true })
       : null);
-  const initialThreadId = primaryThreadId;
-  const initialState = fastModeState;
+  const initialThreadId = Object.hasOwn(options, "queuedThreadId")
+    ? options.queuedThreadId
+    : primaryThreadId;
   const initialDirection = options.direction ?? nextReasoningDirection(initialThreadId);
-  // The native Chromium menu transaction is deliberately conservative and can
-  // take a moment. Move the hardware track on key release immediately, then
-  // reconcile it with the exact menu option returned by Codex. Do not guess
-  // while a Side Chat or task navigation is still resolving, because that
-  // would briefly paint the previous task's setting.
-  const optimistic = currentNavigationPromise()
-    ? null
-    : optimisticReasoningStep(initialThreadId, initialDirection, initialState);
-  if (optimistic) {
-    fastModeState = {
-      ...initialState,
-      threadId: initialThreadId,
-      reasoningEffort: optimistic.effort,
-      failed: false
-    };
-    reasoningDirectionByThreadId.set(initialThreadId, optimistic.direction);
-    reasoningBusyContexts.add(context);
-    renderFastModeContexts();
-  }
   const update = (async () => {
     if (productionNativeAction
         && !ensureCommandPermissions("reasoning-effort-step", context)) return false;
@@ -3831,6 +3882,9 @@ function stepReasoningEffort(context, options = {}) {
         refreshFastMode: false
       });
       if (!synchronizedThread?.id) throw new Error("Codex current task was not found");
+      if (initialThreadId && synchronizedThread.id !== initialThreadId) {
+        throw new Error("Codex current task changed while effort input was queued");
+      }
       const pendingRefresh = activeFastModeRefresh?.promise;
       if (pendingRefresh) await pendingRefresh.catch(() => false);
       const threadId = synchronizedThread.id;
@@ -3887,13 +3941,6 @@ function stepReasoningEffort(context, options = {}) {
       return true;
     } catch (error) {
       if (focusComposer) await focusComposer();
-      if (optimistic
-          && primaryThreadId === initialThreadId
-          && fastModeState.threadId === initialThreadId) {
-        fastModeState = initialState;
-        reasoningDirectionByThreadId.set(initialThreadId, initialDirection);
-        renderFastModeContexts();
-      }
       const permissionFailure = noteBridgeFailure(
         "reasoning-effort-step",
         error,
@@ -3903,11 +3950,78 @@ function stepReasoningEffort(context, options = {}) {
       console.error(`Could not change Codex reasoning effort: ${error?.message ?? "unknown error"}`);
       return false;
     }
-  })().finally(() => {
-    reasoningBusyContexts.delete(context);
-    if (activeFastModeUpdate === update) activeFastModeUpdate = null;
-    renderFastModeContexts();
-  });
+  })();
+  return update;
+}
+
+function incrementReasoningPending(map, key) {
+  if (!key) return;
+  map.set(key, (map.get(key) ?? 0) + 1);
+}
+
+function decrementReasoningPending(map, key) {
+  if (!key) return 0;
+  const remaining = Math.max(0, (map.get(key) ?? 0) - 1);
+  if (remaining > 0) map.set(key, remaining);
+  else map.delete(key);
+  return remaining;
+}
+
+function stepReasoningEffort(context, options = {}) {
+  fastModeRevision += 1;
+  const pendingNavigation = options.navigationPromise ?? currentNavigationPromise();
+  // A press made while Side Chat/task creation is still resolving belongs to
+  // the destination that will be verified by the transaction, not the old
+  // currently cached task. In that case defer both identity and optimism.
+  const queuedThreadId = pendingNavigation ? null : primaryThreadId;
+  const visual = reasoningVisualOverrideByThreadId.get(queuedThreadId);
+  const direction = options.direction
+    ?? visual?.direction
+    ?? nextReasoningDirection(queuedThreadId);
+  // Paint every tap immediately from the last requested position. Native AX
+  // transactions remain serialized behind `activeFastModeUpdate`, so rapid
+  // presses can safely build a multi-step request without racing the Codex
+  // model picker or sending focus to a different composer control.
+  if (queuedThreadId) {
+    const baseState = {
+      ...fastModeState,
+      threadId: queuedThreadId,
+      reasoningEffort: visual?.effort ?? fastModeState.reasoningEffort
+    };
+    const optimistic = optimisticReasoningStep(queuedThreadId, direction, baseState);
+    if (optimistic) {
+      reasoningVisualOverrideByThreadId.set(queuedThreadId, optimistic);
+      reasoningDirectionByThreadId.set(queuedThreadId, optimistic.direction);
+    }
+  }
+  incrementReasoningPending(reasoningPendingCountByThreadId, queuedThreadId);
+  incrementReasoningPending(reasoningPendingCountByContext, context);
+  reasoningBusyContexts.add(context);
+  renderFastModeContexts();
+
+  const blocker = activeFastModeUpdate;
+  let update;
+  update = Promise.resolve(blocker)
+    .catch(() => false)
+    .then(() => performReasoningEffortStep(context, {
+      ...options,
+      queuedThreadId,
+      direction
+    }))
+    .finally(() => {
+      const threadRemaining = decrementReasoningPending(
+        reasoningPendingCountByThreadId,
+        queuedThreadId
+      );
+      const contextRemaining = decrementReasoningPending(
+        reasoningPendingCountByContext,
+        context
+      );
+      if (threadRemaining === 0) reasoningVisualOverrideByThreadId.delete(queuedThreadId);
+      if (contextRemaining === 0) reasoningBusyContexts.delete(context);
+      if (activeFastModeUpdate === update) activeFastModeUpdate = null;
+      renderFastModeContexts();
+    });
   activeFastModeUpdate = update;
   return update;
 }
@@ -3982,6 +4096,11 @@ function timingLabel(thread, nowMs = renderTimeMs()) {
   return formatTimingLabel(thread, nowMs);
 }
 
+function displayThreadTitle(thread) {
+  if (thread?.titleKey) return t(thread.titleKey);
+  return normalizeTitle(thread?.title);
+}
+
 function queueBadgeSvg(thread) {
   const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
   if (queueCount === 0) return "";
@@ -4045,7 +4164,7 @@ function ephemeralThreadSvg(thread) {
   const completionEffect = visibleCompletionPulseState(thread);
   const titleFontSize = 20.5;
   const titleX = 79;
-  const [line1, line2] = wrapTitle(thread.title, 5.05);
+  const [line1, line2] = wrapTitle(displayThreadTitle(thread), 5.05);
   const hasSecondTitleLine = Boolean(line2);
   const titleLine1Y = hasSecondTitleLine ? 65 : 79;
   const iconYOffset = hasSecondTitleLine ? 0 : 14;
@@ -4069,8 +4188,8 @@ function threadSvg(thread, slot) {
     return shell(THEME.muted, `
       <circle cx="72" cy="69" r="19" fill="${THEME.raised}"/>
       <path d="M62 69H82M72 59V79" stroke="${THEME.muted}" stroke-width="2.5" stroke-linecap="round"/>
-      <text x="72" y="114" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="19.5" font-weight="600" text-anchor="middle">작업 없음</text>`,
-      threadHeader(THEME.muted, "idle", "대기", { kind: "idle", label: "작업 대기" }));
+      <text x="72" y="114" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="19.5" font-weight="600" text-anchor="middle">${escapeXml(t("thread.empty"))}</text>`,
+      threadHeader(THEME.muted, "idle", t("status.idle"), { kind: "idle", code: "activity.waiting" }));
   }
   if (thread.ephemeral) return ephemeralThreadSvg(thread);
 
@@ -4085,7 +4204,7 @@ function threadSvg(thread, slot) {
   const completionEffect = visibleCompletionPulseState(thread);
   const titleFontSize = 20.5;
   const titleX = thread.pinned ? 78 : 72;
-  const [line1, line2] = wrapTitle(thread.title, thread.pinned ? 4.9 : 5.75);
+  const [line1, line2] = wrapTitle(displayThreadTitle(thread), thread.pinned ? 4.9 : 5.75);
   const hasSecondTitleLine = Boolean(line2);
   const titleLine1Y = hasSecondTitleLine ? 65 : 79;
   const pinYOffset = hasSecondTitleLine ? 0 : 13;
@@ -4791,60 +4910,8 @@ function remoteStatusForThread(
   });
 }
 
-function applyFocusedRemoteComposerState(thread, state, nowMs = Date.now()) {
-  if (!thread?.remote) return false;
-  const serviceTier = state?.available && typeof state.enabled === "boolean"
-    ? state.enabled ? "priority" : "default"
-    : null;
-  const reasoningEffort = normalizedReasoningEffort(state?.reasoningEffort);
-  if (!serviceTier && !reasoningEffort) return false;
-  const lifecycle = remoteLifecycleCache.get(thread.id) ?? null;
-  const recorded = recordRemoteComposerStateObservation(
-    thread,
-    lifecycle,
-    {
-      reasoningEffort,
-      serviceTier
-    },
-    nowMs,
-    remoteComposerStateByThreadId
-  );
-  if (!recorded) return false;
-
-  let changed = false;
-  const refreshedThread = (candidate) => {
-    const base = {
-      ...candidate,
-      reasoningEffort: Object.hasOwn(candidate, "_remoteSummaryReasoningEffort")
-        ? candidate._remoteSummaryReasoningEffort
-        : candidate.reasoningEffort,
-      serviceTier: Object.hasOwn(candidate, "_remoteSummaryServiceTier")
-        ? candidate._remoteSummaryServiceTier
-        : candidate.serviceTier
-    };
-    return {
-      ...base,
-      ...remoteStatusForThread(base, nowMs),
-      _remoteSummaryReasoningEffort: base.reasoningEffort ?? null,
-      _remoteSummaryServiceTier: base.serviceTier ?? null
-    };
-  };
-  threadSlots = threadSlots.map((candidate) => {
-    if (candidate?.id !== thread.id) return candidate;
-    changed = true;
-    return refreshedThread(candidate);
-  });
-  if (primaryThreadRow?.id === thread.id) {
-    primaryThreadRow = refreshedThread(primaryThreadRow);
-    changed = true;
-  }
-  if (changed) renderThreadContexts();
-  return true;
-}
-
 function applyFocusedComposerState(thread, state, nowMs = Date.now()) {
   if (!thread?.id) return false;
-  if (thread.remote) return applyFocusedRemoteComposerState(thread, state, nowMs);
   const reasoningEffort = normalizedReasoningEffort(state?.reasoningEffort);
   const serviceTier = typeof state?.enabled === "boolean"
     ? state.enabled ? "priority" : "default"
@@ -4855,11 +4922,12 @@ function applyFocusedComposerState(thread, state, nowMs = Date.now()) {
   const refreshedThread = (candidate) => {
     const next = {
       ...candidate,
-      reasoningEffort: reasoningEffort ?? candidate.reasoningEffort,
-      serviceTier: serviceTier ?? candidate.serviceTier
+      nextReasoningEffort: reasoningEffort ?? candidate.nextReasoningEffort,
+      nextServiceTier: serviceTier ?? candidate.nextServiceTier,
+      nextSettingsAtMs: nowMs
     };
-    changed ||= next.reasoningEffort !== candidate.reasoningEffort
-      || next.serviceTier !== candidate.serviceTier;
+    changed ||= next.nextReasoningEffort !== candidate.nextReasoningEffort
+      || next.nextServiceTier !== candidate.nextServiceTier;
     return next;
   };
   threadSlots = threadSlots.map((candidate) => (
@@ -4868,7 +4936,8 @@ function applyFocusedComposerState(thread, state, nowMs = Date.now()) {
   if (primaryThreadRow?.id === thread.id) {
     primaryThreadRow = refreshedThread(primaryThreadRow);
   }
-  if (changed) renderThreadContexts();
+  // These values describe the next run and are intentionally invisible on the
+  // current turn card. The caller already repaints the dedicated controls.
   return changed;
 }
 
@@ -5203,6 +5272,10 @@ async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
     activity: null,
     reasoningEffort: null,
     serviceTier: undefined,
+    nextReasoningEffort: null,
+    nextServiceTier: undefined,
+    nextSettingsAtMs: null,
+    turnId: null,
     foundStart: false
   };
   try {
@@ -5215,7 +5288,14 @@ async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
       const lines = text.split("\n");
       carry = lines.shift() ?? "";
       const foundStart = consumeLifecycleLines(lines, lifecycle);
-      if (foundStart) return { ...lifecycle, serviceTier: lifecycle.serviceTier ?? "default", size: stat.size, mtimeMs: stat.mtimeMs };
+      if (foundStart) return {
+        ...lifecycle,
+        serviceTier: lifecycle.serviceTier ?? "default",
+        nextReasoningEffort: lifecycle.nextReasoningEffort ?? lifecycle.reasoningEffort,
+        nextServiceTier: lifecycle.nextServiceTier ?? lifecycle.serviceTier ?? "default",
+        size: stat.size,
+        mtimeMs: stat.mtimeMs
+      };
       cursor = start;
       searched += length;
     }
@@ -5224,6 +5304,8 @@ async function scanLatestStatus(filePath, maxSearchBytes = 64 * 1024 * 1024) {
       ...lifecycle,
       status: lifecycle.status ?? "idle",
       serviceTier: lifecycle.serviceTier ?? "default",
+      nextReasoningEffort: lifecycle.nextReasoningEffort ?? lifecycle.reasoningEffort,
+      nextServiceTier: lifecycle.nextServiceTier ?? lifecycle.serviceTier ?? "default",
       size: stat.size,
       mtimeMs: stat.mtimeMs
     };
@@ -5248,6 +5330,8 @@ async function statusForThread(thread, activeThreadIds) {
     endedAtMs: null,
     reasoningEffort: null,
     serviceTier: "default",
+    nextReasoningEffort: null,
+    nextServiceTier: "default",
     activity: isActive ? { kind: "command", label: "백그라운드" } : { kind: "idle", label: "다시 열기" }
   };
   try {
@@ -5274,6 +5358,8 @@ async function statusForThread(thread, activeThreadIds) {
       endedAtMs: null,
       reasoningEffort: null,
       serviceTier: "default",
+      nextReasoningEffort: null,
+      nextServiceTier: "default",
       activity: isActive ? { kind: "command", label: "백그라운드" } : { kind: "error", label: "상태 확인" }
     };
   }
@@ -5449,7 +5535,12 @@ async function readTopThreads() {
   if (currentThread && currentThread.id !== primaryThreadId) {
     rememberVerifiedThread(currentThread, {
       promote: false,
-      recordOpenedHint: false
+      recordOpenedHint: false,
+      // `currentThread` is still the lightweight identity row here. Wait for
+      // lifecycle/queue hydration below before seeding the next-run controls;
+      // otherwise startup can race an empty composer probe against the final
+      // Effort/Fast snapshot and leave those keys unbound.
+      refreshFastMode: false
     });
   }
   const rankedThreadIds = selection.selected.map((thread) => thread.id);
@@ -5497,7 +5588,20 @@ async function readTopThreads() {
       reasoningEffort: lifecycle.reasoningEffort ?? parentLifecycle?.reasoningEffort ?? "medium",
       serviceTier: lifecycle.serviceTier !== "default"
         ? lifecycle.serviceTier
-        : parentLifecycle?.serviceTier ?? "default"
+        : parentLifecycle?.serviceTier ?? "default",
+      nextReasoningEffort: lifecycle.nextReasoningEffort
+        ?? parentLifecycle?.nextReasoningEffort
+        ?? lifecycle.reasoningEffort
+        ?? parentLifecycle?.reasoningEffort
+        ?? "medium",
+      nextServiceTier: lifecycle.nextServiceTier
+        ?? parentLifecycle?.nextServiceTier
+        ?? lifecycle.serviceTier
+        ?? parentLifecycle?.serviceTier
+        ?? "default",
+      nextSettingsAtMs: lifecycle.nextSettingsAtMs
+        ?? parentLifecycle?.nextSettingsAtMs
+        ?? null
     };
   });
   const queuedThreads = applyQueueState(hydratedThreads, queueWindows);
@@ -5587,10 +5691,10 @@ function cancelCompletionEffects(threadId) {
 function renderGlobalCompletionContexts(nowMs = Date.now()) {
   const effect = globalCompletionPulseState(nowMs);
   if (effect) {
-    // Guarantee one strong frame on every visible plugin-owned key, then
-    // update alternating halves at a device-safe rate. Splitting the very
-    // first frame allowed the completed task's own animation to reach Neo
-    // while acknowledgements for the other keys remained queued.
+    // Guarantee one acknowledgement frame on every visible plugin-owned key,
+    // then update all keys together at a smooth, device-safe cadence. Keeping
+    // one synchronized render group prevents adjacent keys from visibly
+    // stepping through different phases of the same completion breath.
     globalCompletionWasRendered = true;
     const entries = [...contexts.entries()];
     const renderGroup = globalCompletionRenderGroup;
@@ -5677,6 +5781,27 @@ function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now()) {
   }
 }
 
+function threadReasoningTrackShouldAnimate(thread) {
+  return thread?.status === "working"
+    && (
+      isFastServiceTier(thread.serviceTier)
+      || normalizedReasoningEffort(thread.reasoningEffort) === "ultra"
+    );
+}
+
+function reasoningControlShouldAnimate(
+  state = fastModeState,
+  activeThreadId = primaryThreadId
+) {
+  const visualEffort = reasoningVisualOverrideByThreadId.get(activeThreadId)?.effort;
+  return Boolean(activeThreadId)
+    && state?.threadId === activeThreadId
+    && (
+      state.enabled === true
+      || normalizedReasoningEffort(visualEffort ?? state.reasoningEffort) === "ultra"
+    );
+}
+
 function renderAnimatedThreadContexts(nowMs = Date.now()) {
   const unreadFrameDue = nowMs - lastUnreadCompletionFrameAtMs
     >= UNREAD_COMPLETION_FRAME_INTERVAL_MS;
@@ -5697,7 +5822,7 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
       && unreadFrameDue
       && threadContextIndex % UNREAD_COMPLETION_GROUP_COUNT === unreadRenderGroup;
     if (
-      (thread?.status === "working" && String(thread.reasoningEffort ?? "").toLowerCase() === "ultra")
+      threadReasoningTrackShouldAnimate(thread)
       || completionAnimating
       || renderUnreadFrame
     ) {
@@ -5854,6 +5979,8 @@ async function refreshThreads(feedbackContext, options = {}) {
   if (!activeThreadRefresh) {
     activeThreadRefresh = (async () => {
       try {
+        const primaryThreadIdAtRefreshStart = primaryThreadId;
+        const controlThreadIdAtRefreshStart = fastModeState.threadId;
         const reader = typeof options.reader === "function" ? options.reader : readTopThreads;
         const retryDelays = Array.isArray(options.retryDelays)
           ? options.retryDelays
@@ -5870,10 +5997,15 @@ async function refreshThreads(feedbackContext, options = {}) {
           (_, index) => threads[index] ?? null
         );
         if (!Array.isArray(snapshot) && snapshot?.currentThread?.id) {
-          primaryThreadRow = {
-            ...(primaryThreadRow?.id === snapshot.currentThread.id ? primaryThreadRow : {}),
-            ...snapshot.currentThread
-          };
+          // The returned current row is authoritative and fully hydrated. Do
+          // not rely on a reader's incidental global mutation: custom readers,
+          // a cold plugin process, and a fast willAppear sequence all need the
+          // same explicit binding from Current Task to its dependent controls.
+          rememberVerifiedThread(snapshot.currentThread, {
+            promote: false,
+            recordOpenedHint: false,
+            refreshFastMode: false
+          });
         }
         const nextCurrentThread = currentThreadForDisplay(nextThreadSlots, primaryThreadRow);
         trackCompletionTransitions(
@@ -5882,11 +6014,34 @@ async function refreshThreads(feedbackContext, options = {}) {
         );
         threadSlots = nextThreadSlots;
         renderThreadContexts();
-        if (fastModeState.threadId !== primaryThreadId) {
+        const composerThread = nextCurrentThread ?? primaryThreadRow;
+        const snapshotComposerState = fastModeStateFromThread(
+          composerThread,
+          fastModeState
+        );
+        const composerStateChanged = snapshotComposerState.threadId !== fastModeState.threadId
+          || snapshotComposerState.enabled !== fastModeState.enabled
+          || snapshotComposerState.available !== fastModeState.available
+          || snapshotComposerState.reasoningEffort !== fastModeState.reasoningEffort
+          || snapshotComposerState.failed !== fastModeState.failed;
+        const composerInputIsIdle = !activeFastModeUpdate
+          && !reasoningPendingCountByThreadId.has(primaryThreadId);
+        const currentControlBindingChanged = primaryThreadIdAtRefreshStart !== primaryThreadId
+          || controlThreadIdAtRefreshStart !== fastModeState.threadId;
+        if (composerInputIsIdle && composerStateChanged) {
           fastModeRevision += 1;
-          fastModeState = fastModeStateFromThread(nextCurrentThread ?? primaryThreadRow);
+          fastModeState = snapshotComposerState;
+        }
+        if (composerInputIsIdle
+            && (composerStateChanged || currentControlBindingChanged)) {
+          // Effort/Fast may have appeared before the first thread refresh. A
+          // binding change must repaint every current-task control even when
+          // rememberVerifiedThread already seeded an identical state object.
           renderStaticContexts();
-          void refreshFastMode();
+        }
+        if (composerInputIsIdle
+            && composerStateNeedsRefreshForThread(primaryThreadId, fastModeState)) {
+          void refreshFastMode({ quiet: true, preserveConfirmedOnUnavailable: true });
         }
         if (feedbackContext) showFeedback(feedbackContext, "success", "목록 갱신");
         return true;
@@ -6546,7 +6701,7 @@ function registerPlugin() {
     }
     if (!globalCompletionPulseState(nowMs)
         && [...contexts.values()].some((action) => action === ACTIONS.reasoning)
-        && normalizedReasoningEffort(fastModeState.reasoningEffort) === "ultra") {
+        && reasoningControlShouldAnimate()) {
       renderFastModeContexts();
     }
   }, 33);
@@ -6569,7 +6724,23 @@ function registerPlugin() {
     if (!hasLoadedThreadState || !dashboardCurrentActionsVisible()) return;
     if (activeRemoteNavigation || activeDeepLinkNavigation || activeComposerCreation
         || activeFastModeUpdate || voiceHeldContexts.size > 0) return;
-    void synchronizeCurrentCodexThread({ quiet: true });
+    void synchronizeCurrentCodexThread({
+      quiet: true,
+      refreshFastMode: false
+    }).then((current) => {
+      if (!current?.id || current.id !== primaryThreadId) return false;
+      if (activeRemoteNavigation || activeDeepLinkNavigation || activeComposerCreation
+          || activeFastModeUpdate || voiceHeldContexts.size > 0) return false;
+      // The closed Codex composer exposes Effort without opening its picker.
+      // Poll it only for the verified current task so direct in-app changes
+      // reach the dedicated key quickly. This updates next-turn controls only;
+      // the running task card remains bound to its immutable turn_context.
+      return refreshFastMode({
+        threadId: current.id,
+        quiet: true,
+        preserveConfirmedOnUnavailable: true
+      });
+    }).catch(() => false);
   }, CURRENT_THREAD_SYNC_INTERVAL_MS);
 
   setInterval(() => {
@@ -6612,6 +6783,9 @@ function resetDemoEffects() {
   sendLongPressArmedContexts.clear();
   fastModeLongPressArmedContexts.clear();
   reasoningBusyContexts.clear();
+  reasoningVisualOverrideByThreadId.clear();
+  reasoningPendingCountByThreadId.clear();
+  reasoningPendingCountByContext.clear();
   globalCompletionStartedAtMs = null;
   globalCompletionThreadId = null;
   globalCompletionWasRendered = false;
@@ -6671,7 +6845,7 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
 
   const workingThread = {
     id: DEMO_WORKING_ID,
-    title: "릴리즈",
+    title: "Release",
     pinned: true,
     status: hasCompleted ? "completed" : "working",
     startedAtMs: DEMO_EPOCH_MS - 4 * 60_000 - 12_000,
@@ -6711,7 +6885,10 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
   }
   const keySvgs = [
     usageSvg(74, false),
+    newThreadSvg(),
     sideChatSvg(),
+    sendSvg(),
+    workingThreadSvg,
     reasoningControlSvg({
       threadId: DEMO_WORKING_ID,
       enabled: fastEnabled,
@@ -6719,14 +6896,6 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
       reasoningEffort,
       failed: false
     }, DEMO_WORKING_ID, reasoningEffort === "ultra" ? "down" : "up", reasoningBusy),
-    sendSvg(),
-    workingThreadSvg,
-    fastModeSvg({
-      threadId: DEMO_WORKING_ID,
-      enabled: fastEnabled,
-      available: true,
-      failed: false
-    }, DEMO_WORKING_ID),
     voiceSvg("idle", nowMs),
     pageNavigationSvg(ACTIONS.pagePrevious)
   ];
@@ -6757,7 +6926,7 @@ function renderCompletedTaskKey(outputPath, mode = "dark") {
   resetDemoEffects();
   const completedThread = {
     id: DEMO_COMPLETED_ID,
-    title: "문서 이미지",
+    title: "Docs preview",
     pinned: false,
     status: "completed",
     startedAtMs: DEMO_EPOCH_MS - 12 * 60_000 - 17_000,
@@ -6839,7 +7008,7 @@ function gesturePreviewSvg({ title, subtitle, keySvg, stages, activeStage, accen
 function demoGestureThread(nowMs, voiceState = "idle") {
   const thread = {
     id: DEMO_WORKING_ID,
-    title: "릴리즈",
+    title: "Release",
     pinned: true,
     status: "working",
     startedAtMs: DEMO_EPOCH_MS - 4 * 60_000 - 12_000,
@@ -6857,49 +7026,49 @@ function demoGestureThread(nowMs, voiceState = "idle") {
 function taskHoldGestureFrame(nowMs, elapsedMs) {
   const holdSeconds = (THREAD_VOICE_LONG_PRESS_MS / 1000).toFixed(2);
   const stages = [
-    `Hold ${holdSeconds} s · ${holdSeconds}초 길게`,
-    "Speak · 말하기",
-    "Release · 놓기",
-    "Transcribe · 받아쓰기",
-    "Submit · 자동 전송",
-    "Sent · 전송 확인"
+    `Hold ${holdSeconds} s`,
+    "Speak",
+    "Release",
+    "Transcribe",
+    "Submit",
+    "Sent"
   ];
   let state = "idle";
   let activeStage = 0;
   let accent = THEME.text;
-  let result = "TAP = OPEN · 짧게 = 작업 열기";
+  let result = "TAP = OPEN TASK";
   if (elapsedMs >= 650 && elapsedMs < 1_400) {
     state = "preparing";
     accent = THEME.blue;
-    result = "TARGET READYING · 전환 준비";
+    result = "TARGET READYING";
   } else if (elapsedMs >= 1_400 && elapsedMs < 2_650) {
     state = "recording";
     activeStage = 1;
     accent = THEME.amber;
-    result = "KEEP HOLDING · 계속 누르기";
+    result = "KEEP HOLDING";
   } else if (elapsedMs >= 2_650 && elapsedMs < 3_150) {
     state = "transcribing";
     activeStage = 2;
     accent = THEME.textSecondary;
-    result = "RELEASED · 녹음 종료";
+    result = "RELEASED";
   } else if (elapsedMs >= 3_150 && elapsedMs < 3_950) {
     state = "transcribing";
     activeStage = 3;
     accent = THEME.textSecondary;
-    result = "DRAFT STABILIZING · 초안 확인 중";
+    result = "DRAFT STABILIZING";
   } else if (elapsedMs >= 3_950 && elapsedMs < 4_750) {
     state = "submitting";
     activeStage = 4;
     accent = THEME.blue;
-    result = "AUTO SUBMIT · 자동 전송";
+    result = "AUTO SUBMIT";
   } else if (elapsedMs >= 4_750 && elapsedMs < 5_750) {
     state = "sent";
     activeStage = 5;
     accent = THEME.green;
-    result = "SEND VERIFIED · 전송 확인";
+    result = "SEND VERIFIED";
   }
   return gesturePreviewSvg({
-    title: "Task key · 작업 버튼",
+    title: "Task key",
     subtitle: "Tap to open, or hold to dictate and submit",
     keySvg: demoGestureThread(nowMs, state),
     stages,
@@ -6911,39 +7080,39 @@ function taskHoldGestureFrame(nowMs, elapsedMs) {
 
 function voiceHoldGestureFrame(nowMs, elapsedMs) {
   const stages = [
-    "Press · 누르기",
-    "Speak while held · 누른 채 말하기",
-    "Release · 놓기",
-    "Transcribe · 받아쓰기",
-    "Draft ready · 초안 완료"
+    "Press",
+    "Speak while held",
+    "Release",
+    "Transcribe",
+    "Draft ready"
   ];
   let state = "idle";
   let activeStage = 0;
   let accent = THEME.text;
-  let result = "PRESS = RECORD · 누르면 즉시 녹음";
+  let result = "PRESS = RECORD";
   if (elapsedMs >= 800 && elapsedMs < 2_300) {
     state = "recording";
     activeStage = 1;
     accent = THEME.amber;
-    result = "KEEP HOLDING · 누르는 동안 녹음";
+    result = "KEEP HOLDING";
   } else if (elapsedMs >= 2_300 && elapsedMs < 2_800) {
     state = "transcribing";
     activeStage = 2;
     accent = THEME.textSecondary;
-    result = "RELEASED · 녹음 종료";
+    result = "RELEASED";
   } else if (elapsedMs >= 2_800 && elapsedMs < 3_800) {
     state = "transcribing";
     activeStage = 3;
     accent = THEME.textSecondary;
-    result = "DRAFT ONLY · 자동 전송 안 함";
+    result = "DRAFT ONLY — NOT SENT";
   } else if (elapsedMs >= 3_800 && elapsedMs < 4_900) {
     state = "complete";
     activeStage = 4;
     accent = THEME.green;
-    result = "REVIEW IN COMPOSER · 작성창에서 확인";
+    result = "REVIEW IN COMPOSER";
   }
   return gesturePreviewSvg({
-    title: "Microphone · 전용 마이크",
+    title: "Microphone",
     subtitle: "Push to talk; the transcript stays in the composer",
     keySvg: voiceSvg(state, nowMs),
     stages,
@@ -6956,23 +7125,23 @@ function voiceHoldGestureFrame(nowMs, elapsedMs) {
 function sendHoldGestureFrame(nowMs, elapsedMs) {
   const holdSeconds = (SEND_LONG_PRESS_MS / 1000).toFixed(1);
   const stages = [
-    "Tap and release · 짧게 눌렀다 놓기",
+    "Tap and release",
     "Return",
-    `Hold ${holdSeconds} s · ${holdSeconds}초 길게`,
-    "Blue = armed · 파랑 = 준비",
-    "Release · 놓아 실행"
+    `Hold ${holdSeconds} s`,
+    "Blue = armed",
+    "Release to run"
   ];
   let armed = false;
   let activeStage = 0;
   let accent = THEME.text;
-  let result = "TAP = RETURN · 짧게 = Return";
+  let result = "TAP = RETURN";
   if (elapsedMs >= 650 && elapsedMs < 1_450) {
     activeStage = 1;
     accent = THEME.green;
     result = "KEYSTROKE: RETURN";
   } else if (elapsedMs >= 2_150 && elapsedMs < 2_750) {
     activeStage = 2;
-    result = "KEEP HOLDING · 계속 누르기";
+    result = "KEEP HOLDING";
   } else if (elapsedMs >= 2_750 && elapsedMs < 4_050) {
     armed = true;
     activeStage = 3;
@@ -6984,7 +7153,7 @@ function sendHoldGestureFrame(nowMs, elapsedMs) {
     result = "KEYSTROKE: COMMAND + RETURN";
   }
   return gesturePreviewSvg({
-    title: "Send key · 보내기 버튼",
+    title: "Send key",
     subtitle: "The action fires when the key is released",
     keySvg: sendSvg(armed),
     stages,
@@ -7010,35 +7179,35 @@ function appLauncherGuideSvg(quitArmed = false) {
 
 function appLauncherGestureFrame(nowMs, elapsedMs) {
   const stages = [
-    "Tap · 짧게 누르기",
-    "Open or front · 열기/앞으로",
-    "Hold · 길게 누르기",
-    "Quit action · 앱 종료",
-    "Release · 놓기"
+    "Tap",
+    "Open or bring forward",
+    "Hold",
+    "Quit action",
+    "Release"
   ];
   let quitArmed = false;
   let activeStage = 0;
   let accent = THEME.text;
-  let result = "TAP = OPEN / FRONT · 짧게 = 열기";
+  let result = "TAP = OPEN / FRONT";
   if (elapsedMs >= 900 && elapsedMs < 1_700) {
     activeStage = 1;
     accent = THEME.green;
-    result = "APP OPENED OR FOCUSED · 앱 활성화";
+    result = "APP OPENED OR FOCUSED";
   } else if (elapsedMs >= 2_000 && elapsedMs < 3_100) {
     activeStage = 2;
-    result = "KEEP HOLDING · 계속 누르기";
+    result = "KEEP HOLDING";
   } else if (elapsedMs >= 3_100 && elapsedMs < 4_150) {
     quitArmed = true;
     activeStage = 3;
     accent = THEME.red;
-    result = "LONG PRESS = QUIT · 길게 = 종료";
+    result = "LONG PRESS = QUIT";
   } else if (elapsedMs >= 4_150 && elapsedMs < 4_800) {
     activeStage = 4;
     accent = THEME.red;
-    result = "QUIT REQUESTED · 앱 종료 요청";
+    result = "QUIT REQUESTED";
   }
   return gesturePreviewSvg({
-    title: "App launcher · 앱 실행",
+    title: "App launcher",
     subtitle: "Neutral guide for the bundled Stream Deck Open Application action",
     keySvg: appLauncherGuideSvg(quitArmed),
     stages,
@@ -7358,6 +7527,27 @@ function verifyCompletionFanout() {
   };
   fixedRenderTimeMs = nowMs;
   startCompletionEffects(targetId, nowMs);
+  const targetStart = completionPulseState(targetId, nowMs)?.strength ?? 0;
+  const targetAttack = completionPulseState(targetId, nowMs + 180)?.strength ?? 0;
+  const targetRelease = completionPulseState(
+    targetId,
+    nowMs + THREAD_COMPLETION_PULSE_DURATION_MS - 1
+  )?.strength ?? 1;
+  const globalStart = globalCompletionPulseState(nowMs)?.strength ?? 0;
+  const globalAttack = globalCompletionPulseState(nowMs + 160)?.strength ?? 0;
+  const globalRelease = globalCompletionPulseState(
+    nowMs + GLOBAL_COMPLETION_PULSE_DURATION_MS - 1
+  )?.strength ?? 1;
+  const completionAnimationUsesHighRateSmoothCurve = GLOBAL_COMPLETION_FRAME_INTERVAL_MS <= 40
+    && GLOBAL_COMPLETION_GROUP_COUNT === 1
+    && UNREAD_COMPLETION_FRAME_INTERVAL_MS <= 33
+    && UNREAD_COMPLETION_GROUP_COUNT === 1
+    && targetStart > 0.05
+    && targetAttack > targetStart
+    && targetRelease < 0.01
+    && globalStart > 0.05
+    && globalAttack > globalStart
+    && globalRelease < 0.01;
   renderGlobalCompletionContexts(nowMs);
 
   const imageMessages = messages.filter((message) => message.event === "setImage");
@@ -7380,12 +7570,14 @@ function verifyCompletionFanout() {
     && allContextsSentOnce
     && globalChromeCount === actions.length - targetTaskContextCount
     && globalCompletionInitialFanoutPending === false
+    && completionAnimationUsesHighRateSmoothCurve
     && transitionPolicy.passed;
   console.log(JSON.stringify({
     passed,
     visibleContexts: actions.length,
     firstFrameImages: imageMessages.length,
     nonTargetGlobalChrome: globalChromeCount,
+    completionAnimationUsesHighRateSmoothCurve,
     transitionPolicy
   }));
   if (!passed) process.exitCode = 1;
@@ -7408,6 +7600,47 @@ async function verifyThreadRefreshResilience() {
     queueCount: 0
   };
   socket = { readyState: WebSocket.OPEN, send() {} };
+
+  const startupCurrentContext = "refresh-startup-current";
+  const startupReasoningContext = "refresh-startup-reasoning";
+  contexts.clear();
+  contextImages.clear();
+  contextSentImages.clear();
+  contexts.set(startupCurrentContext, ACTIONS.thread1);
+  contexts.set(startupReasoningContext, ACTIONS.reasoning);
+  contexts.set("refresh-startup-voice", ACTIONS.voice);
+  contexts.set("refresh-startup-send", ACTIONS.send);
+  threadSlots = Array(THREAD_COUNT).fill(null);
+  primaryThreadId = null;
+  primaryThreadRow = null;
+  fastModeState = {
+    threadId: null,
+    enabled: null,
+    available: null,
+    failed: false
+  };
+  hasLoadedThreadState = false;
+  consecutiveThreadRefreshFailures = 0;
+  threadRefreshUnavailable = false;
+  const startupSnapshotLoaded = await refreshThreads(null, {
+    reader: async () => ({
+      threads: [stableThread],
+      currentThread: stableThread
+    }),
+    retryDelays: []
+  });
+  const startupReasoningSvg = contextImages.get(startupReasoningContext) ?? "";
+  const startupControlsBindToCurrentTask = startupSnapshotLoaded
+    && primaryThreadId === stableThread.id
+    && primaryThreadRow?.id === stableThread.id
+    && fastModeState.threadId === stableThread.id
+    && fastModeState.reasoningEffort === "medium"
+    && fastModeState.enabled === false
+    && startupReasoningSvg.includes('data-reasoning-state="medium"')
+    && !startupReasoningSvg.includes('data-reasoning-state="unknown"')
+    && resolveVoiceTargetThreadId() === stableThread.id
+    && currentThreadForDisplay()?.id === stableThread.id;
+
   contexts.clear();
   contextImages.clear();
   contextSentImages.clear();
@@ -7450,7 +7683,7 @@ async function verifyThreadRefreshResilience() {
       && threadSlots[0] === lastGoodThread
       && !threadRefreshUnavailable
       && contextImages.get(context) === lastGoodSvg
-      && !contextImages.get(context)?.includes("상태를 읽지 못함");
+      && !contextImages.get(context)?.includes(t("thread.stateUnavailable"));
 
     hasLoadedThreadState = false;
     consecutiveThreadRefreshFailures = 0;
@@ -7576,6 +7809,7 @@ async function verifyThreadRefreshResilience() {
   }
 
   const passed = recoveredInsideRefresh
+    && startupControlsBindToCurrentTask
     && keptLastGoodList
     && oneOffStartupHidden
     && startupErrorStable
@@ -7585,6 +7819,7 @@ async function verifyThreadRefreshResilience() {
   console.log(JSON.stringify({
     passed,
     retryAttempts,
+    startupControlsBindToCurrentTask,
     keptLastGoodList,
     oneOffStartupHidden,
     rankedListKeepsAllEight,
@@ -8787,41 +9022,39 @@ async function verifyInteractionPolicy() {
     && voicePressStarted
     && voicePrepared
     && voiceControlTargetId === manuallyActiveThread.id;
-  const composerTurnStartedAtMs = 180_000;
-  remoteLifecycleCache.set(remoteThread.id, {
-    status: "working",
-    startedAtMs: composerTurnStartedAtMs,
-    endedAtMs: null,
-    latestTurnId: "00000000-0000-7000-8000-000000000032"
-  });
-  const focusedRemoteForSpeed = {
+  const focusedRemoteForComposer = {
     ...remoteThread,
+    status: "working",
+    reasoningEffort: "high",
+    serviceTier: "priority",
+    nextReasoningEffort: "high",
+    nextServiceTier: "priority",
     threadRuntimeStatus: { type: "active", activeFlags: [] },
-    serviceTier: null
   };
-  threadSlots = [focusedRemoteForSpeed, ...Array(THREAD_COUNT - 1).fill(null)];
-  primaryThreadId = focusedRemoteForSpeed.id;
-  primaryThreadRow = focusedRemoteForSpeed;
-  const remoteFastApplied = applyFocusedRemoteComposerState(
-    focusedRemoteForSpeed,
-    { enabled: true, available: true },
-    composerTurnStartedAtMs + 500
-  );
-  const remoteFastCardShowsBolt = threadSlots[0]?.serviceTier === "priority"
-    && threadSvg(threadSlots[0], 0).includes('data-mode="fast"');
-  const remoteStandardApplied = applyFocusedRemoteComposerState(
+  threadSlots = [focusedRemoteForComposer, ...Array(THREAD_COUNT - 1).fill(null)];
+  primaryThreadId = focusedRemoteForComposer.id;
+  primaryThreadRow = focusedRemoteForComposer;
+  const previousTurnSnapshotTime = fixedRenderTimeMs;
+  fixedRenderTimeMs = 180_500;
+  const runningCardBeforeComposerChange = threadSvg(threadSlots[0], 0);
+  const nextComposerApplied = applyFocusedComposerState(
     threadSlots[0],
-    { enabled: false, available: true },
-    composerTurnStartedAtMs + 700
+    { enabled: false, available: true, reasoningEffort: "medium" },
+    180_700
   );
-  const remoteStandardCardClearsBolt = threadSlots[0]?.serviceTier === "default"
-    && !threadSvg(threadSlots[0], 0).includes('data-mode="fast"');
-  const focusedRemoteSpeedUpdatesImmediately = remoteFastApplied
-    && remoteFastCardShowsBolt
-    && remoteStandardApplied
-    && remoteStandardCardClearsBolt;
-  remoteComposerStateByThreadId.delete(remoteThread.id);
-  remoteLifecycleCache.delete(remoteThread.id);
+  const runningCardAfterComposerChange = threadSvg(threadSlots[0], 0);
+  fixedRenderTimeMs = previousTurnSnapshotTime;
+  const composerChangesStayNextTurnOnly = nextComposerApplied
+    && threadSlots[0]?.reasoningEffort === "high"
+    && threadSlots[0]?.serviceTier === "priority"
+    && threadSlots[0]?.nextReasoningEffort === "medium"
+    && threadSlots[0]?.nextServiceTier === "default"
+    && primaryThreadRow?.reasoningEffort === "high"
+    && primaryThreadRow?.serviceTier === "priority"
+    && primaryThreadRow?.nextReasoningEffort === "medium"
+    && primaryThreadRow?.nextServiceTier === "default"
+    && runningCardBeforeComposerChange === runningCardAfterComposerChange
+    && runningCardAfterComposerChange.includes('data-mode="fast"');
   let directAttempts = 0;
   let searchAttempts = 0;
   const activationOrder = [];
@@ -9357,6 +9590,74 @@ async function verifyInteractionPolicy() {
     && metadataFastState.enabled === true
     && metadataFastState.available === true
     && metadataFastState.reasoningEffort === "max";
+  const nextTurnMetadataState = fastModeStateFromThread({
+    ...localThreadB,
+    reasoningEffort: "high",
+    serviceTier: "priority",
+    nextReasoningEffort: "medium",
+    nextServiceTier: "default",
+    nextSettingsAtMs: 123_456
+  }, {
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    reasoningEffort: "high",
+    failed: false
+  });
+  const nextTurnMetadataDrivesControls = nextTurnMetadataState.threadId === localThreadB.id
+    && nextTurnMetadataState.enabled === false
+    && nextTurnMetadataState.available === true
+    && nextTurnMetadataState.reasoningEffort === "medium";
+  const directComposerThread = {
+    ...localThreadB,
+    status: "working",
+    reasoningEffort: "high",
+    serviceTier: "priority",
+    nextReasoningEffort: "high",
+    nextServiceTier: "priority"
+  };
+  primaryThreadRow = directComposerThread;
+  threadSlots = [directComposerThread, localThreadA, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    reasoningEffort: "high",
+    failed: false
+  };
+  const previousDirectComposerTime = fixedRenderTimeMs;
+  fixedRenderTimeMs = 222_000;
+  const directComposerCardBefore = threadSvg(directComposerThread, 0);
+  const directComposerRefresh = await refreshFastMode({
+    threadId: localThreadB.id,
+    quiet: true,
+    stateProbe: async () => ({
+      stdout: "state=off available=1 reasoning=medium service_tier=default reasoning_available=1 service_tier_available=1 composer_focused=1\n"
+    })
+  });
+  const directComposerCardAfter = threadSvg(threadSlots[0], 0);
+  const directComposerControl = reasoningControlSvg(fastModeState, localThreadB.id);
+  fixedRenderTimeMs = previousDirectComposerTime;
+  const directCodexComposerChangeRefreshesControlOnly = directComposerRefresh
+    && fastModeState.threadId === localThreadB.id
+    && fastModeState.enabled === false
+    && fastModeState.reasoningEffort === "medium"
+    && primaryThreadRow?.reasoningEffort === "high"
+    && primaryThreadRow?.serviceTier === "priority"
+    && primaryThreadRow?.nextReasoningEffort === "medium"
+    && primaryThreadRow?.nextServiceTier === "default"
+    && directComposerCardBefore === directComposerCardAfter
+    && directComposerControl.includes('data-reasoning-state="medium"')
+    && directComposerControl.includes('>MEDIUM</text>')
+    && directComposerControl.includes('data-fast-state="off"');
+  primaryThreadRow = localThreadB;
+  threadSlots = [localThreadB, localThreadA, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: false,
+    available: true,
+    failed: false
+  };
   const fastOnVisual = fastModeSvg({
     threadId: localThreadB.id,
     enabled: true,
@@ -9387,8 +9688,8 @@ async function verifyInteractionPolicy() {
     && !fastOffVisual.includes("FAST OFF")
     && !fastOnVisual.includes("<text")
     && !fastOffVisual.includes("<text")
-    && fastUnavailableVisual.includes("사용 불가")
-    && fastFailedVisual.includes("상태 오류")
+    && fastUnavailableVisual.includes(t("fast.unavailable"))
+    && fastFailedVisual.includes(t("fast.error"))
     && fastOnVisual.includes('M83 15L42 80H66L56 130L105 59H80Z');
   let resolveFastNavigation;
   const fastNavigationGate = new Promise((resolve) => { resolveFastNavigation = resolve; });
@@ -9526,6 +9827,33 @@ async function verifyInteractionPolicy() {
     && fastLongPressResult
     && fastHoldToggleCalls === 2;
 
+  const immediateReasoningHoldContext = "interaction-reasoning-fast-hold";
+  contexts.set(immediateReasoningHoldContext, ACTIONS.reasoning);
+  let immediateReasoningFastToggleCalls = 0;
+  fastModePressStartedAt.set(immediateReasoningHoldContext, Date.now());
+  const thresholdToggleResult = await triggerReasoningFastModeHold(
+    immediateReasoningHoldContext,
+    {
+      feedback: () => {},
+      synchronizeCurrent: async () => localThreadB,
+      focusProbe: async () => ({ stdout: "match=uuid" }),
+      toggleMode: async () => {
+        immediateReasoningFastToggleCalls += 1;
+        return {
+          stdout: "requested=off state=off available=1 changed=1 verified=1 reasoning=max service_tier=default composer_focused=1\n"
+        };
+      }
+    }
+  );
+  const callsBeforeReasoningKeyUp = immediateReasoningFastToggleCalls;
+  const thresholdReleaseResult = await endReasoningControlPress(
+    immediateReasoningHoldContext
+  );
+  const reasoningFastToggleStartsAtThreshold = thresholdToggleResult
+    && thresholdReleaseResult
+    && callsBeforeReasoningKeyUp === 1
+    && immediateReasoningFastToggleCalls === 1;
+
   const reasoningContext = "interaction-reasoning";
   contexts.set(reasoningContext, ACTIONS.reasoning);
   reasoningDirectionByThreadId.delete(localThreadB.id);
@@ -9557,15 +9885,61 @@ async function verifyInteractionPolicy() {
       threadId: localThreadB.id,
       reasoningEffort: "medium"
     });
+    const maxToUltra = optimisticReasoningStep(localThreadB.id, "up", {
+      threadId: localThreadB.id,
+      reasoningEffort: "max"
+    });
     const downward = optimisticReasoningStep(localThreadB.id, "down", {
       threadId: localThreadB.id,
       reasoningEffort: "ultra"
     });
     return upward?.effort === "high"
       && upward.direction === "up"
+      && maxToUltra?.effort === "ultra"
+      && maxToUltra.direction === "down"
       && downward?.effort === "max"
       && downward.direction === "down";
   })();
+  const rapidReasoningOutputs = [
+    "previous=xhigh reasoning=high service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n",
+    "previous=high reasoning=medium service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n",
+    "previous=medium reasoning=low service_tier=priority available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1\n"
+  ];
+  const rapidReasoningDirections = [];
+  let rapidReasoningCalls = 0;
+  const rapidReasoningOptions = {
+    synchronizeCurrent: async () => localThreadB,
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    stepEffort: async (direction) => {
+      rapidReasoningDirections.push(direction);
+      const stdout = rapidReasoningOutputs[rapidReasoningCalls];
+      rapidReasoningCalls += 1;
+      return { stdout };
+    }
+  };
+  const rapidReasoningA = stepReasoningEffort(reasoningContext, rapidReasoningOptions);
+  const rapidReasoningB = stepReasoningEffort(reasoningContext, rapidReasoningOptions);
+  const rapidReasoningC = stepReasoningEffort(reasoningContext, rapidReasoningOptions);
+  const rapidReasoningImmediateVisual = staticActionSvg(ACTIONS.reasoning, reasoningContext);
+  const rapidReasoningPaintsEveryTapImmediately = rapidReasoningCalls === 0
+    && rapidReasoningImmediateVisual.includes('data-reasoning-state="low"')
+    && reasoningPendingCountByThreadId.get(localThreadB.id) === 3
+    && reasoningPendingCountByContext.get(reasoningContext) === 3;
+  const rapidReasoningResults = await Promise.all([
+    rapidReasoningA,
+    rapidReasoningB,
+    rapidReasoningC
+  ]);
+  const rapidReasoningQueuesEveryTap = rapidReasoningPaintsEveryTapImmediately
+    && rapidReasoningResults.every(Boolean)
+    && rapidReasoningCalls === 3
+    && rapidReasoningDirections.join(",") === "down,down,down"
+    && fastModeState.reasoningEffort === "low"
+    && reasoningDirectionByThreadId.get(localThreadB.id) === "up"
+    && !reasoningVisualOverrideByThreadId.has(localThreadB.id)
+    && !reasoningPendingCountByThreadId.has(localThreadB.id)
+    && !reasoningPendingCountByContext.has(reasoningContext)
+    && !reasoningBusyContexts.has(reasoningContext);
   const reasoningVisual = reasoningControlSvg({
     threadId: localThreadB.id,
     enabled: true,
@@ -9578,7 +9952,42 @@ async function verifyInteractionPolicy() {
   ) && reasoningVisual.includes('data-reasoning-direction="down"')
     && reasoningVisual.includes('data-fast-state="on"')
     && reasoningVisual.includes('data-reasoning-fast="on"')
-    && reasoningVisual.includes('x="15" y="53" width="114" height="38"');
+    && reasoningVisual.includes('data-reasoning-label="ultra"')
+    && reasoningVisual.includes('>ULTRA</text>')
+    && reasoningVisual.includes('x="16" y="79" width="114" height="24"')
+    && !reasoningVisual.includes('M59 109L50 100L59 91');
+  const previousFixedRenderTimeMs = fixedRenderTimeMs;
+  const fastHighState = {
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    reasoningEffort: "high",
+    failed: false
+  };
+  const fastAnimatedThread = {
+    ...localThreadB,
+    status: "working",
+    reasoningEffort: "high",
+    serviceTier: "priority"
+  };
+  fixedRenderTimeMs = 1_000;
+  const fastReasoningFrameA = reasoningControlSvg(fastHighState, localThreadB.id);
+  const fastThreadFrameA = threadSvg(fastAnimatedThread, 0);
+  fixedRenderTimeMs = 1_140;
+  const fastReasoningFrameB = reasoningControlSvg(fastHighState, localThreadB.id);
+  const fastThreadFrameB = threadSvg(fastAnimatedThread, 0);
+  const standardHighVisual = reasoningControlSvg({
+    ...fastHighState,
+    enabled: false
+  }, localThreadB.id);
+  fixedRenderTimeMs = previousFixedRenderTimeMs;
+  const fastParticlesAnimateAcrossFrames = fastReasoningFrameA.includes('<circle cx="')
+    && fastThreadFrameA.includes('<circle cx="')
+    && fastReasoningFrameA !== fastReasoningFrameB
+    && fastThreadFrameA !== fastThreadFrameB
+    && !standardHighVisual.includes('<circle cx="')
+    && reasoningControlShouldAnimate(fastHighState, localThreadB.id)
+    && threadReasoningTrackShouldAnimate(fastAnimatedThread);
 
   let resolveStaleFastRefresh;
   const staleFastRefreshState = new Promise((resolve) => { resolveStaleFastRefresh = resolve; });
@@ -9983,7 +10392,7 @@ async function verifyInteractionPolicy() {
     && manualCodexSelectionOverridesStreamDeckHistory
     && sameTaskComposerStateRecoversWithoutIdentityChange
     && dashboardControlsUseCurrentTask
-    && focusedRemoteSpeedUpdatesImmediately
+    && composerChangesStayNextTurnOnly
     && fallbackSearchRunsOnce
     && activationWaitRunsOnceBeforeNavigation
     && successfulButUnreadyDirectRetries
@@ -10013,6 +10422,8 @@ async function verifyInteractionPolicy() {
     && offExitIsConfirmedState
     && passiveComposerReadDoesNotClaimSpeed
     && taskMetadataRestoresFastWithoutMenu
+    && nextTurnMetadataDrivesControls
+    && directCodexComposerChangeRefreshesControlOnly
     && fastModeVisualsAreIconFirst
     && fastToggleWaitedForNavigation
     && fastToggleIsCoalescedAndConfirmed
@@ -10020,9 +10431,12 @@ async function verifyInteractionPolicy() {
     && singleShotFastToggleUsesOneNativeAction
     && fastToggleRestoresComposerAfterNativeFocusMiss
     && fastModeWorksOnRelease
+    && reasoningFastToggleStartsAtThreshold
     && reasoningPingPongStateIsVerified
     && optimisticReasoningMovesBeforeNativeConfirmation
+    && rapidReasoningQueuesEveryTap
     && reasoningControlUsesCenteredAnimatedTrack
+    && fastParticlesAnimateAcrossFrames
     && staleFastRefreshCannotOverwriteToggle
     && fastRefreshRecoversWithoutPageReentry
     && navigationWaitsForFastToggle
@@ -10052,7 +10466,7 @@ async function verifyInteractionPolicy() {
     manualCodexSelectionOverridesStreamDeckHistory,
     sameTaskComposerStateRecoversWithoutIdentityChange,
     dashboardControlsUseCurrentTask,
-    focusedRemoteSpeedUpdatesImmediately,
+    composerChangesStayNextTurnOnly,
     fallbackSearchRunsOnce,
     activationWaitRunsOnceBeforeNavigation,
     successfulButUnreadyDirectRetries,
@@ -10082,6 +10496,8 @@ async function verifyInteractionPolicy() {
     offExitIsConfirmedState,
     passiveComposerReadDoesNotClaimSpeed,
     taskMetadataRestoresFastWithoutMenu,
+    nextTurnMetadataDrivesControls,
+    directCodexComposerChangeRefreshesControlOnly,
     fastModeVisualsAreIconFirst,
     fastToggleWaitedForNavigation,
     fastToggleIsCoalescedAndConfirmed,
@@ -10089,9 +10505,12 @@ async function verifyInteractionPolicy() {
     singleShotFastToggleUsesOneNativeAction,
     fastToggleRestoresComposerAfterNativeFocusMiss,
     fastModeWorksOnRelease,
+    reasoningFastToggleStartsAtThreshold,
     reasoningPingPongStateIsVerified,
     optimisticReasoningMovesBeforeNativeConfirmation,
+    rapidReasoningQueuesEveryTap,
     reasoningControlUsesCenteredAnimatedTrack,
+    fastParticlesAnimateAcrossFrames,
     staleFastRefreshCannotOverwriteToggle,
     passiveUnknownFastRefreshPreservesConfirmedState,
     fastRefreshRecoversWithoutPageReentry,
@@ -10125,8 +10544,12 @@ async function verifyInteractionPolicy() {
   for (const timer of fastModeLongPressTimers.values()) clearTimeout(timer);
   fastModeLongPressTimers.clear();
   fastModeLongPressArmedContexts.clear();
+  fastModeLongPressUpdates.clear();
   reasoningBusyContexts.clear();
   reasoningDirectionByThreadId.clear();
+  reasoningVisualOverrideByThreadId.clear();
+  reasoningPendingCountByThreadId.clear();
+  reasoningPendingCountByContext.clear();
   voiceHeldContexts.clear();
   voiceReleasePendingContexts.clear();
   voiceTranscriptionByContext.clear();

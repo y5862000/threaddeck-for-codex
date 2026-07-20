@@ -1,5 +1,7 @@
 "use strict";
 
+const { t } = require("./i18n");
+
 function booleanField(fields, name) {
   if (fields[name] === "1") return true;
   if (fields[name] === "0") return false;
@@ -43,13 +45,7 @@ function permissionIssueForHealth(health, options = {}) {
 }
 
 function permissionIssueLabel(issue) {
-  if (issue === "accessibility") return "권한 필요";
-  if (issue === "post-event") return "입력 권한";
-  if (issue === "codex-access") return "Codex 권한";
-  if (issue === "codex-operation") return "Codex 점검";
-  if (issue === "input-operation") return "입력 점검";
-  if (issue === "media-operation") return "미디어 점검";
-  return "기능 점검";
+  return t(`permission.${issue}`, t("permission.unknown", "Check setup"));
 }
 
 module.exports = {

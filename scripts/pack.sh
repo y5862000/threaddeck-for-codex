@@ -24,6 +24,7 @@ pnpm exec streamdeck pack "$STAGING_DIR/$PLUGIN_NAME" \
 # native helper's executable bit. Exercise the installed layout so every
 # release proves that the Node entry point repairs keybridge before first use.
 ARTIFACT="$ROOT_DIR/release/com.yechan.threaddeck.streamDeckPlugin"
+CHECKSUM="$ARTIFACT.sha256"
 EXTRACTED_DIR="$STAGING_DIR/extracted"
 mkdir -p "$EXTRACTED_DIR"
 /usr/bin/unzip -q "$ARTIFACT" -d "$EXTRACTED_DIR"
@@ -35,3 +36,5 @@ node "$EXTRACTED_PLUGIN/bin/plugin.js" --verify-keybridge-permission >/dev/null
   exit 1
 }
 echo "Packaged keybridge permission repair passed."
+(cd "$ROOT_DIR/release" && shasum -a 256 "${ARTIFACT##*/}") > "$CHECKSUM"
+echo "Wrote ${CHECKSUM#$ROOT_DIR/}"

@@ -1,6 +1,6 @@
 # Security and privacy
 
-> [한국어 보안·개인정보 보호 안내](SECURITY.ko.md)
+> [Korean security and privacy guide](SECURITY.ko.md)
 
 ThreadDeck runs locally. It has no telemetry, analytics, update server, remote API, or code that uploads Codex task metadata.
 

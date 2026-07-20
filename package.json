@@ -1,8 +1,8 @@
 {
   "name": "threaddeck-for-codex",
-  "version": "0.3.2",
+  "version": "0.4.0",
   "private": true,
-  "description": "Monitor, switch, and dictate into Codex Desktop tasks from Stream Deck Neo on macOS.",
+  "description": "A bilingual Codex Stream Deck plugin for monitoring, switching, and dictating into Codex Desktop tasks on Stream Deck Neo.",
   "license": "MIT",
   "author": "ThreadDeck contributors",
   "homepage": "https://github.com/y5862000/threaddeck-for-codex#readme",
@@ -14,14 +14,21 @@
     "url": "https://github.com/y5862000/threaddeck-for-codex/issues"
   },
   "keywords": [
+    "ai-agent",
+    "chatgpt-codex",
     "codex",
+    "codex-micro",
+    "codex-stream-deck",
     "macos",
     "stream-deck",
-    "stream-deck-neo"
+    "stream-deck-neo",
+    "stream-deck-plugin",
+    "voice-dictation"
   ],
   "scripts": {
     "test": "node --test test/*.test.js",
     "build": "zsh scripts/build.sh",
+    "sync:i18n": "node scripts/sync-localizations.mjs",
     "audit:release": "node scripts/audit-release.mjs",
     "audit:licenses": "node scripts/audit-licenses.mjs",
     "audit": "pnpm run audit:release && pnpm run audit:licenses",
@@ -29,6 +36,7 @@
     "render-demo": "node src/plugin.js --render-demo docs/media/neo-preview.svg",
     "render-docs": "node scripts/render-docs.mjs",
     "render-animation": "node scripts/render-animation.mjs",
+    "doctor": "zsh scripts/doctor.sh",
     "pack:artifact": "zsh scripts/pack.sh",
     "pack": "pnpm run build && pnpm run pack:artifact",
     "release": "pnpm run build && pnpm run check && pnpm run audit:licenses && pnpm run pack:artifact"

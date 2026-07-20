@@ -54,17 +54,18 @@ jobs:
         shell: bash
         run: |
           artifact="release/com.yechan.threaddeck.streamDeckPlugin"
-          checksum="$(shasum -a 256 "$artifact" | awk '{print $1}')"
+          checksum_file="${artifact}.sha256"
+          checksum="$(awk '{print $1}' "$checksum_file")"
           notes_file="$RUNNER_TEMP/threaddeck-release-notes.md"
           {
-            echo "ThreadDeck ${RELEASE_VERSION} beta fixes installed native-helper permissions, current Codex Fast mode switching, and push-to-talk media safety."
+            echo "ThreadDeck ${RELEASE_VERSION} beta makes the Codex Stream Deck experience English-first, bilingual, and easier to install on another Mac."
             echo
-            echo "- self-repairs keybridge executable permissions stripped by Stream Deck packaging"
-            echo "- recognizes and toggles the latest Korean Fast / Standard speed submenu"
-            echo "- performs each Fast mode inversion in one native menu transaction"
-            echo "- uses accessibility focus plus keyboard activation with no pointer movement"
-            echo "- leaves already-paused media paused when voice input starts"
-            echo "- verifies the installed-layout permission repair during release packaging"
+            echo "- follows Stream Deck's app language automatically: English by default, Korean when the app uses Korean"
+            echo "- ships English action names, key status copy, screenshots, and GIF demonstrations"
+            echo "- keeps stable language-neutral activity codes behind the key renderer"
+            echo "- adds a clearer one-package install path and bilingual setup documentation"
+            echo "- includes the latest Effort, Fast mode, voice, completion, permission, and media-control fixes"
+            echo "- documents the macOS platform boundary for future Windows contributors"
             echo
             echo "SHA-256: \`${checksum}\`"
           } > "$notes_file"
@@ -74,9 +75,9 @@ jobs:
               --title "ThreadDeck ${RELEASE_VERSION} beta" \
               --notes-file "$notes_file" \
               --prerelease
-            gh release upload "$RELEASE_TAG" "$artifact" --clobber
+            gh release upload "$RELEASE_TAG" "$artifact" "$checksum_file" --clobber
           else
-            gh release create "$RELEASE_TAG" "$artifact" \
+            gh release create "$RELEASE_TAG" "$artifact" "$checksum_file" \
               --target "$GITHUB_SHA" \
               --title "ThreadDeck ${RELEASE_VERSION} beta" \
               --notes-file "$notes_file" \

@@ -1,6 +1,6 @@
 # Architecture
 
-> [한국어 구조 설명](ARCHITECTURE.ko.md)
+> [Korean architecture guide](ARCHITECTURE.ko.md)
 
 ```text
 Codex local state (~/.codex) ─┐
@@ -44,6 +44,8 @@ The I/O-free modules under `src/` keep private Codex formats and deterministic p
 | Module | Responsibility |
 |---|---|
 | `config.js` | Action UUIDs, timing constants, action maps, and stable fallback view state |
+| `i18n.js` | English/Korean runtime copy, stable activity codes, and legacy-label migration |
+| `runtime-info.js` | Stream Deck registration parsing, language selection, and platform capability boundary |
 | `text.js` | Title normalization, NFC/NFD fingerprints, ambient-title filtering, and grapheme-aware layout helpers |
 | `time.js` | UUIDv7 timestamps, recency normalization, duration formatting, and timing labels |
 | `text-input.js` | Composer text-state parsing, comparison, and draft-reset detection |
@@ -77,7 +79,13 @@ The editable profile source lives under `profiles/source/unpacked`. `scripts/bui
 
 ThreadDeck owns the bundled previous-page actions and exposes a next-page action. They use Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while those keys participate in plugin-rendered completion overlays. Elgato-owned app-launch actions remain native and do not receive ThreadDeck overlays.
 
-The Dashboard keeps task action 1 at keypad position `0,1` as the task selected in Codex's active window. Position `1,1` contains the ThreadDeck-owned Fast mode toggle and position `2,0` contains the reasoning-effort control. The New Task and app-switch actions remain available in the action list for custom profiles.
+The Dashboard keeps Current Task at keypad position `0,1` and the combined Effort/Fast control at `1,1`. New Task, Side Chat, Send, microphone, quota, and back navigation fill the remaining slots. The dedicated Fast and app-switch actions remain available in the action list for custom profiles.
+
+### Language and platform boundary
+
+Stream Deck passes `application.language` and `application.platform` in its registration payload. ThreadDeck normalizes language once at startup, defaults unsupported languages to English, and renders stable domain activity codes through `src/i18n.js`. The same package also carries `en.json` and `ko.json` for action-list localization, so English and Korean never require separate plugin binaries.
+
+The manifest deliberately declares only macOS today. `src/runtime-info.js` exposes the platform capability boundary, while all native input, Accessibility, audio, and active-app behavior remains behind `keybridge`. A future Windows port should implement that verified command contract as a platform adapter rather than scatter platform checks throughout the renderer and lifecycle reducers. See [Platform porting](PORTING.md).
 
 ## Data refresh and rendering
 

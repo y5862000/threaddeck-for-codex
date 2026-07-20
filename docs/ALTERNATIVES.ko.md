@@ -2,10 +2,11 @@
 
 > [English](ALTERNATIVES.md)
 
-2026-07-18 기준으로 확인했습니다.
+2026-07-21 기준으로 확인했습니다.
 
 | 프로젝트 | 중심 기능 | ThreadDeck과의 차이 |
 | --- | --- | --- |
+| [Codex Micro Stream Deck Emulator](https://github.com/mpociot/codex-micro-stream-deck-emulator) | 실제 Stream Deck을 ChatGPT에 가상 Codex Micro로 표시 | Micro HID/RPC 프로토콜을 재구현하고 실행 shim 또는 제한된 권한의 가상 HID를 사용합니다. ThreadDeck은 공식 Stream Deck 플러그인 런타임 안에서 Codex Desktop 작업 상태를 직접 읽습니다. |
 | [Codex Deck](https://github.com/dazer1234/codex-stream-deck) | Codex 내부 이벤트 브리지를 통한 Codex Micro 제어 | Micro 중심의 더 넓은 동작 제어입니다. ThreadDeck은 실제 Neo에서 검증한 Codex Desktop 작업 대시보드입니다. |
 | [Token Deck](https://github.com/leask/token-deck) | AI 한도와 Mac 하드웨어 지표 | 사용량·지표 중심이며 Codex 작업 목록과 작업 전환은 없습니다. |
 | [AI Usage Limits](https://github.com/lenadweb/stream-deck-ai-limits) | 여러 AI 제공자의 한도 확인 | 제공자 공통 사용량 표시에 집중하며 Codex 작업 상태는 없습니다. |

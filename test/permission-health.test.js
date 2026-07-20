@@ -40,9 +40,9 @@ test("separates Accessibility, event-posting, and stale Codex access", () => {
   }, { includeCodexAccess: true }), "codex-access");
 });
 
-test("uses short Korean labels that fit a Neo key", () => {
-  assert.equal(permissionIssueLabel("accessibility"), "권한 필요");
-  assert.equal(permissionIssueLabel("post-event"), "입력 권한");
-  assert.equal(permissionIssueLabel("codex-operation"), "Codex 점검");
-  assert.equal(permissionIssueLabel("media-operation"), "미디어 점검");
+test("uses short default English labels that fit a Neo key", () => {
+  assert.equal(permissionIssueLabel("accessibility"), "Allow access");
+  assert.equal(permissionIssueLabel("post-event"), "Input access");
+  assert.equal(permissionIssueLabel("codex-operation"), "Check Codex");
+  assert.equal(permissionIssueLabel("media-operation"), "Check media");
 });

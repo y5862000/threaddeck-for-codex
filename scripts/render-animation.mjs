@@ -77,11 +77,15 @@ try {
 
   execFileSync(process.execPath, [
     "src/plugin.js",
+    "--language",
+    "en",
     "--render-demo-animation",
     overviewSvgDirectory
   ], { cwd: root, stdio: "inherit" });
   execFileSync(process.execPath, [
     "src/plugin.js",
+    "--language",
+    "en",
     "--render-gesture-animations",
     gestureSvgDirectory
   ], { cwd: root, stdio: "inherit" });

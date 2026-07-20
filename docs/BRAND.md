@@ -1,13 +1,13 @@
 # ThreadDeck brand guide
 
-> [한국어 브랜드 가이드](BRAND.ko.md)
+> [Korean brand guide](BRAND.ko.md)
 
 ## Positioning
 
 **Name:** ThreadDeck for Codex<br>
 **Short name:** ThreadDeck<br>
 **English tagline:** Codex tasks, at a glance.<br>
-**Korean tagline:** Codex 작업을 한눈에.
+**Korean tagline:** maintained in [`BRAND.ko.md`](BRAND.ko.md).
 
 ThreadDeck is a local-first physical task dashboard. Brand language should emphasize glanceability, direct control, privacy, and the Stream Deck Neo form factor. Avoid presenting it as an official Codex or Elgato product.
 
