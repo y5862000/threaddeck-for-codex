@@ -36,7 +36,7 @@ The overview and ThreadDeck gesture demos below are generated from the plugin's 
 - **Live task cards** — activity, title, pin, queue count, goal badge and goal-wide elapsed time, reasoning intensity, and fast/standard service cues.
 - **Reliable switching** — open local tasks directly and activate the correct computer for an explicitly pinned remote task without moving or clicking the mouse pointer.
 - **Hardware dictation** — hold a task key to speak and auto-submit a follow-up, or use the dedicated microphone to leave a draft for review.
-- **Completion feedback** — after a fresh final-turn end is confirmed with no queued continuation, every visible ThreadDeck-owned key acknowledges the first completion frame and the matching task continues with a stronger green pulse. Queue edits and dequeue-to-execution transitions never count as completion.
+- **Completion feedback** — after a fresh final-turn end is confirmed with no queued continuation, every visible ThreadDeck-owned key acknowledges the first completion frame. The matching task then keeps a slower green pulse until that exact task is successfully opened or viewed frontmost in Codex. Queue edits and dequeue-to-execution transitions never count as completion.
 - **Workflow controls** — toggle Codex Fast mode, create a task or Side Chat, send, switch apps, change pages, control media, and optionally show a weekly quota ring.
 
 ## Install in 60 seconds
@@ -127,7 +127,7 @@ The Media page includes Stream Deck, Music, Chrome, and Codex launchers built wi
 | <img src="docs/media/quota-key.png" width="104" alt="Weekly quota key"> | Optional remaining weekly capacity from CodexBar. The last good value appears immediately during page changes and survives a transient refresh failure. |
 | <img src="docs/media/side-chat-key.png" width="104" alt="Side Chat key"> | A workflow action using the same light/dark visual system as task cards. |
 
-Task status uses a small, consistent vocabulary: active blue/purple, current phase, pin, live or frozen time, amber queue count, completion check, error/stopped state, and the green completion pulse. Light appearance preserves the same hierarchy.
+Task status uses a small, consistent vocabulary: active blue/purple, current phase, pin, live or frozen time, amber queue count, completion check, error/stopped state, and the green completion pulse. An unviewed completion keeps breathing green across plugin restarts and clears only after the exact task is opened. Light appearance preserves the same hierarchy.
 
 ![ThreadDeck dashboard in light appearance](docs/media/neo-preview-light.png)
 
@@ -179,6 +179,7 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 |---|---|---|
 | `~/.codex` and Codex Desktop logs | Read-only | User task titles, pins, cached remote summaries, lifecycle, goal status and accumulated time, activity, timing, service metadata, and temporary Side Chat lifecycle |
 | `~/Library/Application Support/ThreadDeck/remote-goals-v1.json` | Local read/write | Last observed remote goal status and numeric time for at most seven days; no objective, title, or conversation text |
+| `~/Library/Application Support/ThreadDeck/unread-completions-v1.json` | Local read/write | Task UUID and numeric completion/notice timestamps for unviewed completion cues; no title or conversation text |
 | CodexBar CLI | Optional child process | Weekly remaining quota only; CodexBar has its own provider behavior |
 | Stream Deck plugin socket | Localhost | Receive key events and send rendered key images |
 | macOS Accessibility and Core Audio | Local system APIs | Keyboard/media actions, focused-composer checks, fixed goal status/time labels, queue counts, remote selection, and push-to-talk audio handling |

@@ -90,7 +90,7 @@ The Dashboard keeps task action 1 at keypad position `0,1` as the task selected 
 - Active task timers and animation frames render at device-appropriate intervals.
 - Weekly usage refreshes every 60 seconds while a ThreadDeck-owned action is visible, keeping the quota value warm before its page appears.
 - macOS appearance is checked every 2 seconds and swaps the renderer between the existing dark and light palettes.
-- Completion is detected by comparing end timestamps with an overlapping observation window and a startup grace period. Queue decreases are also treated as a completed turn. The first global frame is fanned out to every visible ThreadDeck-owned key before later frames are split into device-safe groups; the matching task key receives the longer task pulse.
+- Completion is detected by comparing end timestamps with an overlapping observation window and a startup grace period; queue observations fence stale handoffs but never create completion evidence by themselves. The first global frame is fanned out to every visible ThreadDeck-owned key before later frames are split into device-safe groups. The matching task key receives the longer initial pulse, then a lower-bandwidth breathing cue that persists locally until successful navigation or an exact frontmost Codex-task match acknowledges it.
 
 The plugin caches the last image for each context and avoids sending unchanged frames.
 

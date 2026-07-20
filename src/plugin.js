@@ -95,6 +95,9 @@ const {
   THREAD_VOICE_FOCUS_PREP_LEAD_MS,
   THREAD_VOICE_FOCUS_SETTLE_MS,
   THREAD_VOICE_LONG_PRESS_MS,
+  UNREAD_COMPLETION_FRAME_INTERVAL_MS,
+  UNREAD_COMPLETION_GROUP_COUNT,
+  UNREAD_COMPLETION_PULSE_PERIOD_MS,
   VOICE_AUTO_SUBMIT_STABLE_MS,
   VOICE_COMPLETE_DISPLAY_MS,
   VOICE_ERROR_DISPLAY_MS,
@@ -121,6 +124,10 @@ const GOALS_DB = path.resolve(process.env.THREADDECK_GOALS_DB || path.join(CODEX
 const REMOTE_GOAL_CACHE_PATH = path.resolve(
   process.env.THREADDECK_REMOTE_GOAL_CACHE
     || path.join(USER_HOME, "Library", "Application Support", "ThreadDeck", "remote-goals-v1.json")
+);
+const UNREAD_COMPLETION_CACHE_PATH = path.resolve(
+  process.env.THREADDECK_UNREAD_COMPLETION_CACHE
+    || path.join(USER_HOME, "Library", "Application Support", "ThreadDeck", "unread-completions-v1.json")
 );
 const GLOBAL_STATE = path.resolve(process.env.THREADDECK_GLOBAL_STATE || path.join(CODEX_HOME, ".codex-global-state.json"));
 const SESSION_INDEX = path.resolve(process.env.THREADDECK_SESSION_INDEX || path.join(CODEX_HOME, "session_index.jsonl"));
@@ -273,6 +280,7 @@ const contextSentImages = new Map();
 const contextFeedback = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
+const unreadCompletionByThreadId = new Map();
 const observedCompletionEndMs = new Map();
 const completionQueueBarrierMsByThreadId = new Map();
 const pendingCompletionByThreadId = new Map();
@@ -312,6 +320,8 @@ let globalCompletionThreadId = null;
 let globalCompletionWasRendered = false;
 let globalCompletionRenderGroup = 0;
 let globalCompletionInitialFanoutPending = false;
+let unreadCompletionRenderGroup = 0;
+let lastUnreadCompletionFrameAtMs = 0;
 let mostRecentThreadId = null;
 let lastOpenedThreadId = null;
 let lastOpenedThreadAtMs = null;
@@ -424,6 +434,9 @@ const confirmedGoalAbsentByThreadId = new Map();
 let remoteGoalCacheLoaded = false;
 let remoteGoalCacheLoadPromise = null;
 let remoteGoalCacheWriteTail = Promise.resolve();
+let unreadCompletionCacheLoaded = false;
+let unreadCompletionCacheLoadPromise = null;
+let unreadCompletionCacheWriteTail = Promise.resolve();
 let remoteComposerProbe = { threadId: null, turnKey: null };
 let goalProbe = { threadId: null, checkedAtMs: 0, absentCount: 0 };
 
@@ -690,9 +703,30 @@ function completionPulseState(threadId, nowMs = renderTimeMs()) {
   return { elapsedMs, progress, strength };
 }
 
+function unreadCompletionPulseState(threadId, nowMs = renderTimeMs()) {
+  const unread = unreadCompletionByThreadId.get(threadId);
+  if (!unread) return null;
+  const persistentStartedAtMs = unread.markedAtMs + THREAD_COMPLETION_PULSE_DURATION_MS;
+  const elapsedMs = Math.max(0, nowMs - persistentStartedAtMs);
+  const phase = (elapsedMs % UNREAD_COMPLETION_PULSE_PERIOD_MS)
+    / UNREAD_COMPLETION_PULSE_PERIOD_MS;
+  const breath = 0.5 - 0.5 * Math.cos(phase * Math.PI * 2);
+  // Keep a visible green floor between breaths. The initial completion fan-out
+  // is deliberately stronger; this slower task-only pulse means "not viewed".
+  const strength = 0.3 + 0.5 * breath;
+  return {
+    elapsedMs,
+    progress: phase,
+    strength,
+    persistent: true,
+    unread: true
+  };
+}
+
 function visibleCompletionPulseState(thread, nowMs = renderTimeMs()) {
   if (!thread?.id || thread.status !== "completed") return null;
-  return completionPulseState(thread.id, nowMs);
+  return completionPulseState(thread.id, nowMs)
+    ?? unreadCompletionPulseState(thread.id, nowMs);
 }
 
 function globalCompletionPulseState(nowMs = renderTimeMs()) {
@@ -3567,6 +3601,108 @@ function persistRemoteGoalCache() {
   });
 }
 
+function serializableUnreadCompletion(entry) {
+  if (!entry?.threadId || !UUID_PATTERN.test(entry.threadId)) return null;
+  if (!Number.isFinite(entry.endedAtMs) || !Number.isFinite(entry.markedAtMs)) return null;
+  return {
+    threadId: entry.threadId,
+    endedAtMs: entry.endedAtMs,
+    markedAtMs: entry.markedAtMs
+  };
+}
+
+async function loadUnreadCompletionCache() {
+  if (unreadCompletionCacheLoaded) return;
+  if (!runtimeTraceEnabled) {
+    unreadCompletionCacheLoaded = true;
+    return;
+  }
+  if (unreadCompletionCacheLoadPromise) return unreadCompletionCacheLoadPromise;
+  unreadCompletionCacheLoadPromise = (async () => {
+    try {
+      const parsed = JSON.parse(await fs.readFile(UNREAD_COMPLETION_CACHE_PATH, "utf8"));
+      if (parsed?.version !== 1 || !Array.isArray(parsed.completions)) return;
+      for (const row of parsed.completions) {
+        const completion = serializableUnreadCompletion(row);
+        if (!completion) continue;
+        const previous = unreadCompletionByThreadId.get(completion.threadId);
+        if (!previous || completion.endedAtMs >= previous.endedAtMs) {
+          unreadCompletionByThreadId.set(completion.threadId, completion);
+        }
+      }
+    } catch {
+      // The attention cache is optional. A missing or malformed cache must not
+      // interfere with task discovery or completion detection.
+    } finally {
+      unreadCompletionCacheLoaded = true;
+      unreadCompletionCacheLoadPromise = null;
+    }
+  })();
+  return unreadCompletionCacheLoadPromise;
+}
+
+function persistUnreadCompletionCache() {
+  if (!runtimeTraceEnabled) return;
+  const completions = [...unreadCompletionByThreadId.values()]
+    .map(serializableUnreadCompletion)
+    .filter(Boolean)
+    .sort((left, right) => right.markedAtMs - left.markedAtMs)
+    .slice(0, 256);
+  const snapshot = `${JSON.stringify({ version: 1, completions })}\n`;
+  unreadCompletionCacheWriteTail = unreadCompletionCacheWriteTail.then(async () => {
+    const temporaryPath = `${UNREAD_COMPLETION_CACHE_PATH}.tmp-${process.pid}`;
+    await fs.mkdir(path.dirname(UNREAD_COMPLETION_CACHE_PATH), { recursive: true });
+    try {
+      await fs.writeFile(temporaryPath, snapshot, { encoding: "utf8", mode: 0o600 });
+      await fs.rename(temporaryPath, UNREAD_COMPLETION_CACHE_PATH);
+    } catch (error) {
+      await fs.rm(temporaryPath, { force: true }).catch(() => {});
+      throw error;
+    }
+  }).catch(() => {
+    // Persistence must never delay task refresh or physical key input.
+  });
+}
+
+function markUnreadCompletion(threadId, endedAtMs, markedAtMs = Date.now(), options = {}) {
+  if (!threadId || !UUID_PATTERN.test(threadId) || !Number.isFinite(endedAtMs)) return false;
+  const previous = unreadCompletionByThreadId.get(threadId);
+  if (previous && previous.endedAtMs >= endedAtMs) return false;
+  unreadCompletionByThreadId.set(threadId, { threadId, endedAtMs, markedAtMs });
+  if (options.persist !== false) persistUnreadCompletionCache();
+  return true;
+}
+
+function clearUnreadCompletion(threadId, options = {}) {
+  if (!unreadCompletionByThreadId.delete(threadId)) return false;
+  if (options.persist !== false) persistUnreadCompletionCache();
+  if (unreadCompletionByThreadId.size === 0) {
+    unreadCompletionRenderGroup = 0;
+    lastUnreadCompletionFrameAtMs = 0;
+  }
+  return true;
+}
+
+function acknowledgeCompletion(threadId, options = {}) {
+  const hadTransientEffect = completionPulseStartedAt.has(threadId)
+    || globalCompletionThreadId === threadId;
+  const clearedUnread = clearUnreadCompletion(threadId, options);
+  if (!clearedUnread && !hadTransientEffect) return false;
+  cancelCompletionEffects(threadId);
+  if (options.render !== false) renderThreadContexts();
+  return true;
+}
+
+function reconcileUnreadCompletion(thread) {
+  const unread = thread?.id ? unreadCompletionByThreadId.get(thread.id) : null;
+  if (!unread) return false;
+  const queueCount = Math.max(0, Number.parseInt(thread.queueCount, 10) || 0);
+  if (thread.status !== "completed" || queueCount > 0) {
+    return clearUnreadCompletion(thread.id);
+  }
+  return false;
+}
+
 function mergeObservedGoal(previous, observed, nowMs) {
   if (!observed?.timeUnknown || !previous) return observed;
   // A completed goal cannot become active again. An unknown-duration state
@@ -4276,7 +4412,10 @@ async function readTopThreads() {
     readActiveThreadIds(),
     readSidebarThreadNames(),
     readGoalRows(),
-    loadRemoteGoalCache()
+    Promise.all([
+      loadRemoteGoalCache(),
+      loadUnreadCompletionCache()
+    ])
   ]);
   const localRows = rows
     .filter((row) => !isInternalThreadRecord(row))
@@ -4334,6 +4473,13 @@ async function readTopThreads() {
     identityCandidates
   );
   const currentThread = await verifiedCurrentCodexThread(queueWindows, currentCandidates);
+  if (currentThread && unreadCompletionByThreadId.has(currentThread.id)) {
+    // `codex-current-thread` can describe Codex's internal selection while the
+    // app is behind another window. Only a strict frontmost match proves the
+    // user has actually viewed the completed task.
+    const completionWasViewed = await threadIsFocused(currentThread);
+    if (completionWasViewed) acknowledgeCompletion(currentThread.id, { render: false });
+  }
   if (currentThread && currentThread.id !== primaryThreadId) {
     rememberVerifiedThread(currentThread, {
       promote: false
@@ -4446,7 +4592,8 @@ function renderStaticContexts() {
   }
 }
 
-function startCompletionEffects(threadId, nowMs = Date.now()) {
+function startCompletionEffects(threadId, nowMs = Date.now(), endedAtMs = nowMs) {
+  markUnreadCompletion(threadId, endedAtMs, nowMs);
   completionPulseStartedAt.set(threadId, nowMs);
   globalCompletionStartedAtMs = nowMs;
   globalCompletionThreadId = threadId;
@@ -4564,21 +4711,40 @@ function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now()) {
 }
 
 function renderAnimatedThreadContexts(nowMs = Date.now()) {
+  const unreadFrameDue = nowMs - lastUnreadCompletionFrameAtMs
+    >= UNREAD_COMPLETION_FRAME_INTERVAL_MS;
+  const unreadRenderGroup = unreadCompletionRenderGroup;
+  let hasVisibleUnreadCompletion = false;
+  let threadContextIndex = 0;
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
     const thread = slot === undefined ? null : threadForSlot(slot);
+    if (slot === undefined) continue;
     const completionStartedAtMs = thread?.id ? completionPulseStartedAt.get(thread.id) : null;
     const completionAnimating = Number.isFinite(completionStartedAtMs)
       && nowMs - completionStartedAtMs < THREAD_COMPLETION_PULSE_DURATION_MS;
+    const unreadAnimating = thread?.status === "completed"
+      && unreadCompletionByThreadId.has(thread.id);
+    if (unreadAnimating) hasVisibleUnreadCompletion = true;
+    const renderUnreadFrame = unreadAnimating
+      && unreadFrameDue
+      && threadContextIndex % UNREAD_COMPLETION_GROUP_COUNT === unreadRenderGroup;
     if (
       (thread?.status === "working" && String(thread.reasoningEffort ?? "").toLowerCase() === "ultra")
       || completionAnimating
+      || renderUnreadFrame
     ) {
       setImage(context, threadSvg(thread, slot));
     } else if (Number.isFinite(completionStartedAtMs)) {
       clearCompletionEffect(thread.id);
       setImage(context, threadSvg(thread, slot));
     }
+    threadContextIndex += 1;
+  }
+  if (unreadFrameDue && hasVisibleUnreadCompletion) {
+    lastUnreadCompletionFrameAtMs = nowMs;
+    unreadCompletionRenderGroup = (unreadCompletionRenderGroup + 1)
+      % UNREAD_COMPLETION_GROUP_COUNT;
   }
 }
 
@@ -4587,6 +4753,7 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
   if (!hasLoadedThreadState) {
     for (const thread of nextThreads) {
       const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
+      reconcileUnreadCompletion(thread);
       if (thread?.id && queueCount > 0) completionQueueBarrierMsByThreadId.set(thread.id, nowMs);
       if (thread?.status === "completed" && Number.isFinite(thread.endedAtMs)) {
         const completedDuringStartup = thread.endedAtMs >= pluginStartedAtMs - COMPLETION_STARTUP_GRACE_MS
@@ -4615,6 +4782,7 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
   const visibleIds = new Set(nextThreads.filter(Boolean).map((thread) => thread.id));
   for (const thread of nextThreads) {
     if (!thread?.id) continue;
+    reconcileUnreadCompletion(thread);
     const previous = previousById.get(thread.id);
     const previousQueueCount = Math.max(0, Number.parseInt(previous?.queueCount, 10) || 0);
     const nextQueueCount = Math.max(0, Number.parseInt(thread.queueCount, 10) || 0);
@@ -4622,6 +4790,7 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
     if (queueChanged || nextQueueCount > 0) {
       completionQueueBarrierMsByThreadId.set(thread.id, nowMs);
       pendingCompletionByThreadId.delete(thread.id);
+      clearUnreadCompletion(thread.id);
       cancelCompletionEffects(thread.id);
     }
 
@@ -4646,7 +4815,7 @@ function trackCompletionTransitions(previousThreads, nextThreads, nowMs = Date.n
       && !queueChanged;
     if (samePendingCompletion && queueIsSettledAndEmpty) {
       pendingCompletionByThreadId.delete(thread.id);
-      startCompletionEffects(thread.id, nowMs);
+      startCompletionEffects(thread.id, nowMs, thread.endedAtMs);
       continue;
     }
     if (pendingCompletion) pendingCompletionByThreadId.delete(thread.id);
@@ -5042,7 +5211,7 @@ async function openThread(context, slot, options = {}) {
     return false;
   }
   if (thread.ephemeral) {
-    return openListedSideChat(context, thread);
+    return openListedSideChat(context, thread, options);
   }
   if (thread.remote && !accessibilityTrustedSync()) {
     feedback(context, "error", "손쉬운 사용", 2200);
@@ -5053,17 +5222,20 @@ async function openThread(context, slot, options = {}) {
   const remoteNavigation = options.navigateRemote ?? navigateRemoteThread;
   const deepLinkNavigation = options.navigateDeepLink ?? navigateDeepLinkThread;
   const remember = options.rememberThread ?? rememberVerifiedThread;
+  const acknowledge = options.acknowledgeCompletion ?? acknowledgeCompletion;
   const scheduleRefresh = options.scheduleRefresh
     ?? (() => setTimeout(() => void refreshThreads(), 1000));
   try {
     if (thread.remote) {
       await remoteNavigation(thread, slot);
+      acknowledge(thread.id, { render: false });
       remember(thread);
       feedback(context, "success", "원격 전환");
       scheduleRefresh();
       return true;
     }
     await deepLinkNavigation(thread, slot);
+    acknowledge(thread.id, { render: false });
     remember(thread);
     feedback(context, "success", "전환 완료");
     scheduleRefresh();
@@ -5093,6 +5265,7 @@ async function openListedSideChat(context, thread, options = {}) {
   const clear = options.clearFeedback ?? clearFeedback;
   const navigate = options.navigateDeepLink ?? navigateDeepLinkThread;
   const remember = options.rememberThread ?? rememberVerifiedThread;
+  const acknowledge = options.acknowledgeCompletion ?? acknowledgeCompletion;
   const scheduleRefresh = options.scheduleRefresh
     ?? (() => setTimeout(() => void refreshThreads(), 1000));
   pendingSideChatTarget = null;
@@ -5104,6 +5277,7 @@ async function openListedSideChat(context, thread, options = {}) {
     // these ephemeral ids while their app-server session is alive.
     const slot = Math.max(0, threadSlots.findIndex((candidate) => candidate?.id === thread.id));
     await navigate(thread, slot);
+    acknowledge(thread.id, { render: false });
     remember(thread);
     feedback(context, "success", "사이드챗 전환");
     scheduleRefresh();
@@ -5395,6 +5569,7 @@ const DEMO_COMPLETED_ID = "00000000-0000-4000-8000-000000000002";
 
 function resetDemoEffects() {
   completionPulseStartedAt.clear();
+  unreadCompletionByThreadId.clear();
   completionQueueBarrierMsByThreadId.clear();
   pendingCompletionByThreadId.clear();
   voiceHeldContexts.clear();
@@ -5408,6 +5583,8 @@ function resetDemoEffects() {
   globalCompletionWasRendered = false;
   globalCompletionRenderGroup = 0;
   globalCompletionInitialFanoutPending = false;
+  unreadCompletionRenderGroup = 0;
+  lastUnreadCompletionFrameAtMs = 0;
 }
 
 function demoPreviewSvg(keySvgs) {
@@ -5874,6 +6051,7 @@ function verifyCompletionTransitionPolicy(nowMs) {
     lastThreadTransitionScanAtMs = nowMs - 3_000;
   };
   const noCompletionEffect = () => !completionPulseStartedAt.has(threadId)
+    && !unreadCompletionByThreadId.has(threadId)
     && globalCompletionStartedAtMs === null
     && globalCompletionThreadId === null;
 
@@ -6032,9 +6210,23 @@ function verifyCompletionTransitionPolicy(nowMs) {
     && firstPulseStartedAtMs === nowMs + 1_000
     && globalCompletionStartedAtMs === nowMs + 1_000
     && globalCompletionThreadId === threadId;
+  const confirmedFinalCompletionUnread = unreadCompletionByThreadId.get(threadId)?.endedAtMs === nowMs;
   trackCompletionTransitions([finalTerminal], [finalTerminal], nowMs + 1_500);
   const identicalTerminalDidNotRetrigger = completionPulseStartedAt.get(threadId) === firstPulseStartedAtMs
     && globalCompletionStartedAtMs === firstPulseStartedAtMs;
+  const persistentEffect = visibleCompletionPulseState(
+    finalTerminal,
+    firstPulseStartedAtMs + THREAD_COMPLETION_PULSE_DURATION_MS + 700
+  );
+  const unreadCompletionPersistsAfterInitialPulse = persistentEffect?.persistent === true
+    && persistentEffect?.unread === true
+    && persistentEffect.strength >= 0.3;
+  acknowledgeCompletion(threadId, { persist: false, render: false });
+  const acknowledgementClearsUnreadCompletion = !unreadCompletionByThreadId.has(threadId)
+    && visibleCompletionPulseState(
+      finalTerminal,
+      firstPulseStartedAtMs + THREAD_COMPLETION_PULSE_DURATION_MS + 700
+    ) === null;
 
   const passed = queueEditIgnored
     && remoteQueueHandoffIgnored
@@ -6045,7 +6237,10 @@ function verifyCompletionTransitionPolicy(nowMs) {
     && collapsedQueuedFinalPulsed
     && unknownStartCollapsedFinalPulsed
     && confirmedFinalCompletionPulsed
-    && identicalTerminalDidNotRetrigger;
+    && confirmedFinalCompletionUnread
+    && identicalTerminalDidNotRetrigger
+    && unreadCompletionPersistsAfterInitialPulse
+    && acknowledgementClearsUnreadCompletion;
   resetTracker(false);
   return {
     passed,
@@ -6064,7 +6259,10 @@ function verifyCompletionTransitionPolicy(nowMs) {
     unknownStartCollapsedFinalPulsed,
     confirmedFinalCompletionStaged,
     confirmedFinalCompletionPulsed,
-    identicalTerminalDidNotRetrigger
+    confirmedFinalCompletionUnread,
+    identicalTerminalDidNotRetrigger,
+    unreadCompletionPersistsAfterInitialPulse,
+    acknowledgementClearsUnreadCompletion
   };
 }
 
@@ -7617,6 +7815,7 @@ async function verifyInteractionPolicy() {
     && threadForAction(ACTIONS.thread2)?.id === localThreadB.id;
   primaryThreadId = localThreadA.id;
   primaryThreadRow = localThreadA;
+  markUnreadCompletion(localThreadB.id, DEMO_EPOCH_MS, DEMO_EPOCH_MS, { persist: false });
   const originalConsoleError = console.error;
   console.error = () => {};
   const failedLocalNavigation = await openThread(currentSlotContext, 1, {
@@ -7629,6 +7828,7 @@ async function verifyInteractionPolicy() {
   const failedNavigationKeepsCurrentSlot = !failedLocalNavigation
     && primaryThreadId === localThreadA.id
     && threadSlots[0]?.id === localThreadA.id;
+  const failedNavigationKeepsUnreadCompletion = unreadCompletionByThreadId.has(localThreadB.id);
   const successfulLocalNavigation = await openThread(currentSlotContext, 1, {
     navigateDeepLink: async () => true,
     scheduleRefresh: () => {},
@@ -7641,6 +7841,7 @@ async function verifyInteractionPolicy() {
     && threadSlots[0]?.id === localThreadA.id
     && threadSlots[1]?.id === localThreadB.id
     && threadSlots.filter((thread) => thread?.id === localThreadB.id).length === 1;
+  const successfulNavigationAcknowledgesCompletion = !unreadCompletionByThreadId.has(localThreadB.id);
   const refreshedCurrentRows = primaryFirstThreadRows(
     [localThreadC, localThreadA],
     [localThreadC, localThreadA]
@@ -8410,7 +8611,9 @@ async function verifyInteractionPolicy() {
     && navigationLeaseCleared
     && independentCurrentAndRankedActions
     && failedNavigationKeepsCurrentSlot
+    && failedNavigationKeepsUnreadCompletion
     && verifiedNavigationUpdatesCurrentOnly
+    && successfulNavigationAcknowledgesCompletion
     && refreshPreservesCurrentSlot
     && currentUnpinnedRemoteIsSlotOneException
     && staleCurrentRequiresStrictIdentity
@@ -8467,7 +8670,9 @@ async function verifyInteractionPolicy() {
     navigationLeaseCleared,
     independentCurrentAndRankedActions,
     failedNavigationKeepsCurrentSlot,
+    failedNavigationKeepsUnreadCompletion,
     verifiedNavigationUpdatesCurrentOnly,
+    successfulNavigationAcknowledgesCompletion,
     refreshPreservesCurrentSlot,
     currentUnpinnedRemoteIsSlotOneException,
     staleCurrentRequiresStrictIdentity,

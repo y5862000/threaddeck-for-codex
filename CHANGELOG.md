@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Added persistent unviewed-completion attention: the completed task keeps a slow green pulse across plugin restarts until successful navigation or an exact frontmost Codex-task match acknowledges it, while failed switches leave the alert intact.
 - Changed the Dashboard key from Current / Last Switched to **Current Task**. It now follows the task selected in Codex's active window, including manual in-app switches, while retaining the stricter frontmost-task check for dictation and submission safety.
 
 ## 0.3.2-beta — 2026-07-19
