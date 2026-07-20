@@ -50,6 +50,7 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" thread-fingerprint-selftest
 "$BRIDGE" focused-thread-geometry-selftest
 "$BRIDGE" side-chat-composer-selftest
+"$BRIDGE" side-chat-tab-selftest
 "$BRIDGE" command-palette-selftest
 "$BRIDGE" media-bundle-selftest
 node - "$ROOT_DIR/native/keybridge.m" "$ROOT_DIR/src/plugin.js" <<'NODE'
@@ -141,8 +142,24 @@ if (!reasoningStepBody.includes('strcmp(expected_reasoning, "ultra") == 0')
 }
 if (!reasoningStepBody.includes("codex_reasoning_option_csv(&options")
     || !reasoningStepBody.includes("codex_reasoning_target_option(")
-    || !reasoningStepBody.includes("step_count")) {
+    || !reasoningStepBody.includes("step_count")
+    || !reasoningStepBody.includes("activate_codex_reasoning_option(&options")) {
   throw new Error("Reasoning step must scan and traverse the current exact option list");
+}
+
+for (const contract of [
+  "CODEX_INTELLIGENCE_TRIGGER_MAX",
+  "resolve_codex_intelligence_trigger(\n    scan,\n    preferred_trigger",
+  "copy_codex_fast_mode_scan_with_trigger_hint",
+  "copy_codex_reasoning_control_scan_with_retry",
+  "focus_codex_composer_near_x(target_x)",
+  "CFEqual(focused_value, input)",
+  "FAST_ATTR_FOCUSED",
+  "codex_role_can_be_intelligence_trigger(is_button, is_popup, is_radio)"
+]) {
+  if (!source.includes(contract)) {
+    throw new Error(`Missing multi-composer Effort targeting contract: ${contract}`);
+  }
 }
 
 const effortUpdateStart = pluginSource.indexOf("function performReasoningEffortChange(");

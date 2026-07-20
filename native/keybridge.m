@@ -27,6 +27,8 @@ enum {
   KEY_ESCAPE = 0x35,
   KEY_LEFT = 0x7B,
   KEY_RIGHT = 0x7C,
+  KEY_DOWN = 0x7D,
+  KEY_UP = 0x7E,
   KEY_COMMAND = 0x37,
   KEY_SHIFT = 0x38,
   KEY_OPTION = 0x3A,
@@ -52,6 +54,7 @@ typedef enum {
 
 static bool stop_codex_composer_dictation_if_visible(void);
 static bool focus_codex_composer_if_visible(void);
+static bool focus_codex_composer_near_x(double target_x);
 static bool submit_codex_composer_if_visible(void);
 static VoiceAudioState codex_audio_input_state(void);
 static bool codex_audio_input_is_running(void);
@@ -2083,6 +2086,7 @@ static bool command_needs_post_event_access(const char *command) {
   if (strncmp(command, "fast-mode-", strlen("fast-mode-")) == 0) return true;
   if (strncmp(command, "reasoning-effort-", strlen("reasoning-effort-")) == 0) return true;
   if (strncmp(command, "codex-open-thread", strlen("codex-open-thread")) == 0
+      || strncmp(command, "codex-open-side-chat", strlen("codex-open-side-chat")) == 0
       || strncmp(command, "codex-find-thread", strlen("codex-find-thread")) == 0
       || strncmp(command, "codex-search-thread", strlen("codex-search-thread")) == 0) return true;
   return strcmp(command, "voice-down") == 0
@@ -4017,8 +4021,23 @@ typedef struct {
   bool exact_speed;
 } CodexFastTextSignals;
 
+enum { CODEX_INTELLIGENCE_TRIGGER_MAX = 8 };
+
+typedef struct {
+  AXUIElementRef element;
+  CGPoint position;
+  CGSize size;
+  bool expanded;
+  bool expanded_known;
+  const char *reasoning_effort;
+} CodexIntelligenceTriggerCandidate;
+
 typedef struct {
   CFArrayRef attributes;
+  CodexIntelligenceTriggerCandidate
+    intelligence_trigger_candidates[CODEX_INTELLIGENCE_TRIGGER_MAX];
+  unsigned intelligence_trigger_candidate_count;
+  bool intelligence_trigger_candidate_overflow;
   AXUIElementRef intelligence_trigger;
   unsigned intelligence_trigger_count;
   CGPoint intelligence_trigger_position;
@@ -4083,6 +4102,7 @@ enum {
   FAST_ATTR_SIZE,
   FAST_ATTR_CHILDREN,
   FAST_ATTR_MENU_MARK,
+  FAST_ATTR_FOCUSED,
   FAST_ATTR_COUNT
 };
 
@@ -4196,6 +4216,18 @@ static void merge_codex_fast_signals(
 static bool codex_fast_role_equals(CFTypeRef role, CFStringRef expected) {
   return role != NULL && CFGetTypeID(role) == CFStringGetTypeID()
     && CFEqual(role, expected);
+}
+
+static bool codex_role_can_be_intelligence_trigger(
+  bool is_button,
+  bool is_popup,
+  bool is_radio
+) {
+  // Chromium has exposed the same composer model/Effort trigger as all three
+  // roles across Codex builds. Role alone never makes an element actionable:
+  // the collector below still requires an exact model + effort vocabulary,
+  // a press action, visible composer geometry, and a unique input anchor.
+  return is_button || is_popup || is_radio;
 }
 
 static bool codex_fast_batched_boolean(
@@ -4368,17 +4400,111 @@ static void consider_codex_intelligence_trigger(
   const char *reasoning_effort
 ) {
   if (scan == NULL || element == NULL || reasoning_effort == NULL) return;
-  if (scan->intelligence_trigger == NULL) {
-    scan->intelligence_trigger = (AXUIElementRef)CFRetain(element);
-    scan->intelligence_trigger_count = 1;
-    scan->intelligence_trigger_position = position;
-    scan->intelligence_trigger_size = size;
-    scan->intelligence_trigger_expanded = expanded;
-    scan->intelligence_trigger_expanded_known = expanded_known;
-    scan->reasoning_effort = reasoning_effort;
-  } else if (!CFEqual(scan->intelligence_trigger, element)) {
-    scan->intelligence_trigger_count += 1;
+  for (unsigned index = 0;
+       index < scan->intelligence_trigger_candidate_count;
+       index += 1) {
+    if (CFEqual(
+          scan->intelligence_trigger_candidates[index].element,
+          element
+        )) return;
   }
+  if (scan->intelligence_trigger_candidate_count
+      >= CODEX_INTELLIGENCE_TRIGGER_MAX) {
+    scan->intelligence_trigger_candidate_overflow = true;
+    return;
+  }
+  unsigned index = scan->intelligence_trigger_candidate_count++;
+  scan->intelligence_trigger_candidates[index] =
+    (CodexIntelligenceTriggerCandidate) {
+      .element = (AXUIElementRef)CFRetain(element),
+      .position = position,
+      .size = size,
+      .expanded = expanded,
+      .expanded_known = expanded_known,
+      .reasoning_effort = reasoning_effort
+    };
+}
+
+static void select_codex_intelligence_trigger_candidate(
+  CodexFastModeScan *scan,
+  const CodexIntelligenceTriggerCandidate *selected,
+  unsigned count
+) {
+  if (scan == NULL) return;
+  scan->intelligence_trigger_count = count;
+  if (count != 1 || selected == NULL) return;
+  scan->intelligence_trigger = (AXUIElementRef)CFRetain(selected->element);
+  scan->intelligence_trigger_position = selected->position;
+  scan->intelligence_trigger_size = selected->size;
+  scan->intelligence_trigger_expanded = selected->expanded;
+  scan->intelligence_trigger_expanded_known = selected->expanded_known;
+  scan->reasoning_effort = selected->reasoning_effort;
+}
+
+static bool resolve_codex_intelligence_trigger(
+  CodexFastModeScan *scan,
+  AXUIElementRef preferred_trigger
+) {
+  if (scan == NULL || scan->intelligence_trigger_candidate_overflow) {
+    return false;
+  }
+  if (preferred_trigger != NULL) {
+    CGPoint preferred_position = CGPointZero;
+    CGSize preferred_size = CGSizeZero;
+    bool preferred_geometry = copy_element_position(
+        preferred_trigger,
+        &preferred_position
+      )
+      && copy_element_size(preferred_trigger, &preferred_size);
+    const CodexIntelligenceTriggerCandidate *matched = NULL;
+    unsigned matched_count = 0;
+    for (unsigned index = 0;
+         index < scan->intelligence_trigger_candidate_count;
+         index += 1) {
+      const CodexIntelligenceTriggerCandidate *candidate =
+        &scan->intelligence_trigger_candidates[index];
+      bool same_element = CFEqual(candidate->element, preferred_trigger);
+      bool same_geometry = preferred_geometry
+        && fabs(candidate->position.x - preferred_position.x) <= 3.0
+        && fabs(candidate->position.y - preferred_position.y) <= 3.0
+        && fabs(candidate->size.width - preferred_size.width) <= 3.0
+        && fabs(candidate->size.height - preferred_size.height) <= 3.0;
+      if (!same_element && !same_geometry) continue;
+      matched = candidate;
+      matched_count += 1;
+    }
+    if (matched_count > 0) {
+      select_codex_intelligence_trigger_candidate(
+        scan,
+        matched,
+        matched_count
+      );
+      return matched_count == 1;
+    }
+  }
+  if (!scan->composer_input_found) return false;
+  const CodexIntelligenceTriggerCandidate *selected = NULL;
+  unsigned anchored_count = 0;
+  for (unsigned index = 0;
+       index < scan->intelligence_trigger_candidate_count;
+       index += 1) {
+    const CodexIntelligenceTriggerCandidate *candidate =
+      &scan->intelligence_trigger_candidates[index];
+    if (!codex_fast_control_is_near_composer(
+          candidate->position,
+          candidate->size,
+          scan->composer_input_position,
+          scan->composer_input_size
+        )) continue;
+    anchored_count += 1;
+    if (selected == NULL) selected = candidate;
+  }
+  select_codex_intelligence_trigger_candidate(
+    scan,
+    selected,
+    anchored_count
+  );
+  return false;
 }
 
 static void consider_codex_reasoning_slider(
@@ -4564,7 +4690,10 @@ static void collect_codex_fast_mode_controls(
       && size.width >= 120 && size.height >= 18;
     if (in_composer_region) {
       bool is_text_area = codex_fast_role_equals(role, kAXTextAreaRole);
+      bool focused = false;
+      codex_fast_batched_boolean(values, FAST_ATTR_FOCUSED, &focused);
       double score = position.y + size.height
+        + (focused ? scan->window_size.height * 4.0 : 0)
         + (is_text_area ? scan->window_size.height : 0)
         + size.width / 10000.0;
       if (!scan->composer_input_found || score > scan->composer_input_score) {
@@ -4814,7 +4943,8 @@ static void collect_codex_fast_mode_controls(
     );
   }
 
-  if ((is_button || is_popup) && !hidden && enabled && in_control_region
+  if (codex_role_can_be_intelligence_trigger(is_button, is_popup, is_radio)
+      && !hidden && enabled && in_control_region
       && supports_press) {
     CodexIntelligenceTextState intelligence = { 0 };
     collect_codex_intelligence_text_state(element, 0, &intelligence);
@@ -4936,6 +5066,15 @@ static void collect_codex_fast_mode_controls(
 
 static void release_codex_fast_mode_scan(CodexFastModeScan *scan) {
   if (scan == NULL) return;
+  for (unsigned index = 0;
+       index < scan->intelligence_trigger_candidate_count;
+       index += 1) {
+    if (scan->intelligence_trigger_candidates[index].element != NULL) {
+      CFRelease(scan->intelligence_trigger_candidates[index].element);
+    }
+    scan->intelligence_trigger_candidates[index].element = NULL;
+  }
+  scan->intelligence_trigger_candidate_count = 0;
   if (scan->intelligence_trigger != NULL) CFRelease(scan->intelligence_trigger);
   if (scan->reasoning_slider != NULL) CFRelease(scan->reasoning_slider);
   if (scan->reasoning_control != NULL) CFRelease(scan->reasoning_control);
@@ -4956,8 +5095,9 @@ static void release_codex_fast_mode_scan(CodexFastModeScan *scan) {
   scan->off_option = NULL;
 }
 
-static bool copy_codex_fast_mode_scan(
+static bool copy_codex_fast_mode_scan_with_trigger_hint(
   bool include_popup_options,
+  AXUIElementRef preferred_trigger,
   CodexFastModeScan *scan
 ) {
   if (scan == NULL || !codex_is_frontmost()) return false;
@@ -4997,7 +5137,8 @@ static bool copy_codex_fast_mode_scan(
     kAXPositionAttribute,
     kAXSizeAttribute,
     kAXChildrenAttribute,
-    CFSTR("AXMenuItemMarkChar")
+    CFSTR("AXMenuItemMarkChar"),
+    kAXFocusedAttribute
   };
   CFArrayRef attributes = CFArrayCreate(
     kCFAllocatorDefault,
@@ -5012,6 +5153,8 @@ static bool copy_codex_fast_mode_scan(
   }
   *scan = (CodexFastModeScan) {
     .attributes = attributes,
+    .intelligence_trigger_candidate_count = 0,
+    .intelligence_trigger_candidate_overflow = false,
     .intelligence_trigger = NULL,
     .intelligence_trigger_count = 0,
     .intelligence_trigger_position = CGPointZero,
@@ -5057,15 +5200,22 @@ static bool copy_codex_fast_mode_scan(
     0,
     scan
   );
+  bool intelligence_preferred = resolve_codex_intelligence_trigger(
+    scan,
+    preferred_trigger
+  );
   if (scan->value_conflict) scan->value = CODEX_FAST_MODE_UNKNOWN;
-  bool intelligence_anchored = scan->composer_input_found
-    && scan->intelligence_trigger != NULL
+  bool intelligence_anchored = scan->intelligence_trigger != NULL
     && scan->intelligence_trigger_count == 1
-    && codex_fast_control_is_near_composer(
-      scan->intelligence_trigger_position,
-      scan->intelligence_trigger_size,
-      scan->composer_input_position,
-      scan->composer_input_size
+    && (
+      intelligence_preferred
+      || (scan->composer_input_found
+        && codex_fast_control_is_near_composer(
+          scan->intelligence_trigger_position,
+          scan->intelligence_trigger_size,
+          scan->composer_input_position,
+          scan->composer_input_size
+        ))
     );
   if (!intelligence_anchored) {
     if (scan->intelligence_trigger != NULL) CFRelease(scan->intelligence_trigger);
@@ -5187,6 +5337,17 @@ static bool copy_codex_fast_mode_scan(
   return true;
 }
 
+static bool copy_codex_fast_mode_scan(
+  bool include_popup_options,
+  CodexFastModeScan *scan
+) {
+  return copy_codex_fast_mode_scan_with_trigger_hint(
+    include_popup_options,
+    NULL,
+    scan
+  );
+}
+
 static const char *codex_fast_mode_value_name(CodexFastModeValue value) {
   return value == CODEX_FAST_MODE_ON ? "on"
     : value == CODEX_FAST_MODE_OFF ? "off"
@@ -5229,7 +5390,11 @@ static void close_codex_intelligence_popover_if_opened(AXUIElementRef trigger) {
   // the trigger only while an anchored speed control proves the popover is
   // still visible; this avoids reopening a menu that closed after selection.
   CodexFastModeScan scan = { 0 };
-  bool popup_visible = copy_codex_fast_mode_scan(true, &scan)
+  bool popup_visible = copy_codex_fast_mode_scan_with_trigger_hint(
+      true,
+      trigger,
+      &scan
+    )
     && scan.intelligence_trigger != NULL
     && scan.control != NULL
     && scan.control_count == 1;
@@ -5278,7 +5443,11 @@ static bool copy_codex_fast_mode_scan_with_intelligence_fallback(
   bool have_last = false;
   do {
     CodexFastModeScan candidate = { 0 };
-    if (copy_codex_fast_mode_scan(true, &candidate)) {
+    if (copy_codex_fast_mode_scan_with_trigger_hint(
+          true,
+          trigger,
+          &candidate
+        )) {
       if (have_last) release_codex_fast_mode_scan(&last);
       last = candidate;
       have_last = true;
@@ -5513,6 +5682,22 @@ static bool restore_codex_composer_after_fast_mode(void) {
   return false;
 }
 
+static bool restore_codex_composer_near_intelligence_trigger(
+  const CodexFastModeScan *scan
+) {
+  if (scan == NULL || scan->intelligence_trigger == NULL) return false;
+  double target_x = scan->intelligence_trigger_position.x
+    + scan->intelligence_trigger_size.width / 2.0;
+  // Applying a model setting can replace the contenteditable node one frame
+  // later. Reacquire the composer in the same horizontal pane as the exact
+  // trigger instead of letting the wider main composer steal Side Chat focus.
+  for (unsigned attempt = 0; attempt < 3; attempt += 1) {
+    if (focus_codex_composer_near_x(target_x)) return true;
+    usleep(45000);
+  }
+  return false;
+}
+
 typedef enum {
   CODEX_REASONING_DIRECTION_UP = 1,
   CODEX_REASONING_DIRECTION_DOWN = -1
@@ -5684,7 +5869,11 @@ static bool copy_codex_reasoning_control_scan(
   bool have_last = false;
   do {
     CodexFastModeScan candidate = { 0 };
-    if (copy_codex_fast_mode_scan(true, &candidate)) {
+    if (copy_codex_fast_mode_scan_with_trigger_hint(
+          true,
+          trigger,
+          &candidate
+        )) {
       if (have_last) release_codex_fast_mode_scan(&last);
       last = candidate;
       have_last = true;
@@ -5711,17 +5900,42 @@ static bool copy_codex_reasoning_control_scan(
   return true;
 }
 
+static bool copy_codex_reasoning_control_scan_with_retry(
+  CodexFastModeScan *scan,
+  AXUIElementRef *trigger_out
+) {
+  if (scan == NULL || trigger_out == NULL) return false;
+  for (unsigned attempt = 0; attempt < 2; attempt += 1) {
+    if (copy_codex_reasoning_control_scan(scan, trigger_out)) return true;
+    if (!codex_is_frontmost()) return false;
+    // Focusing a composer or dismissing an older model popover can replace
+    // Chromium's trigger subtree one frame later. The first scan fails
+    // closed; one delayed fresh scan avoids surfacing that transient as a
+    // hardware error without ever reusing a detached AX element.
+    if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+      printf("reasoning_stage=retry attempt=%u\n", attempt + 1);
+    }
+    usleep(140000);
+  }
+  return false;
+}
+
 static const char *wait_for_codex_reasoning_effort_change(
   const char *previous,
   const char *expected,
   CFTimeInterval timeout_seconds,
-  CodexFastModeValue *fast_value_out
+  CodexFastModeValue *fast_value_out,
+  AXUIElementRef trigger
 ) {
   CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + timeout_seconds;
   const char *last = NULL;
   do {
     CodexFastModeScan scan = { 0 };
-    if (copy_codex_fast_mode_scan(false, &scan)) {
+    if (copy_codex_fast_mode_scan_with_trigger_hint(
+          false,
+          trigger,
+          &scan
+        )) {
       last = scan.reasoning_effort;
       if (fast_value_out != NULL
           && scan.value != CODEX_FAST_MODE_UNKNOWN) {
@@ -5762,6 +5976,78 @@ static unsigned codex_reasoning_option_count(const CodexFastModeScan *scan) {
   return codex_reasoning_option_ranks(scan, NULL, 0);
 }
 
+static int codex_reasoning_focused_option_rank(
+  const CodexFastModeScan *scan
+) {
+  if (scan == NULL) return -1;
+  for (int rank = 0; rank < CODEX_REASONING_EFFORT_COUNT; rank += 1) {
+    AXUIElementRef option = scan->reasoning_options[rank];
+    if (option == NULL || scan->reasoning_option_counts[rank] != 1) continue;
+    CFTypeRef focused_value = NULL;
+    bool focused = AXUIElementCopyAttributeValue(
+        option,
+        kAXFocusedAttribute,
+        &focused_value
+      ) == kAXErrorSuccess
+      && focused_value != NULL
+      && CFGetTypeID(focused_value) == CFBooleanGetTypeID()
+      && CFBooleanGetValue((CFBooleanRef)focused_value);
+    if (focused_value != NULL) CFRelease(focused_value);
+    if (focused) return rank;
+  }
+  return -1;
+}
+
+static bool activate_codex_reasoning_option(
+  const CodexFastModeScan *scan,
+  int target_rank
+) {
+  if (scan == NULL || target_rank < 0
+      || target_rank >= CODEX_REASONING_EFFORT_COUNT
+      || scan->reasoning_options[target_rank] == NULL
+      || scan->reasoning_option_counts[target_rank] != 1
+      || !codex_is_frontmost()) return false;
+
+  int ranks[CODEX_REASONING_EFFORT_COUNT] = { 0 };
+  unsigned count = codex_reasoning_option_ranks(
+    scan,
+    ranks,
+    CODEX_REASONING_EFFORT_COUNT
+  );
+  int focused_rank = codex_reasoning_focused_option_rank(scan);
+  int focused_position = -1;
+  int target_position = -1;
+  for (unsigned index = 0; index < count; index += 1) {
+    if (ranks[index] == focused_rank) focused_position = (int)index;
+    if (ranks[index] == target_rank) target_position = (int)index;
+  }
+
+  if (focused_position >= 0 && target_position >= 0) {
+    int delta = target_position - focused_position;
+    int key = delta < 0 ? KEY_UP : KEY_DOWN;
+    for (int step = 0; step < abs(delta); step += 1) {
+      tap_key(key, 0);
+      usleep(18000);
+    }
+  } else {
+    // Older Chromium builds allowed AXFocused to move directly to a menu
+    // item. Keep that route only when the resulting focused item can be read
+    // back exactly; never send Return after an unverified focus request.
+    focus_accessibility_element(scan->reasoning_options[target_rank]);
+  }
+
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.35;
+  do {
+    if (codex_reasoning_focused_option_rank(scan) == target_rank) {
+      tap_key(KEY_RETURN, 0);
+      usleep(18000);
+      return true;
+    }
+    usleep(15000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  return false;
+}
+
 static void codex_reasoning_option_csv(
   const CodexFastModeScan *scan,
   char *buffer,
@@ -5794,14 +6080,21 @@ static void codex_reasoning_option_csv(
   if (buffer[0] == '\0') snprintf(buffer, capacity, "unknown");
 }
 
-static bool copy_codex_reasoning_options_scan(CodexFastModeScan *scan) {
+static bool copy_codex_reasoning_options_scan(
+  CodexFastModeScan *scan,
+  AXUIElementRef trigger
+) {
   if (scan == NULL) return false;
   CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.8;
   CodexFastModeScan last = { 0 };
   bool have_last = false;
   do {
     CodexFastModeScan candidate = { 0 };
-    if (copy_codex_fast_mode_scan(true, &candidate)) {
+    if (copy_codex_fast_mode_scan_with_trigger_hint(
+          true,
+          trigger,
+          &candidate
+        )) {
       if (have_last) release_codex_fast_mode_scan(&last);
       last = candidate;
       have_last = true;
@@ -6148,7 +6441,7 @@ static int step_codex_reasoning_effort(
 ) {
   CodexFastModeScan scan = { 0 };
   AXUIElementRef trigger = NULL;
-  if (!copy_codex_reasoning_control_scan(&scan, &trigger)) {
+  if (!copy_codex_reasoning_control_scan_with_retry(&scan, &trigger)) {
     bool composer_focused = restore_codex_composer_after_fast_mode();
     printf(
       "reasoning=unknown options=unknown steps=%u available=0 changed=0 verified=0 direction=%s composer_focused=%d\n",
@@ -6189,7 +6482,8 @@ static int step_codex_reasoning_effort(
     bool opened_options = open_codex_reasoning_options(&scan);
     usleep(65000);
     CodexFastModeScan options = { 0 };
-    if (opened_options && copy_codex_reasoning_options_scan(&options)) {
+    if (opened_options
+        && copy_codex_reasoning_options_scan(&options, trigger)) {
       codex_reasoning_option_csv(&options, option_csv, sizeof(option_csv));
       int target = codex_reasoning_target_option(
         &options,
@@ -6202,9 +6496,10 @@ static int step_codex_reasoning_effort(
       option_boundaries_known = target >= 0;
       if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
         printf(
-          "reasoning_stage=options count=%u target=%d steps=%u direction=%s\n",
+          "reasoning_stage=options count=%u target=%d focused=%d steps=%u direction=%s\n",
           codex_reasoning_option_count(&options),
           target,
+          codex_reasoning_focused_option_rank(&options),
           step_count,
           codex_reasoning_direction_name(direction)
         );
@@ -6214,9 +6509,7 @@ static int step_codex_reasoning_effort(
         bool already_target = previous != NULL && expected_reasoning != NULL
           && strcmp(previous, expected_reasoning) == 0;
         selection_performed = !already_target
-          && activate_accessibility_element_with_return(
-            options.reasoning_options[target]
-          );
+          && activate_codex_reasoning_option(&options, target);
         acted = already_target || selection_performed;
         if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
           printf("reasoning_stage=select acted=%d\n", acted ? 1 : 0);
@@ -6247,7 +6540,8 @@ static int step_codex_reasoning_effort(
       previous,
       expected_reasoning,
       2.4,
-      &fast_value
+      &fast_value,
+      trigger
     )
     : previous;
   bool label_changed = reasoning != NULL
@@ -6263,7 +6557,9 @@ static int step_codex_reasoning_effort(
     at_minimum = codex_reasoning_effort_is_minimum(reasoning);
     at_maximum = codex_reasoning_effort_is_maximum(reasoning);
   }
-  bool composer_focused = restore_codex_composer_after_fast_mode();
+  bool composer_focused = restore_codex_composer_near_intelligence_trigger(
+    &scan
+  );
   const char *service_tier = fast_value == CODEX_FAST_MODE_ON
     ? "priority"
     : fast_value == CODEX_FAST_MODE_OFF
@@ -6293,7 +6589,7 @@ static int set_codex_reasoning_effort(const char *requested) {
 
   CodexFastModeScan scan = { 0 };
   AXUIElementRef trigger = NULL;
-  if (!copy_codex_reasoning_control_scan(&scan, &trigger)) {
+  if (!copy_codex_reasoning_control_scan_with_retry(&scan, &trigger)) {
     bool composer_focused = restore_codex_composer_after_fast_mode();
     printf(
       "requested=%s reasoning=unknown options=unknown available=0 changed=0 verified=0 direction=up at_min=0 at_max=0 composer_focused=%d\n",
@@ -6325,7 +6621,8 @@ static int set_codex_reasoning_effort(const char *requested) {
     bool opened_options = open_codex_reasoning_options(&scan);
     usleep(65000);
     CodexFastModeScan options = { 0 };
-    if (opened_options && copy_codex_reasoning_options_scan(&options)) {
+    if (opened_options
+        && copy_codex_reasoning_options_scan(&options, trigger)) {
       codex_reasoning_option_csv(&options, option_csv, sizeof(option_csv));
       int ranks[CODEX_REASONING_EFFORT_COUNT] = { 0 };
       unsigned option_count = codex_reasoning_option_ranks(
@@ -6341,9 +6638,7 @@ static int set_codex_reasoning_effort(const char *requested) {
           && options.reasoning_options[requested_rank] != NULL
           && options.reasoning_option_counts[requested_rank] == 1) {
         selection_performed = !already_selected
-          && activate_accessibility_element_with_return(
-            options.reasoning_options[requested_rank]
-          );
+          && activate_codex_reasoning_option(&options, requested_rank);
         acted = already_selected || selection_performed;
         if (selection_performed) usleep(70000);
       }
@@ -6374,7 +6669,8 @@ static int set_codex_reasoning_effort(const char *requested) {
       previous,
       requested,
       2.4,
-      &fast_value
+      &fast_value,
+      trigger
     )
     : previous;
   bool label_changed = reasoning != NULL
@@ -6387,7 +6683,9 @@ static int set_codex_reasoning_effort(const char *requested) {
     at_minimum = codex_reasoning_effort_is_minimum(reasoning);
     at_maximum = codex_reasoning_effort_is_maximum(reasoning);
   }
-  bool composer_focused = restore_codex_composer_after_fast_mode();
+  bool composer_focused = restore_codex_composer_near_intelligence_trigger(
+    &scan
+  );
   const char *service_tier = fast_value == CODEX_FAST_MODE_ON
     ? "priority"
     : fast_value == CODEX_FAST_MODE_OFF
@@ -6477,6 +6775,11 @@ static int codex_reasoning_effort_selftest(void) {
     && !accessibility_string_is_advanced_reasoning_label(
       CFSTR("Advanced reasoning discussion")
     );
+  bool radio_trigger_role_supported =
+    codex_role_can_be_intelligence_trigger(false, false, true)
+    && codex_role_can_be_intelligence_trigger(true, false, false)
+    && codex_role_can_be_intelligence_trigger(false, true, false)
+    && !codex_role_can_be_intelligence_trigger(false, false, false);
   int without_max[] = {
     codex_reasoning_effort_rank("low"),
     codex_reasoning_effort_rank("medium"),
@@ -6551,7 +6854,7 @@ static int codex_reasoning_effort_selftest(void) {
       == codex_reasoning_effort_rank("high")
     && limited_direction == CODEX_REASONING_DIRECTION_DOWN;
   printf(
-    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_set_targets_are_bounded=%d exact_ultra_warning_vocabulary=%d compact_slider_requires_advanced=%d advanced_label_vocabulary=%d hidden_max_is_skipped=%d visible_max_is_selected=%d coalesced_steps_use_scanned_list=%d model_specific_endpoints_reverse=%d\n",
+    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_set_targets_are_bounded=%d exact_ultra_warning_vocabulary=%d compact_slider_requires_advanced=%d advanced_label_vocabulary=%d radio_trigger_role_supported=%d hidden_max_is_skipped=%d visible_max_is_selected=%d coalesced_steps_use_scanned_list=%d model_specific_endpoints_reverse=%d\n",
     upper_reverses ? 1 : 0,
     lower_reverses ? 1 : 0,
     middle_preserves ? 1 : 0,
@@ -6560,6 +6863,7 @@ static int codex_reasoning_effort_selftest(void) {
     exact_ultra_warning_vocabulary ? 1 : 0,
     compact_slider_requires_advanced ? 1 : 0,
     advanced_label_vocabulary ? 1 : 0,
+    radio_trigger_role_supported ? 1 : 0,
     hidden_max_is_skipped ? 1 : 0,
     visible_max_is_selected ? 1 : 0,
     coalesced_steps_use_scanned_list ? 1 : 0,
@@ -6568,7 +6872,8 @@ static int codex_reasoning_effort_selftest(void) {
   return upper_reverses && lower_reverses && middle_preserves
     && max_can_advance_to_ultra && exact_set_targets_are_bounded
     && exact_ultra_warning_vocabulary && compact_slider_requires_advanced
-    && advanced_label_vocabulary && hidden_max_is_skipped
+    && advanced_label_vocabulary && radio_trigger_role_supported
+    && hidden_max_is_skipped
     && visible_max_is_selected && coalesced_steps_use_scanned_list
     && model_specific_endpoints_reverse ? 0 : 1;
 }
@@ -7049,35 +7354,13 @@ static bool copy_codex_composer_controls(CodexComposerControls *controls) {
   return copy_codex_composer_controls_with_timeout(controls, 0.5);
 }
 
-static bool frontmost_focused_element_is_text_input(void) {
-  CFTypeRef focused_value = NULL;
-  if (copy_frontmost_focused_element(&focused_value) != kAXErrorSuccess
-      || focused_value == NULL) return false;
-  AXUIElementRef focused = (AXUIElementRef)focused_value;
-  CFTypeRef role_value = NULL;
-  AXUIElementCopyAttributeValue(focused, kAXRoleAttribute, &role_value);
-  Boolean settable = false;
-  AXUIElementIsAttributeSettable(focused, kAXValueAttribute, &settable);
-  CFTypeRef text_value = NULL;
-  AXError value_error = AXUIElementCopyAttributeValue(focused, kAXValueAttribute, &text_value);
-  bool is_text_input = role_is_text_input(role_value)
-    && settable
-    && value_error == kAXErrorSuccess
-    && text_value != NULL
-    && (CFGetTypeID(text_value) == CFStringGetTypeID()
-      || CFGetTypeID(text_value) == CFAttributedStringGetTypeID());
-  if (text_value != NULL) CFRelease(text_value);
-  if (role_value != NULL) CFRelease(role_value);
-  CFRelease(focused_value);
-  return is_text_input;
-}
-
 typedef struct {
   AXUIElementRef element;
   unsigned visited;
   CGPoint window_origin;
   CGSize window_size;
   double minimum_x;
+  double maximum_x;
   double best_score;
 } CodexComposerInputState;
 
@@ -7103,7 +7386,7 @@ static void collect_codex_composer_inputs(
   const double geometry_tolerance = 2.0;
   bool in_composer_region = has_geometry
     && position.x >= state->minimum_x - geometry_tolerance
-    && position.x + size.width <= state->window_origin.x + state->window_size.width + geometry_tolerance
+    && position.x + size.width <= state->maximum_x + geometry_tolerance
     && position.y >= state->window_origin.y + state->window_size.height * 0.55
     && position.y + size.height <= state->window_origin.y + state->window_size.height + geometry_tolerance
     && size.width >= 120
@@ -7139,7 +7422,8 @@ static void collect_codex_composer_inputs(
 
 static AXUIElementRef copy_codex_composer_input_in_region(
   CodexComposerControls *controls,
-  double minimum_x
+  double minimum_x,
+  double maximum_x
 ) {
   CodexComposerInputState state = {
     .element = NULL,
@@ -7147,6 +7431,7 @@ static AXUIElementRef copy_codex_composer_input_in_region(
     .window_origin = controls->window_origin,
     .window_size = controls->window_size,
     .minimum_x = minimum_x,
+    .maximum_x = maximum_x,
     .best_score = -1
   };
   collect_codex_composer_inputs(controls->window, 0, &state);
@@ -7155,25 +7440,65 @@ static AXUIElementRef copy_codex_composer_input_in_region(
 
 static bool focus_codex_composer_with_controls_in_region(
   CodexComposerControls *controls,
-  double minimum_x
+  double minimum_x,
+  double maximum_x
 ) {
   if (!codex_is_frontmost()) return false;
-  AXUIElementRef input = copy_codex_composer_input_in_region(controls, minimum_x);
+  AXUIElementRef input = copy_codex_composer_input_in_region(
+    controls,
+    minimum_x,
+    maximum_x
+  );
   bool focused = focus_accessibility_element(input);
+  if (focused) {
+    CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.16;
+    do {
+      CFTypeRef focused_value = NULL;
+      bool exact = copy_frontmost_focused_element(&focused_value)
+          == kAXErrorSuccess
+        && focused_value != NULL
+        && CFGetTypeID(focused_value) == AXUIElementGetTypeID()
+        && CFEqual(focused_value, input);
+      if (focused_value != NULL) CFRelease(focused_value);
+      if (exact) {
+        focused = true;
+        break;
+      }
+      focused = false;
+      usleep(12000);
+    } while (CFAbsoluteTimeGetCurrent() < deadline);
+  }
+  if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+    CGPoint position = CGPointZero;
+    CGSize size = CGSizeZero;
+    bool geometry = input != NULL
+      && copy_element_position(input, &position)
+      && copy_element_size(input, &size);
+    printf(
+      "composer_focus exact=%d x=%.0f y=%.0f w=%.0f h=%.0f\n",
+      focused ? 1 : 0,
+      geometry ? position.x : 0,
+      geometry ? position.y : 0,
+      geometry ? size.width : 0,
+      geometry ? size.height : 0
+    );
+  }
   if (input != NULL) CFRelease(input);
-  if (!focused) return false;
-  usleep(12000);
-  return frontmost_focused_element_is_text_input();
+  return focused;
 }
 
 static bool focus_codex_composer_with_controls(CodexComposerControls *controls) {
   return focus_codex_composer_with_controls_in_region(
     controls,
-    controls->window_origin.x
+    controls->window_origin.x,
+    controls->window_origin.x + controls->window_size.width
   );
 }
 
-static bool focus_codex_composer_if_visible(void) {
+static bool focus_codex_composer_in_visible_window(
+  bool target_x_known,
+  double target_x
+) {
   if (!codex_is_frontmost()) return false;
   CodexComposerControls controls = { 0 };
   controls.application = copy_codex_application();
@@ -7197,9 +7522,30 @@ static bool focus_codex_composer_if_visible(void) {
     release_codex_composer_controls(&controls);
     return false;
   }
-  bool focused = focus_codex_composer_with_controls(&controls);
+  bool focused = false;
+  if (target_x_known) {
+    double split_x = controls.window_origin.x + controls.window_size.width * 0.58;
+    bool target_right = target_x >= split_x;
+    focused = focus_codex_composer_with_controls_in_region(
+      &controls,
+      target_right ? split_x : controls.window_origin.x,
+      target_right
+        ? controls.window_origin.x + controls.window_size.width
+        : split_x
+    );
+  } else {
+    focused = focus_codex_composer_with_controls(&controls);
+  }
   release_codex_composer_controls(&controls);
   return focused;
+}
+
+static bool focus_codex_composer_if_visible(void) {
+  return focus_codex_composer_in_visible_window(false, 0);
+}
+
+static bool focus_codex_composer_near_x(double target_x) {
+  return focus_codex_composer_in_visible_window(true, target_x);
 }
 
 static bool focus_codex_side_chat_composer_if_visible(void) {
@@ -7210,7 +7556,8 @@ static bool focus_codex_side_chat_composer_if_visible(void) {
   if (codex_composer_controls_target_side_chat(&controls)) {
     focused = focus_codex_composer_with_controls_in_region(
       &controls,
-      controls.window_origin.x + controls.window_size.width * 0.58
+      controls.window_origin.x + controls.window_size.width * 0.58,
+      controls.window_origin.x + controls.window_size.width
     );
   }
   release_codex_composer_controls(&controls);
@@ -7847,6 +8194,193 @@ static int find_or_open_codex_thread(
     press,
     true
   );
+  free(fingerprints);
+  return result;
+}
+
+static bool side_chat_tab_geometry_is_plausible(
+  CGPoint position,
+  CGSize size,
+  CGPoint window_origin,
+  CGSize window_size
+) {
+  if (window_size.width < 520 || window_size.height < 280
+      || size.width < 24 || size.width > window_size.width * 0.46
+      || size.height < 8 || size.height > 72) return false;
+  double relative_x = position.x - window_origin.x;
+  double relative_y = position.y - window_origin.y;
+  return relative_x >= fmax(240, window_size.width * 0.46)
+    && relative_x + size.width <= window_size.width + 3
+    && relative_y >= -3
+    && relative_y <= 82;
+}
+
+static int side_chat_tab_geometry_selftest(void) {
+  CGPoint origin = CGPointMake(100, 80);
+  CGSize window = CGSizeMake(1200, 800);
+  bool accepts_tab = side_chat_tab_geometry_is_plausible(
+    CGPointMake(790, 102),
+    CGSizeMake(150, 28),
+    origin,
+    window
+  );
+  bool rejects_main_title = !side_chat_tab_geometry_is_plausible(
+    CGPointMake(790, 260),
+    CGSizeMake(210, 24),
+    origin,
+    window
+  );
+  bool rejects_left_header = !side_chat_tab_geometry_is_plausible(
+    CGPointMake(260, 102),
+    CGSizeMake(150, 28),
+    origin,
+    window
+  );
+  printf(
+    "tab=%d main_title_rejected=%d left_header_rejected=%d\n",
+    accepts_tab ? 1 : 0,
+    rejects_main_title ? 1 : 0,
+    rejects_left_header ? 1 : 0
+  );
+  return accepts_tab && rejects_main_title && rejects_left_header ? 0 : 1;
+}
+
+// Side Chat titles can appear both in the transcript and in the right-hand
+// tab strip. Normal thread activation quite correctly treats that as an
+// ambiguity. This selector keeps the same UUID/title fingerprint matching but
+// accepts only one press-capable match in the focused window's upper-right tab
+// region, preserving the parent + Side Chat split layout.
+static int open_codex_side_chat_tab(
+  const char *uuid,
+  const char * const *fingerprint_inputs,
+  unsigned fingerprint_input_count
+) {
+  StringFingerprint *fingerprints = NULL;
+  unsigned fingerprint_count = 0;
+  if (!valid_thread_uuid(uuid)
+      || !parse_fingerprint_inputs(
+        fingerprint_inputs,
+        fingerprint_input_count,
+        &fingerprints,
+        &fingerprint_count
+      )) return 64;
+  if (!codex_is_frontmost()) {
+    free(fingerprints);
+    return 1;
+  }
+
+  AXUIElementRef application = copy_codex_application();
+  if (application == NULL) {
+    free(fingerprints);
+    return 1;
+  }
+  AXUIElementSetMessagingTimeout(application, 0.55);
+  CFTypeRef window_value = NULL;
+  AXError window_error = AXUIElementCopyAttributeValue(
+    application,
+    kAXFocusedWindowAttribute,
+    &window_value
+  );
+  if (window_error != kAXErrorSuccess || window_value == NULL
+      || CFGetTypeID(window_value) != AXUIElementGetTypeID()) {
+    if (window_value != NULL) CFRelease(window_value);
+    CFRelease(application);
+    free(fingerprints);
+    return 1;
+  }
+  AXUIElementRef window = (AXUIElementRef)window_value;
+  CGPoint window_origin = CGPointZero;
+  CGSize window_size = CGSizeZero;
+  if (!copy_element_position(window, &window_origin)
+      || !copy_element_size(window, &window_size)) {
+    CFRelease(window_value);
+    CFRelease(application);
+    free(fingerprints);
+    return 1;
+  }
+
+  const void *attribute_values[THREAD_ATTR_COUNT] = {
+    kAXTitleAttribute,
+    kAXValueAttribute,
+    kAXDescriptionAttribute,
+    kAXHelpAttribute,
+    kAXIdentifierAttribute,
+    kAXURLAttribute,
+    CFSTR("AXDOMIdentifier"),
+    kAXHiddenAttribute,
+    kAXChildrenAttribute
+  };
+  CFArrayRef attributes = CFArrayCreate(
+    kCFAllocatorDefault,
+    attribute_values,
+    THREAD_ATTR_COUNT,
+    &kCFTypeArrayCallBacks
+  );
+  CFStringRef uuid_string = CFStringCreateWithCString(
+    kCFAllocatorDefault,
+    uuid,
+    kCFStringEncodingUTF8
+  );
+  if (attributes == NULL || uuid_string == NULL) {
+    if (attributes != NULL) CFRelease(attributes);
+    if (uuid_string != NULL) CFRelease(uuid_string);
+    CFRelease(window_value);
+    CFRelease(application);
+    free(fingerprints);
+    return 1;
+  }
+
+  CodexThreadTargetState state = {
+    .fingerprints = fingerprints,
+    .fingerprint_count = fingerprint_count,
+    .uuid = uuid_string,
+    .uuid_only = false,
+    .attributes = attributes,
+    .target_count = 0,
+    .uuid_matched_elements = 0,
+    .title_matched_elements = 0,
+    .visited = 0,
+    .visit_limit = 4200
+  };
+  collect_codex_thread_targets(window, 0, &state);
+  unsigned best_strength = best_codex_thread_target_strength(&state);
+  AXUIElementRef target = NULL;
+  unsigned tab_count = 0;
+  for (unsigned index = 0; index < state.target_count; index += 1) {
+    if (state.target_strengths[index] != best_strength) continue;
+    CGPoint position = CGPointZero;
+    CGSize size = CGSizeZero;
+    if (!copy_element_position(state.targets[index], &position)
+        || !copy_element_size(state.targets[index], &size)
+        || !side_chat_tab_geometry_is_plausible(
+          position,
+          size,
+          window_origin,
+          window_size
+        )) continue;
+    target = state.targets[index];
+    tab_count += 1;
+  }
+  bool activated = tab_count == 1
+    && target != NULL
+    && codex_is_frontmost()
+    && activate_accessibility_element_with_return(target);
+  printf(
+    "strategy=%s fingerprints=%u matches=%u tabs=%u result=%d\n",
+    best_strength == CODEX_THREAD_MATCH_UUID ? "uuid"
+      : best_strength == CODEX_THREAD_MATCH_TITLE ? "title"
+        : "none",
+    fingerprint_count,
+    state.target_count,
+    tab_count,
+    activated ? 0 : tab_count > 1 ? 3 : 1
+  );
+  int result = activated ? 0 : tab_count > 1 ? 3 : 1;
+  release_codex_thread_targets(&state);
+  CFRelease(uuid_string);
+  CFRelease(attributes);
+  CFRelease(window_value);
+  CFRelease(application);
   free(fingerprints);
   return result;
 }
@@ -8732,6 +9266,14 @@ int main(int argc, char **argv) {
     if (argc != 3) return 64;
     return find_or_open_codex_thread(argv[2], NULL, 0, true, true);
   }
+  if (strcmp(argv[1], "codex-open-side-chat") == 0) {
+    if (argc < 4) return 64;
+    return open_codex_side_chat_tab(
+      argv[2],
+      (const char * const *)&argv[3],
+      (unsigned)(argc - 3)
+    );
+  }
   if (strcmp(argv[1], "codex-search-thread") == 0) {
     if (argc < 4) return 64;
     return search_and_open_codex_thread(
@@ -8788,6 +9330,9 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "side-chat-composer-selftest") == 0) {
     return codex_side_chat_composer_selftest();
+  }
+  if (strcmp(argv[1], "side-chat-tab-selftest") == 0) {
+    return side_chat_tab_geometry_selftest();
   }
   if (strcmp(argv[1], "media-bundle-selftest") == 0) return media_bundle_selftest();
   if (strcmp(argv[1], "preflight") == 0) {
