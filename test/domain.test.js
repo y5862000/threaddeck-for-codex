@@ -68,9 +68,10 @@ const {
 
 test("configuration exposes a complete and internally consistent action contract", () => {
   const actionValues = Object.values(ACTIONS);
-  assert.equal(actionValues.length, 26);
-  assert.equal(new Set(actionValues).size, 26);
+  assert.equal(actionValues.length, 27);
+  assert.equal(new Set(actionValues).size, 27);
   assert.equal(ACTIONS.fastMode, "com.yechan.threaddeck.fastmode");
+  assert.equal(ACTIONS.reasoning, "com.yechan.threaddeck.reasoning");
   assert.equal(ACTIONS.topThread1, "com.yechan.threaddeck.thread.top1");
 
   assert.equal(THREAD_ACTIONS.length, 9);

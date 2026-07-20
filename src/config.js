@@ -17,6 +17,7 @@ const ACTIONS = {
   send: "com.yechan.threaddeck.send",
   appSwitch: "com.yechan.threaddeck.appswitch",
   fastMode: "com.yechan.threaddeck.fastmode",
+  reasoning: "com.yechan.threaddeck.reasoning",
   mediaPrevious: "com.yechan.threaddeck.media.previous",
   mediaRewind: "com.yechan.threaddeck.media.rewind",
   mediaPlayPause: "com.yechan.threaddeck.media.playpause",
@@ -57,6 +58,7 @@ const UNREAD_COMPLETION_GROUP_COUNT = 2;
 const COMPLETION_STARTUP_GRACE_MS = 15_000;
 const COMPLETION_OBSERVATION_OVERLAP_MS = 1_500;
 const SEND_LONG_PRESS_MS = 600;
+const FAST_MODE_LONG_PRESS_MS = 600;
 const THREAD_VOICE_LONG_PRESS_MS = 550;
 const THREAD_VOICE_FOCUS_PREP_LEAD_MS = 200;
 const THREAD_VOICE_FOCUS_SETTLE_MS = 60;
@@ -118,6 +120,7 @@ module.exports = {
   GLOBAL_COMPLETION_FRAME_INTERVAL_MS,
   GLOBAL_COMPLETION_GROUP_COUNT,
   GLOBAL_COMPLETION_PULSE_DURATION_MS,
+  FAST_MODE_LONG_PRESS_MS,
   MEDIA_COMMAND_BY_ACTION,
   PAGE_DIRECTION_BY_ACTION,
   QUEUE_ZERO_CONFIRM_MS,

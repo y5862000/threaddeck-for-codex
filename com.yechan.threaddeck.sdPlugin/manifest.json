@@ -173,7 +173,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Codex를 활성화하고 Option+Command+S로 사이드챗을 엽니다.",
+      "Tooltip": "현재 Codex 작업에서 Option+Command+S로 사이드챗을 열고, 새 사이드챗의 생성과 포커스를 확인합니다. 전환 직후 누른 마이크·보내기·Fast mode·추론 강도 버튼은 이전 작업으로 새지 않고 새 사이드챗이 준비될 때까지 기다립니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.sidechat"
     },
@@ -205,7 +205,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "누르는 즉시 Codex 음성 입력을 시작하고 지원되는 미디어 앱을 잠시 멈춥니다. 놓으면 받아쓴 내용을 작성창에 남기고 미디어를 재개하며, 자동으로 전송하지는 않습니다.",
+      "Tooltip": "누르는 즉시 현재 작업의 작성창에서 음성 입력을 시작하고 지원되는 미디어를 잠시 멈춥니다. 작업이나 사이드챗 전환 중이면 새 작성창이 확인될 때까지 기다립니다. 놓으면 초안을 남기고 미디어를 재개하며 자동 전송하지 않습니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.voice"
     },
@@ -221,7 +221,7 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "짧게 눌렀다 놓으면 Return을 보냅니다. 0.6초 이상 눌러 버튼이 파란색으로 바뀐 뒤 놓으면 Command+Return을 보냅니다.",
+      "Tooltip": "현재 작업의 작성창을 확인한 뒤, 짧게 놓으면 Return을 보냅니다. 0.6초 이상 눌러 파란색이 된 뒤 놓으면 Command+Return입니다. 작업이나 사이드챗 전환 중에는 새 작성창이 준비될 때까지 기다립니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.send"
     },
@@ -253,9 +253,25 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "현재 Codex 작업의 작성창에서 Fast mode를 켜거나 끄고, 확인된 상태를 버튼에 표시합니다.",
+      "Tooltip": "한 번 눌렀다 놓으면 현재 Codex 작업의 Fast mode를 켜거나 끕니다. 작업이나 사이드챗 전환 중에는 새 작성창을 기다리고, 실제 확인된 상태만 번개에 반영합니다.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.fastmode"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Codex 추론 강도 + Fast mode",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "짧게 놓으면 트랙을 즉시 다음 추론 단계로 움직이고 실제 Effort 메뉴 적용을 이어서 검증합니다. 0.6초 이상 눌러 파란 테두리가 된 뒤 놓으면 Fast mode를 전환합니다. 작은 번개는 현재 고속·일반 상태를 표시합니다.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.reasoning"
     },
     {
       "Controllers": [

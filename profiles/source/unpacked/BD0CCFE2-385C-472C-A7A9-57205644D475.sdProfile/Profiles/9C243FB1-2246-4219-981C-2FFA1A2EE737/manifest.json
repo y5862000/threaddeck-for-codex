@@ -107,9 +107,9 @@
           "UUID": "com.yechan.threaddeck.fastmode"
         },
         "2,0": {
-          "ActionID": "237624c7-e238-4191-a94b-c6fb33006e5b",
+          "ActionID": "8ca31b17-9b6f-4bbb-98b6-b27ee95dd986",
           "LinkedTitle": false,
-          "Name": "Codex New Thread",
+          "Name": "Codex Reasoning Effort",
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
@@ -130,7 +130,7 @@
               "TitleColor": "#ffffff"
             }
           ],
-          "UUID": "com.yechan.threaddeck.newthread"
+          "UUID": "com.yechan.threaddeck.reasoning"
         },
         "2,1": {
           "ActionID": "00fd9b90-04fd-493e-961a-d17180deecb0",

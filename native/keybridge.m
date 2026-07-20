@@ -8,6 +8,7 @@
 #include <ctype.h>
 #include <dlfcn.h>
 #include <float.h>
+#include <math.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdio.h>
@@ -24,6 +25,8 @@ enum {
   KEY_RETURN = 0x24,
   KEY_TAB = 0x30,
   KEY_ESCAPE = 0x35,
+  KEY_LEFT = 0x7B,
+  KEY_RIGHT = 0x7C,
   KEY_COMMAND = 0x37,
   KEY_SHIFT = 0x38,
   KEY_OPTION = 0x3A,
@@ -2059,6 +2062,7 @@ static int print_permission_health(bool request) {
 static bool command_needs_accessibility(const char *command) {
   if (strstr(command, "selftest") != NULL) return false;
   if (strncmp(command, "fast-mode-", strlen("fast-mode-")) == 0) return true;
+  if (strncmp(command, "reasoning-effort-", strlen("reasoning-effort-")) == 0) return true;
   if (strncmp(command, "codex-", strlen("codex-")) == 0
       && strcmp(command, "codex-wait-frontmost") != 0) return true;
   return strcmp(command, "focused-text-state") == 0
@@ -2077,6 +2081,7 @@ static bool command_needs_accessibility(const char *command) {
 static bool command_needs_post_event_access(const char *command) {
   if (strstr(command, "selftest") != NULL) return false;
   if (strncmp(command, "fast-mode-", strlen("fast-mode-")) == 0) return true;
+  if (strncmp(command, "reasoning-effort-", strlen("reasoning-effort-")) == 0) return true;
   if (strncmp(command, "codex-open-thread", strlen("codex-open-thread")) == 0
       || strncmp(command, "codex-find-thread", strlen("codex-find-thread")) == 0
       || strncmp(command, "codex-search-thread", strlen("codex-search-thread")) == 0) return true;
@@ -2201,6 +2206,41 @@ static const char *reasoning_effort_from_intelligence_alias_string(CFTypeRef val
     }
   }
   return NULL;
+}
+
+static const char *reasoning_effort_from_popup_option_string(CFTypeRef value) {
+  if (value == NULL || CFGetTypeID(value) != CFStringGetTypeID()) return NULL;
+  @autoreleasepool {
+    NSString *text = [[(__bridge NSString *)value lowercaseString]
+      stringByTrimmingCharactersInSet:NSCharacterSet.whitespaceAndNewlineCharacterSet];
+    if ([text isEqualToString:@"none"] || [text isEqualToString:@"없음"]) return "none";
+    if ([text isEqualToString:@"minimal"] || [text isEqualToString:@"최소"]) return "minimal";
+    if ([text isEqualToString:@"light"] || [text isEqualToString:@"low"]
+        || [text isEqualToString:@"낮음"] || [text isEqualToString:@"가벼움"]) return "low";
+    if ([text isEqualToString:@"standard"] || [text isEqualToString:@"medium"]
+        || [text isEqualToString:@"표준"] || [text isEqualToString:@"중간"]) return "medium";
+    if ([text isEqualToString:@"extended"] || [text isEqualToString:@"high"]
+        || [text isEqualToString:@"높음"] || [text isEqualToString:@"고급"]) return "high";
+    if ([text isEqualToString:@"extra high"] || [text isEqualToString:@"xhigh"]
+        || [text isEqualToString:@"매우 높음"]) return "xhigh";
+    if ([text isEqualToString:@"maximum"] || [text isEqualToString:@"max"]
+        || [text isEqualToString:@"최대"]) return "max";
+    if ([text isEqualToString:@"ultra"] || [text isEqualToString:@"울트라"]) return "ultra";
+  }
+  return NULL;
+}
+
+enum { CODEX_REASONING_EFFORT_COUNT = 8 };
+
+static int codex_reasoning_effort_rank(const char *effort) {
+  if (effort == NULL) return -1;
+  const char *ordered[CODEX_REASONING_EFFORT_COUNT] = {
+    "none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"
+  };
+  for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+    if (strcmp(effort, ordered[index]) == 0) return index;
+  }
+  return -1;
 }
 
 static bool accessibility_string_has_codex_model_context(CFTypeRef value) {
@@ -3784,6 +3824,20 @@ typedef struct {
   bool intelligence_trigger_expanded;
   bool intelligence_trigger_expanded_known;
   const char *reasoning_effort;
+  AXUIElementRef reasoning_slider;
+  int reasoning_slider_score;
+  unsigned reasoning_slider_count;
+  CGPoint reasoning_slider_position;
+  CGSize reasoning_slider_size;
+  AXUIElementRef reasoning_control;
+  int reasoning_control_score;
+  unsigned reasoning_control_count;
+  CGPoint reasoning_control_position;
+  CGSize reasoning_control_size;
+  AXUIElementRef reasoning_options[CODEX_REASONING_EFFORT_COUNT];
+  unsigned reasoning_option_counts[CODEX_REASONING_EFFORT_COUNT];
+  CGPoint reasoning_option_positions[CODEX_REASONING_EFFORT_COUNT];
+  CGSize reasoning_option_sizes[CODEX_REASONING_EFFORT_COUNT];
   AXUIElementRef control;
   CodexFastControlKind control_kind;
   int control_score;
@@ -4021,18 +4075,25 @@ static bool codex_fast_control_is_near_composer(
     && control_center_y <= input_position.y + input_size.height + 100;
 }
 
-static bool codex_accessibility_element_supports_press(AXUIElementRef element) {
-  if (element == NULL) return false;
+static bool codex_accessibility_element_supports_action(
+  AXUIElementRef element,
+  CFStringRef action
+) {
+  if (element == NULL || action == NULL) return false;
   CFArrayRef actions = NULL;
   AXError error = AXUIElementCopyActionNames(element, &actions);
   bool supports = error == kAXErrorSuccess && actions != NULL
     && CFArrayContainsValue(
       actions,
       CFRangeMake(0, CFArrayGetCount(actions)),
-      kAXPressAction
+      action
     );
   if (actions != NULL) CFRelease(actions);
   return supports;
+}
+
+static bool codex_accessibility_element_supports_press(AXUIElementRef element) {
+  return codex_accessibility_element_supports_action(element, kAXPressAction);
 }
 
 static void consider_codex_fast_value(
@@ -4116,6 +4177,70 @@ static void consider_codex_intelligence_trigger(
   }
 }
 
+static void consider_codex_reasoning_slider(
+  CodexFastModeScan *scan,
+  AXUIElementRef element,
+  int score,
+  CGPoint position,
+  CGSize size
+) {
+  if (scan == NULL || element == NULL || score <= 0) return;
+  if (score > scan->reasoning_slider_score) {
+    if (scan->reasoning_slider != NULL) CFRelease(scan->reasoning_slider);
+    scan->reasoning_slider = (AXUIElementRef)CFRetain(element);
+    scan->reasoning_slider_score = score;
+    scan->reasoning_slider_count = 1;
+    scan->reasoning_slider_position = position;
+    scan->reasoning_slider_size = size;
+  } else if (score == scan->reasoning_slider_score
+      && (scan->reasoning_slider == NULL
+        || !CFEqual(scan->reasoning_slider, element))) {
+    scan->reasoning_slider_count += 1;
+  }
+}
+
+static void consider_codex_reasoning_control(
+  CodexFastModeScan *scan,
+  AXUIElementRef element,
+  int score,
+  CGPoint position,
+  CGSize size
+) {
+  if (scan == NULL || element == NULL || score <= 0) return;
+  if (score > scan->reasoning_control_score) {
+    if (scan->reasoning_control != NULL) CFRelease(scan->reasoning_control);
+    scan->reasoning_control = (AXUIElementRef)CFRetain(element);
+    scan->reasoning_control_score = score;
+    scan->reasoning_control_count = 1;
+    scan->reasoning_control_position = position;
+    scan->reasoning_control_size = size;
+  } else if (score == scan->reasoning_control_score
+      && (scan->reasoning_control == NULL
+        || !CFEqual(scan->reasoning_control, element))) {
+    scan->reasoning_control_count += 1;
+  }
+}
+
+static void consider_codex_reasoning_option(
+  CodexFastModeScan *scan,
+  AXUIElementRef element,
+  const char *effort,
+  CGPoint position,
+  CGSize size
+) {
+  if (scan == NULL || element == NULL || effort == NULL) return;
+  int rank = codex_reasoning_effort_rank(effort);
+  if (rank < 0 || rank >= CODEX_REASONING_EFFORT_COUNT) return;
+  if (scan->reasoning_options[rank] == NULL) {
+    scan->reasoning_options[rank] = (AXUIElementRef)CFRetain(element);
+    scan->reasoning_option_counts[rank] = 1;
+    scan->reasoning_option_positions[rank] = position;
+    scan->reasoning_option_sizes[rank] = size;
+  } else if (!CFEqual(scan->reasoning_options[rank], element)) {
+    scan->reasoning_option_counts[rank] += 1;
+  }
+}
+
 static CodexFastModeValue codex_fast_semantic_value(
   CodexFastTextSignals signals
 ) {
@@ -4171,6 +4296,7 @@ static void collect_codex_fast_mode_controls(
     || codex_fast_role_equals(role, CFSTR("AXSwitch"));
   bool is_radio = codex_fast_role_equals(role, kAXRadioButtonRole);
   bool is_menu_item = codex_fast_role_equals(role, CFSTR("AXMenuItem"));
+  bool is_slider = codex_fast_role_equals(role, kAXSliderRole);
   bool actionable_role = is_button || is_popup || is_checkbox || is_radio || is_menu_item;
 
   bool hidden = false;
@@ -4208,6 +4334,8 @@ static void collect_codex_fast_mode_controls(
   }
 
   CodexFastTextSignals signals = { 0 };
+  bool reasoning_context = false;
+  const char *element_reasoning_effort = NULL;
   const CFIndex text_indices[] = {
     FAST_ATTR_TITLE,
     FAST_ATTR_VALUE,
@@ -4218,10 +4346,21 @@ static void collect_codex_fast_mode_controls(
     FAST_ATTR_DOM_IDENTIFIER
   };
   for (size_t index = 0; index < sizeof(text_indices) / sizeof(text_indices[0]); index += 1) {
+    CFTypeRef text_value = CFArrayGetValueAtIndex(values, text_indices[index]);
     merge_codex_fast_signals(
       &signals,
-      codex_fast_signals_from_string(CFArrayGetValueAtIndex(values, text_indices[index]))
+      codex_fast_signals_from_string(text_value)
     );
+    bool has_context = false;
+    const char *effort = reasoning_effort_from_accessibility_string(
+      text_value,
+      &has_context
+    );
+    if (effort == NULL && scan->allow_popup_options) {
+      effort = reasoning_effort_from_popup_option_string(text_value);
+    }
+    reasoning_context |= has_context;
+    if (effort != NULL) element_reasoning_effort = effort;
   }
 
   bool selected = false;
@@ -4275,6 +4414,79 @@ static void collect_codex_fast_mode_controls(
     );
   bool supports_press = actionable_role && !hidden && enabled
     && codex_accessibility_element_supports_press(element);
+
+  bool plausible_reasoning_adjuster = scan->allow_popup_options
+      && !hidden && enabled && has_geometry
+      && size.width >= 72 && size.width <= 520
+      && size.height >= 8 && size.height <= 80
+      && position.x + size.width >= scan->window_origin.x - 24
+      && position.x <= scan->window_origin.x + scan->window_size.width + 24
+      && position.y >= scan->window_origin.y + scan->window_size.height * 0.38
+      && position.y <= scan->window_origin.y + scan->window_size.height + 24;
+  bool supports_reasoning_step = plausible_reasoning_adjuster
+    && codex_accessibility_element_supports_action(element, kAXIncrementAction)
+    && codex_accessibility_element_supports_action(element, kAXDecrementAction);
+  if (scan->allow_popup_options && getenv("THREADDECK_REASONING_DEBUG") != NULL
+      && has_geometry
+      && position.y >= scan->window_origin.y + scan->window_size.height * 0.38
+      && (element_reasoning_effort != NULL || is_slider
+        || supports_reasoning_step || (supports_press && plausible_option))) {
+    const char *role_name = is_slider ? "slider"
+      : is_radio ? "radio"
+        : is_menu_item ? "menuitem"
+          : is_popup ? "popup"
+            : is_button ? "button"
+              : is_checkbox ? "toggle"
+                : "other";
+    printf(
+      "reasoning_candidate role=%s effort=%s context=%d press=%d adjust=%d selected=%d x=%.0f y=%.0f w=%.0f h=%.0f\n",
+      role_name,
+      element_reasoning_effort != NULL ? element_reasoning_effort : "unknown",
+      reasoning_context ? 1 : 0,
+      supports_press ? 1 : 0,
+      supports_reasoning_step ? 1 : 0,
+      has_selected && selected ? 1 : 0,
+      position.x - scan->window_origin.x,
+      position.y - scan->window_origin.y,
+      size.width,
+      size.height
+    );
+  }
+  if (plausible_reasoning_adjuster && (is_slider || supports_reasoning_step)) {
+    // Codex exposes the discrete reasoning control as a horizontal AXSlider
+    // or another increment/decrement-capable range inside the intelligence
+    // popover. Prefer explicit adjustable actions and reasoning labels, while
+    // retaining one geometry-anchored AXSlider for Chromium builds that omit
+    // both its title and role description.
+    int score = supports_reasoning_step
+      ? reasoning_context || element_reasoning_effort != NULL ? 640 : 600
+      : reasoning_context || element_reasoning_effort != NULL ? 520 : 360;
+    consider_codex_reasoning_slider(scan, element, score, position, size);
+  }
+
+  if (scan->allow_popup_options && supports_press && plausible_option
+      && element_reasoning_effort != NULL && reasoning_context
+      && (is_menu_item || is_button || is_popup)) {
+    consider_codex_reasoning_control(
+      scan,
+      element,
+      is_menu_item ? 720 : 620,
+      position,
+      size
+    );
+  }
+  if (scan->allow_popup_options && supports_press && plausible_option
+      && element_reasoning_effort != NULL && !reasoning_context
+      && !signals.speed_context
+      && (is_menu_item || is_radio || is_button)) {
+    consider_codex_reasoning_option(
+      scan,
+      element,
+      element_reasoning_effort,
+      position,
+      size
+    );
+  }
 
   if ((is_button || is_popup) && !hidden && enabled && in_control_region
       && supports_press) {
@@ -4399,10 +4611,20 @@ static void collect_codex_fast_mode_controls(
 static void release_codex_fast_mode_scan(CodexFastModeScan *scan) {
   if (scan == NULL) return;
   if (scan->intelligence_trigger != NULL) CFRelease(scan->intelligence_trigger);
+  if (scan->reasoning_slider != NULL) CFRelease(scan->reasoning_slider);
+  if (scan->reasoning_control != NULL) CFRelease(scan->reasoning_control);
+  for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+    if (scan->reasoning_options[index] != NULL) {
+      CFRelease(scan->reasoning_options[index]);
+    }
+    scan->reasoning_options[index] = NULL;
+  }
   if (scan->control != NULL) CFRelease(scan->control);
   if (scan->on_option != NULL) CFRelease(scan->on_option);
   if (scan->off_option != NULL) CFRelease(scan->off_option);
   scan->intelligence_trigger = NULL;
+  scan->reasoning_slider = NULL;
+  scan->reasoning_control = NULL;
   scan->control = NULL;
   scan->on_option = NULL;
   scan->off_option = NULL;
@@ -4471,6 +4693,16 @@ static bool copy_codex_fast_mode_scan(
     .intelligence_trigger_expanded = false,
     .intelligence_trigger_expanded_known = false,
     .reasoning_effort = NULL,
+    .reasoning_slider = NULL,
+    .reasoning_slider_score = 0,
+    .reasoning_slider_count = 0,
+    .reasoning_slider_position = CGPointZero,
+    .reasoning_slider_size = CGSizeZero,
+    .reasoning_control = NULL,
+    .reasoning_control_score = 0,
+    .reasoning_control_count = 0,
+    .reasoning_control_position = CGPointZero,
+    .reasoning_control_size = CGSizeZero,
     .control = NULL,
     .control_kind = CODEX_FAST_CONTROL_NONE,
     .control_score = 0,
@@ -4511,9 +4743,83 @@ static bool copy_codex_fast_mode_scan(
     );
   if (!intelligence_anchored) {
     if (scan->intelligence_trigger != NULL) CFRelease(scan->intelligence_trigger);
+    if (scan->reasoning_slider != NULL) CFRelease(scan->reasoning_slider);
+    if (scan->reasoning_control != NULL) CFRelease(scan->reasoning_control);
+    for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+      if (scan->reasoning_options[index] != NULL) {
+        CFRelease(scan->reasoning_options[index]);
+      }
+      scan->reasoning_options[index] = NULL;
+      scan->reasoning_option_counts[index] = 0;
+    }
     scan->intelligence_trigger = NULL;
     scan->intelligence_trigger_count = 0;
     scan->reasoning_effort = NULL;
+    scan->reasoning_slider = NULL;
+    scan->reasoning_slider_count = 0;
+    scan->reasoning_control = NULL;
+    scan->reasoning_control_count = 0;
+  } else if (scan->reasoning_slider != NULL) {
+    double trigger_center_x = scan->intelligence_trigger_position.x
+      + scan->intelligence_trigger_size.width / 2.0;
+    double slider_center_x = scan->reasoning_slider_position.x
+      + scan->reasoning_slider_size.width / 2.0;
+    double vertical_distance = fabs(
+      scan->reasoning_slider_position.y
+        + scan->reasoning_slider_size.height / 2.0
+        - (scan->intelligence_trigger_position.y
+          + scan->intelligence_trigger_size.height / 2.0)
+    );
+    bool reasoning_slider_anchored = scan->reasoning_slider_count == 1
+      && fabs(slider_center_x - trigger_center_x)
+        <= fmax(320.0, scan->window_size.width * 0.34)
+      && vertical_distance <= fmax(420.0, scan->window_size.height * 0.46);
+    if (!reasoning_slider_anchored) {
+      CFRelease(scan->reasoning_slider);
+      scan->reasoning_slider = NULL;
+      scan->reasoning_slider_count = 0;
+    }
+  }
+  if (intelligence_anchored && scan->reasoning_control != NULL) {
+    double trigger_center_x = scan->intelligence_trigger_position.x
+      + scan->intelligence_trigger_size.width / 2.0;
+    double control_center_x = scan->reasoning_control_position.x
+      + scan->reasoning_control_size.width / 2.0;
+    double control_center_y = scan->reasoning_control_position.y
+      + scan->reasoning_control_size.height / 2.0;
+    double trigger_center_y = scan->intelligence_trigger_position.y
+      + scan->intelligence_trigger_size.height / 2.0;
+    bool reasoning_control_anchored = scan->reasoning_control_count == 1
+      && fabs(control_center_x - trigger_center_x)
+        <= fmax(340.0, scan->window_size.width * 0.36)
+      && fabs(control_center_y - trigger_center_y)
+        <= fmax(440.0, scan->window_size.height * 0.48);
+    if (!reasoning_control_anchored) {
+      CFRelease(scan->reasoning_control);
+      scan->reasoning_control = NULL;
+      scan->reasoning_control_count = 0;
+    }
+  }
+  if (intelligence_anchored && scan->reasoning_control != NULL) {
+    double control_center_x = scan->reasoning_control_position.x
+      + scan->reasoning_control_size.width / 2.0;
+    double control_center_y = scan->reasoning_control_position.y
+      + scan->reasoning_control_size.height / 2.0;
+    for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+      if (scan->reasoning_options[index] == NULL) continue;
+      double option_center_x = scan->reasoning_option_positions[index].x
+        + scan->reasoning_option_sizes[index].width / 2.0;
+      double option_center_y = scan->reasoning_option_positions[index].y
+        + scan->reasoning_option_sizes[index].height / 2.0;
+      bool option_anchored = scan->reasoning_option_counts[index] == 1
+        && fabs(option_center_x - control_center_x) <= 520.0
+        && fabs(option_center_y - control_center_y) <= 440.0;
+      if (!option_anchored) {
+        CFRelease(scan->reasoning_options[index]);
+        scan->reasoning_options[index] = NULL;
+        scan->reasoning_option_counts[index] = 0;
+      }
+    }
   }
   bool composer_anchored = scan->composer_input_found
     && scan->control != NULL
@@ -4879,6 +5185,480 @@ static bool restore_codex_composer_after_fast_mode(void) {
     usleep(45000);
   }
   return false;
+}
+
+typedef enum {
+  CODEX_REASONING_DIRECTION_UP = 1,
+  CODEX_REASONING_DIRECTION_DOWN = -1
+} CodexReasoningDirection;
+
+static const char *codex_reasoning_direction_name(
+  CodexReasoningDirection direction
+) {
+  return direction == CODEX_REASONING_DIRECTION_DOWN ? "down" : "up";
+}
+
+static bool copy_codex_numeric_attribute(
+  AXUIElementRef element,
+  CFStringRef attribute,
+  double *number_out
+) {
+  if (element == NULL || attribute == NULL || number_out == NULL) return false;
+  CFTypeRef value = NULL;
+  AXError error = AXUIElementCopyAttributeValue(element, attribute, &value);
+  bool copied = error == kAXErrorSuccess && value != NULL
+    && CFGetTypeID(value) == CFNumberGetTypeID()
+    && CFNumberGetValue((CFNumberRef)value, kCFNumberDoubleType, number_out);
+  if (value != NULL) CFRelease(value);
+  return copied;
+}
+
+static bool copy_codex_reasoning_slider_range(
+  AXUIElementRef slider,
+  double *value_out,
+  double *minimum_out,
+  double *maximum_out
+) {
+  double value = 0;
+  double minimum = 0;
+  double maximum = 0;
+  bool copied = copy_codex_numeric_attribute(slider, kAXValueAttribute, &value)
+    && copy_codex_numeric_attribute(slider, kAXMinValueAttribute, &minimum)
+    && copy_codex_numeric_attribute(slider, kAXMaxValueAttribute, &maximum)
+    && maximum > minimum;
+  if (!copied) return false;
+  if (value_out != NULL) *value_out = value;
+  if (minimum_out != NULL) *minimum_out = minimum;
+  if (maximum_out != NULL) *maximum_out = maximum;
+  return true;
+}
+
+static bool codex_reasoning_effort_is_minimum(const char *effort) {
+  return effort != NULL && (
+    strcmp(effort, "none") == 0
+    || strcmp(effort, "minimal") == 0
+    || strcmp(effort, "low") == 0
+  );
+}
+
+static bool codex_reasoning_effort_is_maximum(const char *effort) {
+  return effort != NULL && (
+    strcmp(effort, "max") == 0
+    || strcmp(effort, "ultra") == 0
+  );
+}
+
+static CodexReasoningDirection codex_reasoning_direction_for_boundary(
+  CodexReasoningDirection requested,
+  const char *effort,
+  bool range_known,
+  double value,
+  double minimum,
+  double maximum
+) {
+  double epsilon = range_known ? fmax((maximum - minimum) / 1000.0, 0.000001) : 0;
+  bool at_minimum = range_known
+    ? value <= minimum + epsilon
+    : codex_reasoning_effort_is_minimum(effort);
+  bool at_maximum = range_known
+    ? value >= maximum - epsilon
+    : codex_reasoning_effort_is_maximum(effort);
+  if (requested == CODEX_REASONING_DIRECTION_UP && at_maximum) {
+    return CODEX_REASONING_DIRECTION_DOWN;
+  }
+  if (requested == CODEX_REASONING_DIRECTION_DOWN && at_minimum) {
+    return CODEX_REASONING_DIRECTION_UP;
+  }
+  return requested;
+}
+
+static bool copy_codex_reasoning_control_scan(
+  CodexFastModeScan *scan,
+  AXUIElementRef *trigger_out
+) {
+  if (scan == NULL || trigger_out == NULL) return false;
+  *trigger_out = NULL;
+  bool debug = getenv("THREADDECK_REASONING_DEBUG") != NULL;
+
+  CodexFastModeScan shallow = { 0 };
+  bool shallow_scanned = copy_codex_fast_mode_scan(false, &shallow);
+  if (debug) {
+    printf(
+      "reasoning_stage=shallow scanned=%d trigger=%d effort=%s frontmost=%d\n",
+      shallow_scanned ? 1 : 0,
+      shallow.intelligence_trigger_count,
+      shallow.reasoning_effort != NULL ? shallow.reasoning_effort : "unknown",
+      codex_is_frontmost() ? 1 : 0
+    );
+  }
+  if (!shallow_scanned
+      || shallow.intelligence_trigger == NULL
+      || shallow.intelligence_trigger_count != 1) {
+    release_codex_fast_mode_scan(&shallow);
+    return false;
+  }
+
+  AXUIElementRef trigger = (AXUIElementRef)CFRetain(shallow.intelligence_trigger);
+  bool expanded = shallow.intelligence_trigger_expanded;
+  bool expanded_known = shallow.intelligence_trigger_expanded_known;
+  if (!expanded_known) {
+    expanded_known = codex_intelligence_trigger_expanded(trigger, &expanded);
+  }
+  bool opened_here = !(expanded_known && expanded);
+  bool opened = !opened_here;
+  if (opened_here) {
+    opened = activate_accessibility_element_with_return(trigger)
+      || perform_codex_accessibility_show_menu(trigger)
+      || perform_codex_accessibility_press(trigger);
+  }
+  if (debug) {
+    printf(
+      "reasoning_stage=open opened_here=%d opened=%d expanded_known=%d expanded=%d frontmost=%d\n",
+      opened_here ? 1 : 0,
+      opened ? 1 : 0,
+      expanded_known ? 1 : 0,
+      expanded ? 1 : 0,
+      codex_is_frontmost() ? 1 : 0
+    );
+  }
+  if (!opened) {
+    CFRelease(trigger);
+    release_codex_fast_mode_scan(&shallow);
+    return false;
+  }
+  release_codex_fast_mode_scan(&shallow);
+
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.9;
+  CodexFastModeScan last = { 0 };
+  bool have_last = false;
+  do {
+    CodexFastModeScan candidate = { 0 };
+    if (copy_codex_fast_mode_scan(true, &candidate)) {
+      if (have_last) release_codex_fast_mode_scan(&last);
+      last = candidate;
+      have_last = true;
+      if ((last.reasoning_slider != NULL
+            && last.reasoning_slider_count == 1)
+          || (last.reasoning_control != NULL
+            && last.reasoning_control_count == 1)) break;
+    }
+    usleep(35000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+
+  bool has_slider = have_last && last.reasoning_slider != NULL
+    && last.reasoning_slider_count == 1;
+  bool has_control = have_last && last.reasoning_control != NULL
+    && last.reasoning_control_count == 1;
+  if (!have_last || (!has_slider && !has_control)) {
+    if (have_last) release_codex_fast_mode_scan(&last);
+    if (opened_here) close_codex_intelligence_popover_if_opened(trigger);
+    CFRelease(trigger);
+    return false;
+  }
+  *scan = last;
+  *trigger_out = trigger;
+  return true;
+}
+
+static const char *wait_for_codex_reasoning_effort_change(
+  const char *previous,
+  CFTimeInterval timeout_seconds,
+  CodexFastModeValue *fast_value_out
+) {
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + timeout_seconds;
+  const char *last = NULL;
+  do {
+    CodexFastModeScan scan = { 0 };
+    if (copy_codex_fast_mode_scan(false, &scan)) {
+      last = scan.reasoning_effort;
+      if (fast_value_out != NULL
+          && scan.value != CODEX_FAST_MODE_UNKNOWN) {
+        *fast_value_out = scan.value;
+      }
+      bool changed = last != NULL
+        && (previous == NULL || strcmp(last, previous) != 0);
+      release_codex_fast_mode_scan(&scan);
+      if (changed) return last;
+    }
+    usleep(45000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  return last;
+}
+
+static unsigned codex_reasoning_option_count(const CodexFastModeScan *scan) {
+  if (scan == NULL) return 0;
+  unsigned count = 0;
+  for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+    if (scan->reasoning_options[index] != NULL
+        && scan->reasoning_option_counts[index] == 1) count += 1;
+  }
+  return count;
+}
+
+static bool copy_codex_reasoning_options_scan(CodexFastModeScan *scan) {
+  if (scan == NULL) return false;
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.8;
+  CodexFastModeScan last = { 0 };
+  bool have_last = false;
+  do {
+    CodexFastModeScan candidate = { 0 };
+    if (copy_codex_fast_mode_scan(true, &candidate)) {
+      if (have_last) release_codex_fast_mode_scan(&last);
+      last = candidate;
+      have_last = true;
+      if (codex_reasoning_option_count(&last) >= 2) break;
+    }
+    usleep(30000);
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+  if (!have_last || codex_reasoning_option_count(&last) < 2) {
+    if (have_last) release_codex_fast_mode_scan(&last);
+    return false;
+  }
+  *scan = last;
+  return true;
+}
+
+static int codex_reasoning_target_option(
+  const CodexFastModeScan *scan,
+  const char *current_effort,
+  CodexReasoningDirection *direction_in_out,
+  bool *at_minimum_out,
+  bool *at_maximum_out
+) {
+  if (scan == NULL || direction_in_out == NULL) return -1;
+  int first = -1;
+  int last = -1;
+  for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+    if (scan->reasoning_options[index] == NULL
+        || scan->reasoning_option_counts[index] != 1) continue;
+    if (first < 0) first = index;
+    last = index;
+  }
+  if (first < 0 || last <= first) return -1;
+
+  int current = codex_reasoning_effort_rank(current_effort);
+  CodexReasoningDirection direction = *direction_in_out;
+  if (direction == CODEX_REASONING_DIRECTION_UP && current >= last) {
+    direction = CODEX_REASONING_DIRECTION_DOWN;
+  } else if (direction == CODEX_REASONING_DIRECTION_DOWN
+      && current >= 0 && current <= first) {
+    direction = CODEX_REASONING_DIRECTION_UP;
+  }
+
+  int target = -1;
+  if (direction == CODEX_REASONING_DIRECTION_UP) {
+    for (int index = current + 1; index <= last; index += 1) {
+      if (index >= 0 && scan->reasoning_options[index] != NULL
+          && scan->reasoning_option_counts[index] == 1) {
+        target = index;
+        break;
+      }
+    }
+    if (target < 0) {
+      direction = CODEX_REASONING_DIRECTION_DOWN;
+      for (int index = current - 1; index >= first; index -= 1) {
+        if (scan->reasoning_options[index] != NULL
+            && scan->reasoning_option_counts[index] == 1) {
+          target = index;
+          break;
+        }
+      }
+    }
+  } else {
+    for (int index = current - 1; index >= first; index -= 1) {
+      if (scan->reasoning_options[index] != NULL
+          && scan->reasoning_option_counts[index] == 1) {
+        target = index;
+        break;
+      }
+    }
+    if (target < 0) {
+      direction = CODEX_REASONING_DIRECTION_UP;
+      for (int index = current + 1; index <= last; index += 1) {
+        if (index >= 0 && scan->reasoning_options[index] != NULL
+            && scan->reasoning_option_counts[index] == 1) {
+          target = index;
+          break;
+        }
+      }
+    }
+  }
+  if (target < 0) return -1;
+  *direction_in_out = direction;
+  if (at_minimum_out != NULL) *at_minimum_out = target == first;
+  if (at_maximum_out != NULL) *at_maximum_out = target == last;
+  return target;
+}
+
+static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
+  CodexFastModeScan scan = { 0 };
+  AXUIElementRef trigger = NULL;
+  if (!copy_codex_reasoning_control_scan(&scan, &trigger)) {
+    bool composer_focused = restore_codex_composer_after_fast_mode();
+    printf(
+      "reasoning=unknown available=0 changed=0 verified=0 direction=%s composer_focused=%d\n",
+      codex_reasoning_direction_name(requested),
+      composer_focused ? 1 : 0
+    );
+    return 2;
+  }
+
+  const char *previous = scan.reasoning_effort;
+  double before_value = 0;
+  double minimum = 0;
+  double maximum = 0;
+  bool has_slider = scan.reasoning_slider != NULL
+    && scan.reasoning_slider_count == 1;
+  bool range_known = has_slider && copy_codex_reasoning_slider_range(
+      scan.reasoning_slider,
+      &before_value,
+      &minimum,
+      &maximum
+    );
+  CodexReasoningDirection direction = codex_reasoning_direction_for_boundary(
+    requested,
+    previous,
+    range_known,
+    before_value,
+    minimum,
+    maximum
+  );
+  bool acted = false;
+  bool at_minimum = false;
+  bool at_maximum = false;
+  double after_value = before_value;
+  double after_minimum = minimum;
+  double after_maximum = maximum;
+  bool after_range_known = false;
+  if (has_slider) {
+    CFStringRef action = direction == CODEX_REASONING_DIRECTION_DOWN
+      ? kAXDecrementAction
+      : kAXIncrementAction;
+    acted = codex_is_frontmost()
+      && AXUIElementPerformAction(scan.reasoning_slider, action) == kAXErrorSuccess;
+    if (acted) usleep(70000);
+    after_range_known = copy_codex_reasoning_slider_range(
+      scan.reasoning_slider,
+      &after_value,
+      &after_minimum,
+      &after_maximum
+    );
+  } else if (scan.reasoning_control != NULL
+      && scan.reasoning_control_count == 1
+      && focus_accessibility_element(scan.reasoning_control)) {
+    // The available effort levels vary by model. Open Codex's own Effort
+    // submenu, enumerate only the options it exposes for this task, and move
+    // one visible notch in the requested ping-pong direction.
+    usleep(12000);
+    tap_key(KEY_RIGHT, 0);
+    usleep(65000);
+    CodexFastModeScan options = { 0 };
+    if (copy_codex_reasoning_options_scan(&options)) {
+      int target = codex_reasoning_target_option(
+        &options,
+        previous,
+        &direction,
+        &at_minimum,
+        &at_maximum
+      );
+      if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+        printf(
+          "reasoning_stage=options count=%u target=%d direction=%s\n",
+          codex_reasoning_option_count(&options),
+          target,
+          codex_reasoning_direction_name(direction)
+        );
+      }
+      if (target >= 0) {
+        acted = activate_accessibility_element_with_return(
+          options.reasoning_options[target]
+        );
+        if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+          printf("reasoning_stage=select acted=%d\n", acted ? 1 : 0);
+        }
+        if (acted) usleep(70000);
+      }
+      release_codex_fast_mode_scan(&options);
+    }
+  }
+  double epsilon = after_range_known
+    ? fmax((after_maximum - after_minimum) / 1000.0, 0.000001)
+    : 0;
+  bool numeric_changed = acted && range_known && after_range_known
+    && fabs(after_value - before_value) > epsilon;
+  if (after_range_known) {
+    at_minimum = after_value <= after_minimum + epsilon;
+    at_maximum = after_value >= after_maximum - epsilon;
+  }
+  CodexFastModeValue fast_value = scan.value;
+
+  close_codex_intelligence_popover_if_opened(trigger);
+  const char *reasoning = acted
+    ? wait_for_codex_reasoning_effort_change(previous, 1.2, &fast_value)
+    : previous;
+  bool label_changed = reasoning != NULL
+    && (previous == NULL || strcmp(reasoning, previous) != 0);
+  bool changed = numeric_changed || label_changed;
+  bool verified = acted && changed && reasoning != NULL;
+  if (!after_range_known) {
+    at_minimum = codex_reasoning_effort_is_minimum(reasoning);
+    at_maximum = codex_reasoning_effort_is_maximum(reasoning);
+  }
+  bool composer_focused = restore_codex_composer_after_fast_mode();
+  const char *service_tier = fast_value == CODEX_FAST_MODE_ON
+    ? "priority"
+    : fast_value == CODEX_FAST_MODE_OFF
+      ? "default"
+      : "unknown";
+  printf(
+    "previous=%s reasoning=%s service_tier=%s available=1 changed=%d verified=%d direction=%s at_min=%d at_max=%d composer_focused=%d\n",
+    previous != NULL ? previous : "unknown",
+    reasoning != NULL ? reasoning : "unknown",
+    service_tier,
+    changed ? 1 : 0,
+    verified ? 1 : 0,
+    codex_reasoning_direction_name(direction),
+    at_minimum ? 1 : 0,
+    at_maximum ? 1 : 0,
+    composer_focused ? 1 : 0
+  );
+  release_codex_fast_mode_scan(&scan);
+  CFRelease(trigger);
+  return verified ? 0 : 1;
+}
+
+static int codex_reasoning_effort_selftest(void) {
+  bool upper_reverses = codex_reasoning_direction_for_boundary(
+    CODEX_REASONING_DIRECTION_UP,
+    "ultra",
+    false,
+    0,
+    0,
+    0
+  ) == CODEX_REASONING_DIRECTION_DOWN;
+  bool lower_reverses = codex_reasoning_direction_for_boundary(
+    CODEX_REASONING_DIRECTION_DOWN,
+    "low",
+    false,
+    0,
+    0,
+    0
+  ) == CODEX_REASONING_DIRECTION_UP;
+  bool middle_preserves = codex_reasoning_direction_for_boundary(
+    CODEX_REASONING_DIRECTION_UP,
+    "high",
+    true,
+    2,
+    0,
+    4
+  ) == CODEX_REASONING_DIRECTION_UP;
+  printf(
+    "upper_reverses=%d lower_reverses=%d middle_preserves=%d\n",
+    upper_reverses ? 1 : 0,
+    lower_reverses ? 1 : 0,
+    middle_preserves ? 1 : 0
+  );
+  return upper_reverses && lower_reverses && middle_preserves ? 0 : 1;
 }
 
 static int toggle_codex_fast_mode(void) {
@@ -6885,6 +7665,16 @@ int main(int argc, char **argv) {
     }
     return 64;
   }
+  if (strcmp(argv[1], "reasoning-effort-step") == 0) {
+    if (argc != 3) return 64;
+    if (strcmp(argv[2], "up") == 0) {
+      return step_codex_reasoning_effort(CODEX_REASONING_DIRECTION_UP);
+    }
+    if (strcmp(argv[2], "down") == 0) {
+      return step_codex_reasoning_effort(CODEX_REASONING_DIRECTION_DOWN);
+    }
+    return 64;
+  }
   if (strcmp(argv[1], "codex-find-thread") == 0) {
     if (argc < 4) return 64;
     return find_or_open_codex_thread(
@@ -7002,6 +7792,7 @@ int main(int argc, char **argv) {
     return voice_release_retry_selftest();
   }
   if (strcmp(argv[1], "reasoning-state-selftest") == 0) return reasoning_state_selftest();
+  if (strcmp(argv[1], "reasoning-effort-selftest") == 0) return codex_reasoning_effort_selftest();
   if (strcmp(argv[1], "goal-state-selftest") == 0) return goal_state_selftest();
   if (strcmp(argv[1], "fast-mode-selftest") == 0) return codex_fast_mode_selftest();
   if (strcmp(argv[1], "fast-mode-toggle") == 0) return toggle_codex_fast_mode();
