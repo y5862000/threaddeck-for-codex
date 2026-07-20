@@ -22,8 +22,6 @@
 
 <p align="center"><a href="README.md">English</a> · <a href="#60초-설치">설치</a> · <a href="#길게-누르면-달라지는-버튼">길게 누르기</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">다운로드</a></p>
 
-![다크 모드의 ThreadDeck for Codex 대시보드](docs/media/neo-preview.png)
-
 기능 개요와 ThreadDeck 제스처 GIF는 개인정보 없는 예시 작업을 사용해 플러그인의 실제 SVG 버튼 렌더러에서 생성했습니다. 설명용 타임라인은 실제 버튼 그림 바깥에만 놓입니다. 기본 앱 실행 버튼은 Elgato 소유 액션이므로 별도 GIF에는 Stream Deck이나 앱 그림을 복제하지 않고 중립적인 안내 버튼을 사용합니다.
 
 ![진행 중인 작업, 작업 버튼 음성 입력, 대기열 진행, 전체 완료 펄스를 보여주는 ThreadDeck 흐름](docs/media/threaddeck-demo.gif)

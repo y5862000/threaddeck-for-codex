@@ -22,8 +22,6 @@
 
 <p align="center"><a href="README.ko.md">한국어</a> · <a href="#install-in-60-seconds">Install</a> · <a href="#keys-with-hold-gestures">Hold gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
 
-![ThreadDeck for Codex dashboard in dark appearance](docs/media/neo-preview.png)
-
 The overview and ThreadDeck gesture demos below are generated from the plugin's real SVG key renderer with sanitized example tasks. Their explanatory timelines sit outside the real key image. The bundled app launchers are Elgato-owned actions, so their separate GIF uses a neutral guide key instead of copying Stream Deck or application artwork.
 
 ![ThreadDeck workflow showing a live task, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-demo.gif)
