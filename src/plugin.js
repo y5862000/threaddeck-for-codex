@@ -5654,7 +5654,7 @@ function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
 
   const workingThread = {
     id: DEMO_WORKING_ID,
-    title: "릴리스 준비",
+    title: "릴리즈",
     pinned: true,
     status: hasCompleted ? "completed" : "working",
     startedAtMs: DEMO_EPOCH_MS - 4 * 60_000 - 12_000,
@@ -5816,7 +5816,7 @@ function gesturePreviewSvg({ title, subtitle, keySvg, stages, activeStage, accen
 function demoGestureThread(nowMs, voiceState = "idle") {
   const thread = {
     id: DEMO_WORKING_ID,
-    title: "릴리스 준비",
+    title: "릴리즈",
     pinned: true,
     status: "working",
     startedAtMs: DEMO_EPOCH_MS - 4 * 60_000 - 12_000,
