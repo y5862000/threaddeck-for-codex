@@ -4,11 +4,11 @@
 
 <h1 align="center">ThreadDeck for Codex</h1>
 
-<p align="center"><strong>Watch, switch, and speak to Codex tasks from Stream Deck Neo.</strong></p>
+<p align="center"><strong>An open-source Codex Stream Deck plugin for Stream Deck Neo.</strong></p>
 
 <p align="center">
-  A local-first hardware dashboard for Codex Desktop on macOS.<br>
-  See live work without reopening the app, jump to the right local or remote task, and dictate a follow-up by holding its key.
+  Monitor live Codex Desktop tasks, switch local or remote work, control Effort and Fast mode,<br>
+  and hold a task key to dictate and submit a follow-up — all from one local-first macOS dashboard.
 </p>
 
 <p align="center">
@@ -20,9 +20,11 @@
   <img alt="Stream Deck Neo" src="https://img.shields.io/badge/device-Stream%20Deck%20Neo-111111?style=flat-square">
 </p>
 
-<p align="center"><a href="README.ko.md">한국어</a> · <a href="#install-in-60-seconds">Install</a> · <a href="#keys-with-hold-gestures">Hold gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
+<p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
 
-The overview and ThreadDeck gesture demos below are generated from the plugin's real SVG key renderer with sanitized example tasks. Their explanatory timelines sit outside the real key image. The bundled app launchers are Elgato-owned actions, so their separate GIF uses a neutral guide key instead of copying Stream Deck or application artwork.
+ThreadDeck turns Elgato Stream Deck Neo into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator), while remaining an independent implementation with its own renderer, verified macOS automation, and no Codex Micro runtime dependency. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source alternative to a Codex Micro-style controller, this is the project.
+
+The overview and gesture demos are generated from the plugin's real SVG key renderer with sanitized example tasks. English is the default documentation and release language; the same plugin automatically switches its action names and key UI to Korean when Stream Deck uses Korean. No separate language build is required.
 
 ![ThreadDeck workflow showing reasoning effort steps, Fast mode, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-overview.gif)
 
@@ -52,12 +54,11 @@ The overview and ThreadDeck gesture demos below are generated from the plugin's 
 
 ### Install
 
-1. Download `com.yechan.threaddeck.streamDeckPlugin` from [Releases](https://github.com/y5862000/threaddeck-for-codex/releases). Beta builds are marked as pre-releases.
-2. Double-click the file and approve installation in Stream Deck.
-3. The **ThreadDeck for Codex** profile is installed with the plugin but intentionally does not replace your current profile. Select it from the profile selector at the top of the Stream Deck app.
-4. Open **System Settings → Privacy & Security → Accessibility** and allow **Stream Deck**, then quit and reopen Stream Deck completely. ThreadDeck also checks macOS event-posting access; if either permission is missing, it invokes the official system request and marks the visible keys until recovery.
-5. Allow microphone access when Codex asks. ThreadDeck does not require Screen Recording or Full Disk Access.
-6. In **Codex → Settings → Keyboard Shortcuts**, confirm the three bindings below, then test a task key and the microphone key.
+1. Download `com.yechan.threaddeck.streamDeckPlugin` from [Releases](https://github.com/y5862000/threaddeck-for-codex/releases) and double-click it.
+2. Select the installed **ThreadDeck for Codex** profile, allow **Stream Deck** in **System Settings → Privacy & Security → Accessibility**, then reopen Stream Deck.
+3. Confirm the three Codex shortcuts below and test the microphone key.
+
+The package contains the editable Neo profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
 
 | Codex function | Keys sent by ThreadDeck | Used by |
 |---|---:|---|
@@ -84,12 +85,14 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 | App launcher | Tap to open or bring the configured app forward | Long-press to quit that app; the threshold and native artwork are managed by Stream Deck |
 | Weekly quota | — | Release to refresh CodexBar immediately |
 | New task / Side Chat | — | Release to run `⌥⌘O` / `⌥⌘S`; Side Chat stays in a protected switching state until its new task identity and focus are verified |
-| Reasoning + Fast | Release before 0.6 s to paint the next reasoning step immediately, then apply it through the current model's real Effort menu | Missing options are skipped and endpoints reverse direction; hold past **0.6 s** until the blue outline appears, then release to toggle Fast mode. The small bolt mirrors verified speed |
+| Reasoning + Fast | Release before 0.6 s to show and apply the next-run level (`LIGHT`–`ULTRA`) | Direct changes in Codex are mirrored on this key. Missing options are skipped and endpoints reverse direction; both Codex's compact slider and Effort menu are supported. When Full access makes Codex show its exact Ultra warning, ThreadDeck verifies that dialog and chooses `Use Full access`—never the generic `Continue` path that changes permissions. At **0.6 s**, the key starts toggling next-run Fast mode immediately without waiting for release. The small bolt mirrors verified speed |
 | Dedicated Fast mode | Release to toggle Fast mode in the verified current composer | A filled green bolt means Fast and an outlined neutral bolt means standard; a pending task or Side Chat switch is resolved first |
 | App switcher / media | Runs immediately on press | No alternate hold action |
 | Previous / next page | — | Release to cycle through the three ThreadDeck pages |
 
 The Dashboard's Current Task key follows the task selected in Codex's active window, including a task you select directly in the app. A lightweight active-window observer updates the key in under a second, and Send, the dedicated microphone, reasoning effort, Fast mode, and Side Chat re-confirm that same current task immediately before acting. Send and microphone focus the verified task's composer first; a newly opened Side Chat remembers that task as its parent and retains a navigation lease until Codex exposes and focuses its new task identity. Controls pressed during that window wait instead of falling through to the parent task. Pressing a ThreadDeck task key naturally updates the current task after Codex confirms the destination. A transient or ambiguous Accessibility read keeps the last verified current identity instead of guessing. **Top Task 1** is a separate selectable action, so custom profiles can place both keys side by side; the bundled Tasks page starts with Top Task 1 while the Dashboard keeps Current Task.
+
+Reasoning and speed have two deliberate timelines. A working task card keeps the exact Effort and Fast/standard setting captured when that turn started; changing the Codex composer or ThreadDeck's combined control does not rewrite an answer already in progress. The combined control instead shows the live setting for the **next run**, including a setting changed directly in Codex. Codex's current queue stores the follow-up content and starts it later through the live composer, so a queued follow-up uses the setting present when it actually begins. Once dequeued, its new turn metadata becomes the task-card header. The amber `+N` remains a queue count rather than pretending every queued item has its own frozen setting.
 
 ## Keys with hold gestures
 
@@ -97,7 +100,7 @@ The Dashboard's Current Task key follows the task selected in Codex's active win
 
 ![Task key hold-to-talk sequence: hold, speak, release, transcribe, submit, and verify](docs/media/task-hold-to-talk.gif)
 
-Tap a task key to open it. Hold for at least **0.55 seconds** and wait for `말하는 중` (speaking) before talking; a slow remote switch first shows `전환 준비` while the exact task and composer are verified. Releasing stops dictation; ThreadDeck waits for a stable transcript, activates Codex's visible Send control, and only shows `전송 완료` after the composer reset is confirmed. ThreadDeck discovers the GUI owner of active Core Audio output, activates only a semantic pause control it can verify, and falls back to the normal macOS media command when needed. The selected task card shows every stage. A task switch and composer activation use accessibility focus plus keyboard activation, so the pointer does not move.
+Tap a task key to open it. Hold for at least **0.55 seconds** and wait for `Listening` before talking; a slow remote switch first shows `Switching` while the exact task and composer are verified. Releasing stops dictation; ThreadDeck waits for a stable transcript, activates Codex's visible Send control, and only shows `Sent` after the composer reset is confirmed. ThreadDeck discovers the GUI owner of active Core Audio output, activates only a semantic pause control it can verify, and falls back to the normal macOS media command when needed. The selected task card shows every stage. A task switch and composer activation use accessibility focus plus keyboard activation, so the pointer does not move.
 
 ### Dedicated microphone: dictate a draft, do not send it
 
@@ -121,7 +124,7 @@ The Media page includes Stream Deck, Music, Chrome, and Codex launchers built wi
 
 | Example | Meaning |
 |---|---|
-| <img src="docs/media/working-task-key.png" width="104" alt="Working task key"> | The header shows the current phase. The pin precedes the title, the timer updates every second, the track reflects trustworthy reasoning intensity, and the lightning cue marks fast service. A target at the timer's left marks an unfinished goal; while it is present, the timer is the whole goal's accumulated time rather than only the latest turn. An amber `+N` is the observed queued-follow-up count. |
+| <img src="docs/media/working-task-key.png" width="104" alt="Working task key"> | The header shows the current phase. The pin precedes the title, the timer updates every second, and the track plus lightning cue preserve the Effort and Fast/standard setting of the **turn already running**. A target at the timer's left marks an unfinished goal; while it is present, the timer is the whole goal's accumulated time rather than only the latest turn. An amber `+N` is the observed queued-follow-up count. |
 | <img src="docs/media/completed-task-key.png" width="104" alt="Completed task key"> | The check and frozen timer mean the latest observed turn completed. Completed cards hide the fast-service lightning cue so the check remains the single status signal. The final duration is never rewritten by a later resume observation. |
 | <img src="docs/media/quota-key.png" width="104" alt="Weekly quota key"> | Optional remaining weekly capacity from CodexBar. The last good value appears immediately during page changes and survives a transient refresh failure. |
 | <img src="docs/media/side-chat-key.png" width="104" alt="Side Chat key"> | A workflow action using the same light/dark visual system as task cards. |
@@ -153,7 +156,7 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 The bundled profile has three pages and can be rearranged in Stream Deck:
 
-1. **Dashboard** — quota, the current Codex task, reasoning effort, Fast mode, Side Chat, microphone, Send, and back navigation. Reasoning occupies `2,0`, Fast mode occupies `1,1`, and Current Task remains at `0,1`. New Task remains available in the action list for custom layouts.
+1. **Dashboard** — quota, New Task, Side Chat, and Send on the top row; Current Task, combined reasoning/Fast, microphone, and back navigation on the bottom row. The combined control occupies `1,1`, and Current Task remains at `0,1`. The dedicated Fast action remains available for custom layouts.
 2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current Task action are available in the action list for custom layouts.
 3. **Media** — previous track, rewind, play/pause, four app launchers, and back navigation. Forward page, next track, seek, mute, and volume actions are also available.
 
@@ -190,7 +193,7 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 
 | Symptom | First check |
 |---|---|
-| No key actions work | Follow the key warning: `권한 필요` means Accessibility, `입력 권한` means event posting, `Codex 점검` means confirmed Codex-operation failures, and `미디어 점검` means active playback could not be safely controlled. ThreadDeck rechecks permissions every 30 seconds and clears operation warnings after a verified recovery. |
+| No key actions work | Follow the key warning: `Allow access` means Accessibility, `Input access` means event posting, `Check Codex` means confirmed Codex-operation failures, and `Check media` means active playback could not be safely controlled. ThreadDeck rechecks permissions every 30 seconds and clears operation warnings after a verified recovery. |
 | Music or browser audio keeps playing during dictation | Update to the latest build. ThreadDeck now resolves any active Core Audio process to its GUI owner and uses verified semantic controls; Apple Music plus Chrome and Safari YouTube were physically tested. |
 | Korean input source blocks dictation | Confirm Codex Start dictation is `⌃⇧D`; ThreadDeck sends a Latin `D` independently of the active layout |
 | Microphone release does not send | This is expected for the dedicated microphone; it leaves a draft. Use a task-key hold for auto-submit or press Send afterward |
@@ -199,7 +202,7 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 | An app closes from the Media page | The bundled Elgato app launchers use long-press to quit; tap briefly when you only want to open or focus |
 | Remote task is missing | Open that computer once in Codex, then explicitly pin the task |
 | Remote task reports a duplicate | Give the tasks distinct titles or leave only one pinned |
-| `상태를 읽지 못함` appears | Update to the latest beta and restart Codex and Stream Deck; transient reads keep the last good list and retry automatically |
+| `State unavailable` appears | Update to the latest beta and restart Codex and Stream Deck; transient reads keep the last good list and retry automatically |
 | Weekly quota is unavailable | Run `codexbar usage --format json` and enable Codex in CodexBar |
 
 See the full [Troubleshooting guide](docs/TROUBLESHOOTING.md) if the first check does not solve it.
@@ -236,15 +239,17 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 
 ## Project documents
 
-- [Troubleshooting](docs/TROUBLESHOOTING.md) · [한국어](docs/TROUBLESHOOTING.ko.md)
-- [Security and privacy](SECURITY.md) · [한국어](SECURITY.ko.md)
-- [Architecture](docs/ARCHITECTURE.md) · [한국어](docs/ARCHITECTURE.ko.md)
-- [Open-source inventory](docs/OPEN_SOURCE.md) · [한국어](docs/OPEN_SOURCE.ko.md)
-- [Brand guide](docs/BRAND.md) · [한국어](docs/BRAND.ko.md)
-- [Related projects](docs/ALTERNATIVES.md) · [한국어](docs/ALTERNATIVES.ko.md)
-- [Contributing](CONTRIBUTING.md) · [한국어](CONTRIBUTING.ko.md)
-- [Support](SUPPORT.md) · [한국어](SUPPORT.ko.md)
-- [Changelog](CHANGELOG.md) · [한국어](CHANGELOG.ko.md)
+- [Troubleshooting](docs/TROUBLESHOOTING.md) · [Korean](docs/TROUBLESHOOTING.ko.md)
+- [Install on another Mac](docs/INSTALL.md) · [Korean](docs/INSTALL.ko.md)
+- [Security and privacy](SECURITY.md) · [Korean](SECURITY.ko.md)
+- [Architecture](docs/ARCHITECTURE.md) · [Korean](docs/ARCHITECTURE.ko.md)
+- [Platform porting](docs/PORTING.md) · [Korean](docs/PORTING.ko.md)
+- [Open-source inventory](docs/OPEN_SOURCE.md) · [Korean](docs/OPEN_SOURCE.ko.md)
+- [Brand guide](docs/BRAND.md) · [Korean](docs/BRAND.ko.md)
+- [Related projects](docs/ALTERNATIVES.md) · [Korean](docs/ALTERNATIVES.ko.md)
+- [Contributing](CONTRIBUTING.md) · [Korean](CONTRIBUTING.ko.md)
+- [Support](SUPPORT.md) · [Korean](SUPPORT.ko.md)
+- [Changelog](CHANGELOG.md) · [Korean](CHANGELOG.ko.md)
 
 ## License and trademarks
 

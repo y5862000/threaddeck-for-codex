@@ -1,11 +1,12 @@
 # Related projects
 
-> [한국어 비교표](ALTERNATIVES.ko.md)
+> [Korean comparison](ALTERNATIVES.ko.md)
 
-Checked on 2026-07-18.
+Checked on 2026-07-21.
 
 | Project | Focus | Main difference |
 | --- | --- | --- |
+| [Codex Micro Stream Deck Emulator](https://github.com/mpociot/codex-micro-stream-deck-emulator) | Presents a physical Stream Deck to ChatGPT as a virtual Codex Micro | Reimplements the Micro HID/RPC protocol and uses a launch shim or entitlement-gated virtual HID; ThreadDeck stays inside the official Stream Deck plugin runtime and reads Codex Desktop task state directly. |
 | [Codex Deck](https://github.com/dazer1234/codex-stream-deck) | Codex Micro controls through Codex's internal event bridge | Micro-first and broader action control; ThreadDeck is a Codex Desktop task dashboard tested on Neo hardware. |
 | [Token Deck](https://github.com/leask/token-deck) | AI quota and Mac hardware metrics | Usage/metrics only; no Codex task list or task switching. |
 | [AI Usage Limits](https://github.com/lenadweb/stream-deck-ai-limits) | Multi-provider AI quota monitoring | Provider-agnostic usage display; no Codex task state. |

@@ -24,9 +24,9 @@ function embeddedKeys(previewPath) {
 
 try {
   fs.mkdirSync(mediaDir, { recursive: true });
-  runNode("src/plugin.js", "--render-demo", darkSvg);
-  runNode("src/plugin.js", "--render-demo-light", lightSvg);
-  runNode("src/plugin.js", "--render-completed-key", completedKeySvg);
+  runNode("src/plugin.js", "--language", "en", "--render-demo", darkSvg);
+  runNode("src/plugin.js", "--language", "en", "--render-demo-light", lightSvg);
+  runNode("src/plugin.js", "--language", "en", "--render-completed-key", completedKeySvg);
 
   await rasterizeSvg(darkSvg, path.join(mediaDir, "neo-preview.png"), 1372, 724);
   await rasterizeSvg(lightSvg, path.join(mediaDir, "neo-preview-light.png"), 1372, 724);

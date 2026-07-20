@@ -57,6 +57,58 @@
         "1,0": {
           "ActionID": "e96cad0b-380e-4e39-ae78-af6ff27094df",
           "LinkedTitle": false,
+          "Name": "Codex New Task",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.3.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 10,
+              "FontStyle": "Bold",
+              "FontUnderline": false,
+              "OutlineThickness": 0,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.newthread"
+        },
+        "1,1": {
+          "ActionID": "e3614b2e-6675-47f2-83a9-67f183eac17f",
+          "LinkedTitle": false,
+          "Name": "Codex Reasoning Effort",
+          "Plugin": {
+            "Name": "ThreadDeck for Codex",
+            "UUID": "com.yechan.threaddeck",
+            "Version": "0.3.0.0"
+          },
+          "Resources": null,
+          "Settings": {},
+          "State": 0,
+          "States": [
+            {
+              "FontFamily": "",
+              "FontSize": 12,
+              "FontStyle": "",
+              "FontUnderline": false,
+              "OutlineThickness": 2,
+              "ShowTitle": false,
+              "TitleAlignment": "bottom",
+              "TitleColor": "#ffffff"
+            }
+          ],
+          "UUID": "com.yechan.threaddeck.reasoning"
+        },
+        "2,0": {
+          "ActionID": "8ca31b17-9b6f-4bbb-98b6-b27ee95dd986",
+          "LinkedTitle": false,
           "Name": "Codex Side Chat",
           "Plugin": {
             "Name": "ThreadDeck for Codex",
@@ -79,58 +131,6 @@
             }
           ],
           "UUID": "com.yechan.threaddeck.sidechat"
-        },
-        "1,1": {
-          "ActionID": "e3614b2e-6675-47f2-83a9-67f183eac17f",
-          "LinkedTitle": false,
-          "Name": "Codex Fast mode",
-          "Plugin": {
-            "Name": "ThreadDeck for Codex",
-            "UUID": "com.yechan.threaddeck",
-            "Version": "0.3.0.0"
-          },
-          "Resources": null,
-          "Settings": {},
-          "State": 0,
-          "States": [
-            {
-              "FontFamily": "",
-              "FontSize": 12,
-              "FontStyle": "",
-              "FontUnderline": false,
-              "OutlineThickness": 2,
-              "ShowTitle": false,
-              "TitleAlignment": "bottom",
-              "TitleColor": "#ffffff"
-            }
-          ],
-          "UUID": "com.yechan.threaddeck.fastmode"
-        },
-        "2,0": {
-          "ActionID": "8ca31b17-9b6f-4bbb-98b6-b27ee95dd986",
-          "LinkedTitle": false,
-          "Name": "Codex Reasoning Effort",
-          "Plugin": {
-            "Name": "ThreadDeck for Codex",
-            "UUID": "com.yechan.threaddeck",
-            "Version": "0.3.0.0"
-          },
-          "Resources": null,
-          "Settings": {},
-          "State": 0,
-          "States": [
-            {
-              "FontFamily": "",
-              "FontSize": 10,
-              "FontStyle": "Bold",
-              "FontUnderline": false,
-              "OutlineThickness": 0,
-              "ShowTitle": false,
-              "TitleAlignment": "bottom",
-              "TitleColor": "#ffffff"
-            }
-          ],
-          "UUID": "com.yechan.threaddeck.reasoning"
         },
         "2,1": {
           "ActionID": "00fd9b90-04fd-493e-961a-d17180deecb0",

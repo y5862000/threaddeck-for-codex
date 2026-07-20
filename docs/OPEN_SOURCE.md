@@ -1,6 +1,6 @@
 # Open-source inventory
 
-> [한국어 오픈소스 구성표](OPEN_SOURCE.ko.md)
+> [Korean open-source inventory](OPEN_SOURCE.ko.md)
 
 ThreadDeck's implementation is fully published under the [MIT License](../LICENSE). This document makes the boundary between repository-owned source, generated artifacts, optional tools, and proprietary runtime applications explicit.
 
@@ -29,6 +29,19 @@ Generated `bin/`, profile archives, and release installers are ignored by Git be
 ## External proprietary applications
 
 Codex Desktop and Stream Deck are required to use the plugin. They are proprietary external applications, are not redistributed here, and are not covered by ThreadDeck's MIT License. Their requirement does not hide any ThreadDeck source: every component authored for this plugin is present in this repository.
+
+## Research-only upstream snapshot
+
+`reference/codex-micro-protocol/` preserves a byte-for-byte subset of
+[`mpociot/codex-micro-stream-deck-emulator`](https://github.com/mpociot/codex-micro-stream-deck-emulator)
+at commit `7093bd48f0bcb953f623b40c727470e545b48df3`. The copied protocol, framing,
+state catalogue, loopback transport, and tests remain under Marcel Pociot's MIT License, included
+next to the snapshot as `LICENSE.upstream`. ThreadDeck-owned provenance notes, checksums, and package
+scaffolding distinguish the copied files from local additions.
+
+This reference is not imported by `src/`, built into the plugin, or included in release artifacts.
+The process-injection shim, virtual-HID helper, hardware backend, renderer, and upstream media assets
+were deliberately not copied.
 
 ## Reproducible verification
 

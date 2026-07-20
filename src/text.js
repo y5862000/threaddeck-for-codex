@@ -2,6 +2,8 @@
 
 // Shared title normalization, fingerprinting, and display-width helpers.
 
+const { t } = require("./i18n");
+
 function normalizeTitle(value) {
   const title = String(value ?? "")
     .replace(/^\[\d+\]\s*user:\s*/i, "")
@@ -9,7 +11,7 @@ function normalizeTitle(value) {
     .replace(/[\r\n\t]+/g, " ")
     .replace(/\s+/g, " ")
     .trim();
-  return title || "제목 없는 작업";
+  return title || t("thread.untitled", "Untitled task");
 }
 
 function stringFingerprint(value) {

@@ -1,5 +1,6 @@
 "use strict";
 
+const { makeActivity } = require("./i18n");
 const { UUID_PATTERN, uuidV7TimestampMs } = require("./time");
 const REMOTE_REASONING_TURN_TOLERANCE_MS = 5_000;
 const REMOTE_RUNTIME_TERMINAL_CONFIRM_MS = 1_200;
@@ -24,16 +25,16 @@ const SERVICE_TIER_ALIASES = new Map([
 ]);
 
 const REMOTE_ACTIVITY_VERB_GROUPS = [
-  [/^(?:planning|designing|defining|formulating|outlining|proposing|prioritizing|scheduling|specifying|clarifying)$/, { kind: "think", label: "계획 중" }],
-  [/^(?:analyzing|assessing|evaluating|identifying|diagnosing|investigating|comparing|examining|tracing)$/, { kind: "think", label: "분석 중" }],
-  [/^(?:implementing|adding|updating|fixing|refactoring|inserting|appending|applying|replacing|patching|modifying|reordering)$/, { kind: "edit", label: "구현 중" }],
-  [/^(?:optimizing|improving|enhancing)$/, { kind: "edit", label: "개선 중" }],
-  [/^(?:adjusting|refining)$/, { kind: "edit", label: "조정 중" }],
-  [/^(?:testing|verifying|validating|checking|confirming|auditing|benchmarking)$/, { kind: "inspect", label: "검증 중" }],
-  [/^(?:searching|researching|browsing|locating)$/, { kind: "search", label: "검색 중" }],
-  [/^(?:inspecting|reviewing|exploring|reading|extracting)$/, { kind: "inspect", label: "확인 중" }],
-  [/^(?:running|executing|building|compiling|installing|deploying|packaging|training|simulating|staging)$/, { kind: "command", label: "실행 중" }],
-  [/^(?:summarizing|documenting|reporting|finalizing|preparing|drafting|explaining|completing)$/, { kind: "answer", label: "정리 중" }]
+  [/^(?:planning|designing|defining|formulating|outlining|proposing|prioritizing|scheduling|specifying|clarifying)$/, makeActivity("think", "activity.plan")],
+  [/^(?:analyzing|assessing|evaluating|identifying|diagnosing|investigating|comparing|examining|tracing)$/, makeActivity("think", "activity.analyze")],
+  [/^(?:implementing|adding|updating|fixing|refactoring|inserting|appending|applying|replacing|patching|modifying|reordering)$/, makeActivity("edit", "activity.implement")],
+  [/^(?:optimizing|improving|enhancing)$/, makeActivity("edit", "activity.improve")],
+  [/^(?:adjusting|refining)$/, makeActivity("edit", "activity.refine")],
+  [/^(?:testing|verifying|validating|checking|confirming|auditing|benchmarking)$/, makeActivity("inspect", "activity.verify")],
+  [/^(?:searching|researching|browsing|locating)$/, makeActivity("search", "activity.searching")],
+  [/^(?:inspecting|reviewing|exploring|reading|extracting)$/, makeActivity("inspect", "activity.review")],
+  [/^(?:running|executing|building|compiling|installing|deploying|packaging|training|simulating|staging)$/, makeActivity("command", "activity.execute")],
+  [/^(?:summarizing|documenting|reporting|finalizing|preparing|drafting|explaining|completing)$/, makeActivity("answer", "activity.wrapUp")]
 ];
 
 function normalizedReasoningEffort(value) {
@@ -61,21 +62,21 @@ function classifyRemoteReasoningSummary(value) {
     .replace(/^[-–—:;,.\s]+/, "")
     .replace(/\s+/g, " ")
     .trim();
-  if (!cleaned) return { kind: "think", label: "생각 중" };
+  if (!cleaned) return makeActivity("think", "activity.think");
   const verb = cleaned.toLowerCase().match(/^[a-z]+/)?.[0] ?? null;
   const verbGroup = verb
     ? REMOTE_ACTIVITY_VERB_GROUPS.find(([pattern]) => pattern.test(verb))
     : null;
   if (verbGroup) return { ...verbGroup[1] };
-  if (/(계획|설계|정의|구상|우선순위)/.test(cleaned)) return { kind: "think", label: "계획 중" };
-  if (/(분석|평가|진단|비교|원인 파악|조사)/.test(cleaned)) return { kind: "think", label: "분석 중" };
-  if (/(구현|수정|개선|추가|리팩터|적용)/.test(cleaned)) return { kind: "edit", label: "구현 중" };
-  if (/(검증|테스트|확인|감사|벤치마크)/.test(cleaned)) return { kind: "inspect", label: "검증 중" };
-  if (/(검색|자료 찾|리서치|탐색)/.test(cleaned)) return { kind: "search", label: "검색 중" };
-  if (/(검토|읽기|살펴|점검)/.test(cleaned)) return { kind: "inspect", label: "확인 중" };
-  if (/(실행|빌드|배포|설치|훈련|시뮬레이션)/.test(cleaned)) return { kind: "command", label: "실행 중" };
-  if (/(요약|정리|문서|보고|마무리)/.test(cleaned)) return { kind: "answer", label: "정리 중" };
-  return { kind: "think", label: "생각 중" };
+  if (/(계획|설계|정의|구상|우선순위)/.test(cleaned)) return makeActivity("think", "activity.plan");
+  if (/(분석|평가|진단|비교|원인 파악|조사)/.test(cleaned)) return makeActivity("think", "activity.analyze");
+  if (/(구현|수정|개선|추가|리팩터|적용)/.test(cleaned)) return makeActivity("edit", "activity.implement");
+  if (/(검증|테스트|확인|감사|벤치마크)/.test(cleaned)) return makeActivity("inspect", "activity.verify");
+  if (/(검색|자료 찾|리서치|탐색)/.test(cleaned)) return makeActivity("search", "activity.searching");
+  if (/(검토|읽기|살펴|점검)/.test(cleaned)) return makeActivity("inspect", "activity.review");
+  if (/(실행|빌드|배포|설치|훈련|시뮬레이션)/.test(cleaned)) return makeActivity("command", "activity.execute");
+  if (/(요약|정리|문서|보고|마무리)/.test(cleaned)) return makeActivity("answer", "activity.wrapUp");
+  return makeActivity("think", "activity.think");
 }
 
 function remoteReasoningActivityFromLogLine(line) {
@@ -120,7 +121,7 @@ function parseRemoteLogLine(line) {
       turnId: null,
       turnStartedAtMs: timestampMs,
       status: "working",
-      activity: { kind: "request", label: "요청 분석" }
+      activity: makeActivity("request", "activity.request")
     };
   }
 
@@ -592,7 +593,7 @@ function deriveRemoteStatus(thread, options) {
   const reasoningEffort = composerState.reasoningEffort;
   const serviceTier = composerState.serviceTier;
   const observedActivity = remoteWorkingActivity(thread, lifecycle, nowMs, activities)
-    ?? { kind: "command", label: "원격 작업" };
+    ?? makeActivity("command", "activity.remote");
 
   if (runtimeStatus.type === "active") {
     const flags = Array.isArray(runtimeStatus.activeFlags) ? runtimeStatus.activeFlags : [];
@@ -605,9 +606,9 @@ function deriveRemoteStatus(thread, options) {
       reasoningEffort,
       serviceTier,
       activity: waitingOnApproval
-        ? { kind: "request", label: "원격 승인 대기" }
+        ? makeActivity("request", "activity.remoteApproval")
         : waitingOnUserInput
-          ? { kind: "request", label: "원격 입력 대기" }
+          ? makeActivity("request", "activity.remoteInput")
           : observedActivity
     };
   }
@@ -618,7 +619,7 @@ function deriveRemoteStatus(thread, options) {
       endedAtMs: null,
       reasoningEffort,
       serviceTier,
-      activity: { kind: "error", label: "원격 오류" }
+      activity: makeActivity("error", "activity.remoteError")
     };
   }
 
@@ -660,10 +661,10 @@ function deriveRemoteStatus(thread, options) {
       reasoningEffort,
       serviceTier,
       activity: status === "stopped"
-        ? { kind: "stopped", label: "원격 작업 중단" }
+        ? makeActivity("stopped", "activity.remoteStopped")
         : status === "error"
-          ? { kind: "error", label: "원격 오류" }
-          : { kind: "complete", label: thread.hasUnreadTurn ? "원격 완료 확인" : "원격 작업 종료" }
+          ? makeActivity("error", "activity.remoteError")
+          : makeActivity("complete", thread.hasUnreadTurn ? "activity.remoteReview" : "activity.remoteDone")
     };
   }
   return {
@@ -672,10 +673,10 @@ function deriveRemoteStatus(thread, options) {
     endedAtMs: null,
     reasoningEffort,
     serviceTier,
-    activity: {
-      kind: thread.hasUnreadTurn ? "answer" : "idle",
-      label: thread.hasUnreadTurn ? "원격 확인 필요" : "원격 열기"
-    }
+    activity: makeActivity(
+      thread.hasUnreadTurn ? "answer" : "idle",
+      thread.hasUnreadTurn ? "activity.remoteReview" : "activity.remoteOpen"
+    )
   };
 }
 

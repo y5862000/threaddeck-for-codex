@@ -1,6 +1,6 @@
 # Contributing
 
-> [한국어 기여 안내](CONTRIBUTING.ko.md)
+> [Korean contribution guide](CONTRIBUTING.ko.md)
 
 Thanks for helping improve ThreadDeck. Small, focused pull requests are easiest to review and safest for a hardware workflow.
 

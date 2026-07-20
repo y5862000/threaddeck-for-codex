@@ -8,9 +8,9 @@ OUTPUT_DIR="$ROOT_DIR/com.yechan.threaddeck.sdPlugin/profiles"
 OUTPUT="$OUTPUT_DIR/threaddeck-neo.streamDeckProfile"
 
 mkdir -p "$OUTPUT_DIR"
-if [[ -e "$OUTPUT" ]]; then
-  unlink "$OUTPUT"
-fi
+for existing in "$OUTPUT_DIR"/*.streamDeckProfile(N); do
+  unlink "$existing"
+done
 
 (
   cd "$SOURCE_PARENT"

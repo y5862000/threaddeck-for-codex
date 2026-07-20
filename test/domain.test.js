@@ -103,10 +103,10 @@ test("configuration exposes a complete and internally consistent action contract
 
   assert.equal(Object.isFrozen(THREAD_REFRESH_ERROR_STATE), true);
   assert.deepEqual(THREAD_REFRESH_ERROR_STATE, {
-    title: "상태를 읽지 못함",
+    titleKey: "thread.stateUnavailable",
     status: "error",
     pinned: false,
-    activity: { kind: "error", label: "상태 확인" }
+    activity: { kind: "error", code: "activity.error" }
   });
   assert.throws(() => {
     THREAD_REFRESH_ERROR_STATE.status = "idle";
@@ -116,8 +116,8 @@ test("configuration exposes a complete and internally consistent action contract
 test("text helpers normalize Korean, English, markup, and empty titles", () => {
   assert.equal(normalizeTitle("[12] user:  안녕\n\t하세요 "), "안녕 하세요");
   assert.equal(normalizeTitle("[3] user: Hello <b>world</b>"), "Hello world");
-  assert.equal(normalizeTitle(""), "제목 없는 작업");
-  assert.equal(normalizeTitle(null), "제목 없는 작업");
+  assert.equal(normalizeTitle(""), "Untitled task");
+  assert.equal(normalizeTitle(null), "Untitled task");
 });
 
 test("title fingerprints preserve NFC and NFD variants", () => {
@@ -215,7 +215,7 @@ test("duration and timing labels handle known, long, and unknown times", () => {
   assert.equal(timingLabel({ status: "completed", startedAtMs: 1_000, endedAtMs: 3_000 }, 9_000), "00:02");
   assert.equal(timingLabel({ status: "working", startedAtMs: null }, 9_000), "--:--");
   assert.equal(timingLabel({ status: "completed", startedAtMs: 3_000, endedAtMs: 2_000 }, 9_000), "--:--");
-  assert.equal(timingLabel({ status: "idle", startedAtMs: null }, 9_000), "열기");
+  assert.equal(timingLabel({ status: "idle", startedAtMs: null }, 9_000), "Open");
 });
 
 test("goal records normalize local and app-server status and timestamp formats", () => {

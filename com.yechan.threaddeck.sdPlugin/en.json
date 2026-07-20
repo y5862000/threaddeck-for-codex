@@ -1,0 +1,112 @@
+{
+  "Name": "ThreadDeck for Codex",
+  "Description": "A bilingual Stream Deck Neo dashboard for monitoring, switching, and dictating into Codex Desktop tasks on macOS.",
+  "com.yechan.threaddeck.weekly": {
+    "Name": "Weekly Codex quota",
+    "Tooltip": "Shows remaining weekly Codex capacity as a ring. Press to refresh now."
+  },
+  "com.yechan.threaddeck.thread1": {
+    "Name": "Current Codex task",
+    "Tooltip": "Follows the task in Codex's active window. Tap to open it, or hold for 0.55 seconds, speak, and release to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread.top1": {
+    "Name": "Top Codex task 1",
+    "Tooltip": "Tap to open the first sorted Codex task. Hold for 0.55 seconds, speak, and release to dictate and submit a follow-up. This action is independent from Current Codex task."
+  },
+  "com.yechan.threaddeck.thread2": {
+    "Name": "Top Codex task 2",
+    "Tooltip": "Tap to open the second sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread3": {
+    "Name": "Top Codex task 3",
+    "Tooltip": "Tap to open the third sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread4": {
+    "Name": "Top Codex task 4",
+    "Tooltip": "Tap to open the fourth sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread5": {
+    "Name": "Top Codex task 5",
+    "Tooltip": "Tap to open the fifth sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread6": {
+    "Name": "Top Codex task 6",
+    "Tooltip": "Tap to open the sixth sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread7": {
+    "Name": "Top Codex task 7",
+    "Tooltip": "Tap to open the seventh sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.thread8": {
+    "Name": "Top Codex task 8",
+    "Tooltip": "Tap to open the eighth sorted Codex task, or hold to dictate and submit a follow-up."
+  },
+  "com.yechan.threaddeck.sidechat": {
+    "Name": "Codex Side Chat",
+    "Tooltip": "Opens Side Chat with Option+Command+S and verifies that the new chat owns focus before voice, send, Fast mode, or effort actions continue."
+  },
+  "com.yechan.threaddeck.newthread": {
+    "Name": "New Codex task",
+    "Tooltip": "Opens a new Codex task outside the selected project."
+  },
+  "com.yechan.threaddeck.voice": {
+    "Name": "Codex dictation",
+    "Tooltip": "Starts dictation in the current composer while held and pauses supported media. Release to leave a draft without submitting it."
+  },
+  "com.yechan.threaddeck.send": {
+    "Name": "Send to Codex",
+    "Tooltip": "Release quickly to send Return. Hold until the key turns blue, then release to send Command+Return."
+  },
+  "com.yechan.threaddeck.appswitch": {
+    "Name": "Switch app",
+    "Tooltip": "Switches to the next macOS app with Command+Tab."
+  },
+  "com.yechan.threaddeck.fastmode": {
+    "Name": "Codex Fast mode",
+    "Tooltip": "Toggles Fast mode for the current Codex task and shows only the verified state."
+  },
+  "com.yechan.threaddeck.reasoning": {
+    "Name": "Codex effort + Fast mode",
+    "Tooltip": "Tap repeatedly to move effort up and down with immediate visual feedback. Hold for 0.6 seconds to toggle Fast mode immediately."
+  },
+  "com.yechan.threaddeck.media.previous": {
+    "Name": "Previous track",
+    "Tooltip": "Moves to the previous media track."
+  },
+  "com.yechan.threaddeck.media.rewind": {
+    "Name": "Rewind media",
+    "Tooltip": "Rewinds the current media."
+  },
+  "com.yechan.threaddeck.media.playpause": {
+    "Name": "Play / pause media",
+    "Tooltip": "Plays or pauses the current media."
+  },
+  "com.yechan.threaddeck.media.forward": {
+    "Name": "Fast-forward media",
+    "Tooltip": "Fast-forwards the current media."
+  },
+  "com.yechan.threaddeck.media.mute": {
+    "Name": "Mute media",
+    "Tooltip": "Toggles system audio mute."
+  },
+  "com.yechan.threaddeck.media.volumedown": {
+    "Name": "Volume down",
+    "Tooltip": "Lowers system audio volume."
+  },
+  "com.yechan.threaddeck.media.volumeup": {
+    "Name": "Volume up",
+    "Tooltip": "Raises system audio volume."
+  },
+  "com.yechan.threaddeck.media.next": {
+    "Name": "Next track",
+    "Tooltip": "Moves to the next media track."
+  },
+  "com.yechan.threaddeck.page.previous": {
+    "Name": "Previous page",
+    "Tooltip": "Moves to the previous page in the ThreadDeck profile."
+  },
+  "com.yechan.threaddeck.page.next": {
+    "Name": "Next page",
+    "Tooltip": "Moves to the next page in the ThreadDeck profile."
+  }
+}

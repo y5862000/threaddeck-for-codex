@@ -3,6 +3,7 @@
 // Thread identity, recency, and elapsed-time helpers with no runtime state.
 
 const { goalElapsedMs } = require("./goal-state");
+const { t } = require("./i18n");
 
 const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
@@ -39,13 +40,13 @@ function timingLabel(thread, nowMs) {
   }
   if (!Number.isFinite(thread?.startedAtMs)) {
     if (["working", "completed", "stopped"].includes(thread?.status)) return "--:--";
-    return "열기";
+    return t("action.open", "Open");
   }
   const endMs = thread.status === "working" ? nowMs : thread.endedAtMs;
   if (!Number.isFinite(endMs) || endMs < thread.startedAtMs) return "--:--";
   const duration = formatDuration(endMs - thread.startedAtMs);
   if (["working", "completed", "stopped"].includes(thread.status)) return duration;
-  return "열기";
+  return t("action.open", "Open");
 }
 
 module.exports = {
