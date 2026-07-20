@@ -83,6 +83,11 @@ const {
 const { consumeLifecycleLines } = require("./local-lifecycle");
 const { ensureKeyBridgeExecutable } = require("./keybridge-permissions");
 const {
+  REASONING_EFFORT_ORDER,
+  loadReasoningOptionCatalog,
+  normalizeReasoningEfforts
+} = require("./reasoning-options");
+const {
   bridgeFailureStaysLocal,
   parsePermissionHealth,
   permissionIssueForHealth,
@@ -158,6 +163,12 @@ const REASONING_INPUT_SETTLE_MS = 1_100;
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, ".codex"));
+const CODEX_CONFIG = path.resolve(
+  process.env.THREADDECK_CODEX_CONFIG || path.join(CODEX_HOME, "config.toml")
+);
+const CODEX_MODELS_CACHE = path.resolve(
+  process.env.THREADDECK_CODEX_MODELS_CACHE || path.join(CODEX_HOME, "models_cache.json")
+);
 const STATE_DB = path.resolve(process.env.THREADDECK_STATE_DB || path.join(CODEX_HOME, "state_5.sqlite"));
 const GOALS_DB = path.resolve(process.env.THREADDECK_GOALS_DB || path.join(CODEX_HOME, "goals_1.sqlite"));
 const REMOTE_GOAL_CACHE_PATH = path.resolve(
@@ -368,10 +379,12 @@ const reasoningVisualOverrideByThreadId = new Map();
 const reasoningPendingCountByThreadId = new Map();
 const reasoningPendingCountByContext = new Map();
 const reasoningInputBatchByKey = new Map();
-// This is an ordering vocabulary, not an assumption that every Codex user or
-// model exposes all six levels. Actual traversal always uses the freshly
-// scanned per-task subset stored in `reasoningAvailableEffortsByThreadId`.
-const REASONING_EFFORT_ORDER = ["low", "medium", "high", "xhigh", "max", "ultra"];
+// Codex stores the user's globally visible effort list in config.toml. Load it
+// once at plugin startup (and again only after a Codex app-server restart),
+// then let an exact picker scan refine the subset for a particular task/model.
+let reasoningGlobalOptionCatalog = { model: null, efforts: [], source: "none" };
+let activeReasoningOptionCatalogRefresh = null;
+let reasoningCatalogAppServerStartedAtMs = null;
 const threadPressByContext = new Map();
 const currentVoicePressByContext = new Map();
 let socket = null;
@@ -3567,12 +3580,52 @@ function parseFastModeState(output) {
 }
 
 function normalizeReasoningEffortOptions(values) {
-  const observed = new Set(
-    (Array.isArray(values) ? values : String(values ?? "").split(","))
-      .map((value) => normalizedReasoningEffort(value))
-      .filter((value) => REASONING_EFFORT_ORDER.includes(value))
+  return normalizeReasoningEfforts(
+    Array.isArray(values) ? values : String(values ?? "").split(",")
   );
-  return REASONING_EFFORT_ORDER.filter((value) => observed.has(value));
+}
+
+function reasoningEffortOptionsForThread(threadId) {
+  const exact = threadId
+    ? reasoningAvailableEffortsByThreadId.get(threadId) ?? []
+    : [];
+  if (exact.length >= 2) return exact;
+  return reasoningGlobalOptionCatalog.efforts.length >= 2
+    ? reasoningGlobalOptionCatalog.efforts
+    : [];
+}
+
+function refreshReasoningOptionCatalog(options = {}) {
+  if (activeReasoningOptionCatalogRefresh && options.force !== true) {
+    return activeReasoningOptionCatalogRefresh;
+  }
+  const refresh = loadReasoningOptionCatalog(CODEX_CONFIG, CODEX_MODELS_CACHE)
+    .then((catalog) => {
+      const previous = reasoningGlobalOptionCatalog;
+      reasoningGlobalOptionCatalog = {
+        model: catalog?.model ?? null,
+        efforts: normalizeReasoningEffortOptions(catalog?.efforts),
+        source: catalog?.source ?? "none"
+      };
+      const changed = previous.model !== reasoningGlobalOptionCatalog.model
+        || previous.source !== reasoningGlobalOptionCatalog.source
+        || previous.efforts.join(",") !== reasoningGlobalOptionCatalog.efforts.join(",");
+      if (changed) {
+        // A Codex/model restart can change which levels are exposed. Exact
+        // task scans from the old process are no longer authoritative.
+        reasoningAvailableEffortsByThreadId.clear();
+        reasoningDirectionByThreadId.clear();
+      }
+      return reasoningGlobalOptionCatalog;
+    })
+    .catch(() => reasoningGlobalOptionCatalog)
+    .finally(() => {
+      if (activeReasoningOptionCatalogRefresh === refresh) {
+        activeReasoningOptionCatalogRefresh = null;
+      }
+    });
+  activeReasoningOptionCatalogRefresh = refresh;
+  return refresh;
 }
 
 function parseReasoningEffortOptions(output) {
@@ -3618,14 +3671,14 @@ function nextReasoningDirection(threadId, state = fastModeState) {
   const effort = state?.threadId === threadId
     ? normalizedReasoningEffort(state?.reasoningEffort)
     : null;
-  const available = reasoningAvailableEffortsByThreadId.get(threadId) ?? [];
+  const available = reasoningEffortOptionsForThread(threadId);
   if (available.length >= 2 && effort === available[0]) return "up";
   if (available.length >= 2 && effort === available.at(-1)) return "down";
   const cached = reasoningDirectionByThreadId.get(threadId);
   if (cached === "up" || cached === "down") return cached;
-  // Before the first exact menu scan, only Ultra is a trustworthy universal
-  // upper endpoint. The first press itself is applied natively from the real
-  // list and then seeds the per-task cache.
+  // If neither Codex's global setting nor an exact task scan is available,
+  // only Ultra is a trustworthy universal upper endpoint. The first native
+  // transaction will scan the real picker and seed the per-task cache.
   return effort === "ultra" ? "down" : "up";
 }
 
@@ -3633,7 +3686,7 @@ function optimisticReasoningStep(
   threadId,
   direction,
   state = fastModeState,
-  availableEfforts = reasoningAvailableEffortsByThreadId.get(threadId)
+  availableEfforts = reasoningEffortOptionsForThread(threadId)
 ) {
   if (!threadId || state?.threadId !== threadId) return null;
   const current = normalizedReasoningEffort(state?.reasoningEffort);
@@ -4570,6 +4623,11 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
     sideChatCloseLogOffsets.clear();
     sideChatDiscoveryState = createSideChatDiscoveryState();
     sideChatDiscoveryLogCursors.clear();
+  }
+  if (Number.isFinite(startedAtMs)
+      && startedAtMs !== reasoningCatalogAppServerStartedAtMs) {
+    reasoningCatalogAppServerStartedAtMs = startedAtMs;
+    void refreshReasoningOptionCatalog({ force: true });
   }
   appServerSessionCache = { checkedAtMs: nowMs, startedAtMs };
   return startedAtMs;
@@ -7064,6 +7122,10 @@ function registerPlugin() {
     // Prime the only synchronous permission check before the first hardware
     // press. This keeps first-use remote switching and push-to-talk responsive.
     primeAccessibilityTrust();
+    // Codex exposes the user's visible effort levels in its read-only desktop
+    // configuration and model cache. Prime them before the first Effort tap so
+    // every hardware press can paint its next level immediately.
+    void refreshReasoningOptionCatalog();
     // CodexBar takes several seconds on a cold request. Prime the cache while
     // the current Stream Deck page is rendering so the usage page can appear
     // with a value immediately.
