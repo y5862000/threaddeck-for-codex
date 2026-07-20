@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+- Discover every live Side Chat from Codex's exact `thread/fork` → `thread/inject_items` identity pair as well as prompt history. Multiple Side Chats under one parent task now keep separate keys, and `thread/unsubscribe` removes only the Side Chat that actually closed.
+- Split queued-follow-up counts by the enclosing main-task or Side Chat pane instead of assigning a window-wide total to the focused task. A dequeue transition now decrements only its owning task key.
+- Added a provisional Side Chat composer lease for the dedicated microphone. Before Codex publishes the new ephemeral task UUID, ThreadDeck verifies the right-side composer from its Accessibility control pair and window geometry, starts dictation there, and hands that exact recording session to the real task identity when it appears. Identity-sensitive Send, Fast, and reasoning actions continue to wait rather than fall through to the parent task.
+- Coalesced rapid Reasoning-key taps into one final Codex update. Every tap still repaints the hardware track immediately, but ThreadDeck now waits for a 1.1-second input pause and directly selects only the last stopped Effort instead of replaying every intermediate menu transaction.
+- Fixed a newly placed Previous/Next page key with empty settings jumping in the wrong direction. ThreadDeck now identifies the active Neo page from the actions currently visible on that exact device and fails closed when the page is ambiguous.
+
 ## 0.4.0-beta — 2026-07-21
 
 - Made English the default ThreadDeck language and added automatic English/Korean runtime selection from Stream Deck's `application.language`. One plugin now localizes both the Stream Deck action list (`en.json`/`ko.json`) and every renderer-owned status, activity, voice, permission, and feedback label.

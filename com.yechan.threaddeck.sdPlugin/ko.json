@@ -67,7 +67,7 @@
   },
   "com.yechan.threaddeck.reasoning": {
     "Name": "Codex 추론 강도 + Fast mode",
-    "Tooltip": "짧게 놓으면 트랙을 즉시 다음 추론 단계로 움직이고 실제 Effort 메뉴 적용을 이어서 검증합니다. 0.6초 이상 누르면 버튼을 놓기 전에 즉시 Fast mode 전환을 시작합니다. 작은 번개는 현재 고속·일반 상태를 표시합니다."
+    "Tooltip": "짧게 여러 번 누르면 화면은 즉시 단계를 이동하고, 멈춘 뒤 마지막 Effort만 한 번 적용합니다. 0.6초 이상 누르면 버튼을 놓기 전에 Fast mode 전환을 시작합니다. 작은 번개는 확인된 고속 상태를 표시합니다."
   },
   "com.yechan.threaddeck.media.previous": {
     "Name": "미디어 이전 트랙",

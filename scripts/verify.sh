@@ -49,6 +49,7 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" fast-mode-selftest
 "$BRIDGE" thread-fingerprint-selftest
 "$BRIDGE" focused-thread-geometry-selftest
+"$BRIDGE" side-chat-composer-selftest
 "$BRIDGE" command-palette-selftest
 "$BRIDGE" media-bundle-selftest
 node - "$ROOT_DIR/native/keybridge.m" <<'NODE'
@@ -107,6 +108,14 @@ for (const signature of [
 
 if (source.includes("open_accessibility_popup_with_down")) {
   throw new Error("Reasoning control must not infer an adjacent popup button from geometry");
+}
+
+const sideChatFocusBody = functionBodyFromSignature(
+  "static bool focus_codex_side_chat_composer_if_visible("
+);
+if (!sideChatFocusBody.includes("codex_composer_controls_target_side_chat")
+    || !sideChatFocusBody.includes("controls.window_size.width * 0.58")) {
+  throw new Error("Provisional Side Chat focus must stay inside the verified right-side composer");
 }
 
 const reasoningStepBody = functionBodyFromSignature(

@@ -39,7 +39,8 @@ const {
 } = require("../src/goal-state");
 const {
   parseCodexQueueWindows,
-  queueCountForWindow
+  queueCountForWindow,
+  queueCountsByThreadForWindow
 } = require("../src/queue-state");
 const { selectTopThreadRows } = require("../src/thread-selection");
 const {
@@ -65,6 +66,10 @@ const {
   THREAD_REFRESH_ERROR_STATE,
   THREAD_SLOT_BY_ACTION
 } = require("../src/config");
+const {
+  inferThreadDeckPage,
+  resolveProfilePageTarget
+} = require("../src/profile-navigation");
 
 test("configuration exposes a complete and internally consistent action contract", () => {
   const actionValues = Object.values(ACTIONS);
@@ -111,6 +116,49 @@ test("configuration exposes a complete and internally consistent action contract
   assert.throws(() => {
     THREAD_REFRESH_ERROR_STATE.status = "idle";
   }, TypeError);
+});
+
+test("profile navigation infers the visible page when a newly placed key has no settings", () => {
+  assert.equal(inferThreadDeckPage([ACTIONS.weekly, ACTIONS.reasoning]), 0);
+  assert.equal(inferThreadDeckPage([ACTIONS.topThread1, ACTIONS.thread4]), 1);
+  assert.equal(inferThreadDeckPage([ACTIONS.mediaPlayPause, ACTIONS.mediaNext]), 2);
+
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      {},
+      [ACTIONS.topThread1, ACTIONS.thread4, ACTIONS.pagePrevious]
+    ),
+    { currentPage: 1, pageCount: 3, page: 0, source: "visible-actions" }
+  );
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pageNext,
+      {},
+      [ACTIONS.topThread1, ACTIONS.thread4, ACTIONS.pageNext]
+    ),
+    { currentPage: 1, pageCount: 3, page: 2, source: "visible-actions" }
+  );
+});
+
+test("profile navigation prefers valid settings and fails closed on an ambiguous page", () => {
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      { currentPage: "2", pageCount: "3" },
+      [ACTIONS.weekly]
+    ),
+    { currentPage: 2, pageCount: 3, page: 1, source: "settings" }
+  );
+  assert.equal(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      {},
+      [ACTIONS.weekly, ACTIONS.mediaPlayPause]
+    ),
+    null
+  );
+  assert.equal(resolveProfilePageTarget(ACTIONS.pagePrevious, {}, []), null);
 });
 
 test("text helpers normalize Korean, English, markup, and empty titles", () => {
@@ -636,6 +684,58 @@ test("queue parsing counts localized and English button fingerprints", () => {
   assert.equal(queueCountForWindow(windows[0]), 4);
   assert.equal(windows[1].focused, false);
   assert.equal(queueCountForWindow(windows[1]), 3);
+});
+
+test("queue row geometry keeps normal-task and Side Chat counts separate", () => {
+  const mainTitle = "스트림덱";
+  const sideChatTitle = "이 프로젝트 소개해";
+  const deleteFingerprint = stringFingerprint("Delete queued message");
+  const actionFingerprint = stringFingerprint("Queued message actions");
+  const output = [
+    "window\t0\t1",
+    `header\t${stringFingerprint(mainTitle)}\t350\t50\t90\t24`,
+    `header\t${stringFingerprint(sideChatTitle)}\t1280\t50\t180\t24`,
+    // Chromium can report both leaf controls at the main pane's x position.
+    // The bridge emits the enclosing row geometry instead.
+    `button\t${deleteFingerprint}\t1\t377\t850\t710\t24`,
+    `button\t${actionFingerprint}\t1\t377\t850\t710\t24`,
+    `button\t${deleteFingerprint}\t1\t1205\t850\t699\t24`,
+    `button\t${actionFingerprint}\t1\t1205\t850\t699\t24`,
+    "end"
+  ].join("\n");
+  const [window] = parseCodexQueueWindows(output);
+  const counts = queueCountsByThreadForWindow(window, [
+    { id: "main", title: mainTitle },
+    { id: "side", title: sideChatTitle, ephemeral: true }
+  ]);
+
+  assert.equal(queueCountForWindow(window), 2);
+  assert.equal(counts.get("main"), 1);
+  assert.equal(counts.get("side"), 1);
+});
+
+test("queue geometry retains multiple rows inside the same conversation pane", () => {
+  const mainTitle = "Main task";
+  const sideChatTitle = "Side Chat";
+  const deleteFingerprint = stringFingerprint("Delete queued message");
+  const output = [
+    "window\t0\t1",
+    `header\t${stringFingerprint(mainTitle)}\t300\t48\t100\t24`,
+    `header\t${stringFingerprint(sideChatTitle)}\t1200\t48\t100\t24`,
+    `button\t${deleteFingerprint}\t1\t360\t790\t720\t24`,
+    `button\t${deleteFingerprint}\t1\t360\t830\t720\t24`,
+    `button\t${deleteFingerprint}\t1\t1210\t830\t700\t24`,
+    "end"
+  ].join("\n");
+  const [window] = parseCodexQueueWindows(output);
+  const counts = queueCountsByThreadForWindow(window, [
+    { id: "main", title: mainTitle },
+    { id: "side", title: sideChatTitle, ephemeral: true }
+  ]);
+
+  assert.equal(queueCountForWindow(window), 3);
+  assert.equal(counts.get("main"), 2);
+  assert.equal(counts.get("side"), 1);
 });
 
 test("thread selection keeps local duplicates and only pinned remote rows", () => {

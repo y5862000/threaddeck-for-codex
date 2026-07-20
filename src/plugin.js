@@ -64,7 +64,11 @@ const {
 } = require("./remote-state");
 const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
 const { isInternalThreadRecord } = require("./thread-privacy");
-const { parseCodexQueueWindows, queueCountForWindow } = require("./queue-state");
+const {
+  parseCodexQueueWindows,
+  queueCountForWindow,
+  queueCountsByThreadForWindow
+} = require("./queue-state");
 const {
   canContinueLogCursor,
   consumeLogBytes,
@@ -83,6 +87,12 @@ const {
   permissionIssueForHealth,
   permissionIssueLabel
 } = require("./permission-health");
+const { resolveProfilePageTarget } = require("./profile-navigation");
+const {
+  applySideChatLogLine,
+  createSideChatDiscoveryState,
+  openDiscoveredSideChats
+} = require("./side-chat-state");
 const {
   ACTIONS,
   APP_SERVER_SESSION_CACHE_MS,
@@ -90,7 +100,6 @@ const {
   COMPLETION_OBSERVATION_OVERLAP_MS,
   COMPLETION_STARTUP_GRACE_MS,
   CURRENT_THREAD_SLOT,
-  DEFAULT_PROFILE_PAGE_COUNT,
   DESKTOP_LOG_PATH_CACHE_MS,
   DISTRIBUTED_PROFILE_NAME,
   FAST_MODE_LONG_PRESS_MS,
@@ -101,6 +110,7 @@ const {
   PAGE_DIRECTION_BY_ACTION,
   QUEUE_ZERO_CONFIRM_MS,
   SEND_LONG_PRESS_MS,
+  SIDE_CHAT_COMPOSER_READY_DELAYS_MS,
   SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES,
   SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS,
   SIDE_CHAT_TARGET_LOG_TAIL_BYTES,
@@ -143,6 +153,7 @@ const OPERATION_FAILURE_WINDOW_MS = 30_000;
 const OPERATION_FAILURE_THRESHOLD = 2;
 const CURRENT_THREAD_SYNC_INTERVAL_MS = 750;
 const CURRENT_THREAD_SYNC_CACHE_MS = 250;
+const REASONING_INPUT_SETTLE_MS = 1_100;
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, ".codex"));
@@ -320,6 +331,7 @@ const runtimeTraceEnabled = !snapshotMode
   && !gestureAnimationDirectory;
 
 const contexts = new Map();
+const contextDeviceIds = new Map();
 const contextImages = new Map();
 const contextSentImages = new Map();
 const contextFeedback = new Map();
@@ -353,6 +365,7 @@ const reasoningDirectionByThreadId = new Map();
 const reasoningVisualOverrideByThreadId = new Map();
 const reasoningPendingCountByThreadId = new Map();
 const reasoningPendingCountByContext = new Map();
+const reasoningInputBatchByKey = new Map();
 const REASONING_EFFORT_STEPS = ["low", "medium", "high", "xhigh", "max", "ultra"];
 const threadPressByContext = new Map();
 const currentVoicePressByContext = new Map();
@@ -455,6 +468,7 @@ let runtimeTraceTail = Promise.resolve();
 let pinnedIdsCache = [];
 let remoteThreadRowsCache = [];
 let sideChatRowsCache = [];
+let sideChatDiscoveryState = createSideChatDiscoveryState();
 
 function runtimeTrace(event, fields = {}) {
   if (!runtimeTraceEnabled) return;
@@ -487,6 +501,7 @@ const sideChatParentById = new Map();
 const sideChatLifecycleCache = new Map();
 const closedSideChatAtMs = new Map();
 const sideChatCloseLogOffsets = new Map();
+const sideChatDiscoveryLogCursors = new Map();
 const remoteLifecycleCache = new Map();
 const remoteLifecycleLogCursors = new Map();
 const remoteComposerStateByThreadId = new Map();
@@ -2036,12 +2051,23 @@ function claimVoiceSession(context) {
   return sessionId;
 }
 
-function bindPendingVoiceContextsToThread(threadId, nowMs = Date.now()) {
+function bindPendingVoiceContextsToThread(
+  threadId,
+  nowMs = Date.now(),
+  provisionalSideChatRequestedAtMs = null
+) {
   if (!threadId) return;
   lastOpenedThreadId = threadId;
   lastOpenedThreadAtMs = nowMs;
-  for (const context of voiceTranscriptionByContext.keys()) {
+  for (const [context, transcription] of voiceTranscriptionByContext) {
     if (contexts.get(context) !== ACTIONS.voice || voiceTargetThreadByContext.has(context)) continue;
+    if (Number.isFinite(provisionalSideChatRequestedAtMs)
+        && transcription?.provisionalSideChatRequestedAtMs
+          !== provisionalSideChatRequestedAtMs) continue;
+    if (transcription) {
+      transcription.targetThreadId = threadId;
+      delete transcription.provisionalSideChatRequestedAtMs;
+    }
     voiceTargetThreadByContext.set(context, threadId);
   }
 }
@@ -2102,7 +2128,7 @@ async function resolvePendingSideChatTarget(sideChats, nowMs = Date.now()) {
       targetThreadId
     };
     if (parentId) sideChatParentById.set(targetThreadId, parentId);
-    bindPendingVoiceContextsToThread(targetThreadId, nowMs);
+    bindPendingVoiceContextsToThread(targetThreadId, nowMs, requestedAtMs);
     return targetThreadId;
   }
   if (nowMs - requestedAtMs >= SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS) {
@@ -2117,6 +2143,26 @@ function scheduleSideChatTargetRefreshes(requestedAtMs) {
       void refreshThreads();
     }, delayMs);
   }
+}
+
+async function waitForPendingSideChatComposerReady(requestedAtMs, options = {}) {
+  const signal = options.signal ?? null;
+  const sleep = options.sleep ?? sleepWithSignal;
+  const focusComposer = options.focusComposer
+    ?? (() => runKeyBridgeAwaited("codex-focus-side-chat-composer", null, { quiet: true }));
+
+  for (const delayMs of SIDE_CHAT_COMPOSER_READY_DELAYS_MS) {
+    if (delayMs > 0) await sleep(delayMs, signal);
+    throwIfAborted(signal);
+    if (pendingSideChatTarget?.requestedAtMs !== requestedAtMs) return null;
+    if (await focusComposer()) {
+      return {
+        requestedAtMs,
+        targetThreadId: pendingSideChatTarget?.targetThreadId ?? null
+      };
+    }
+  }
+  return null;
 }
 
 async function waitForPendingSideChatFocus(requestedAtMs, options = {}) {
@@ -2932,10 +2978,66 @@ function beginCurrentVoicePress(context, options = {}) {
   const synchronizeCurrent = options.synchronizeCurrent ?? synchronizeCurrentCodexThread;
   const focusComposer = options.focusComposer
     ?? (() => runKeyBridgeAwaited("codex-focus-composer", context, { quiet: true }));
+  const focusSideChatComposer = options.focusSideChatComposer
+    ?? (() => runKeyBridgeAwaited(
+      "codex-focus-side-chat-composer",
+      context,
+      { quiet: true }
+    ));
+  const candidateSideChatCreation = options.sideChatCreation === undefined
+    ? activeComposerCreation
+    : options.sideChatCreation;
+  const sideChatCreation = candidateSideChatCreation?.kind === "side-chat"
+      && candidateSideChatCreation?.composerReadyPromise
+    ? candidateSideChatCreation
+    : null;
   const beginVoice = options.beginVoice ?? beginVoiceHoldSync;
   state.promise = (async () => {
     const pendingFastModeUpdate = options.fastModeUpdate ?? activeFastModeUpdate;
     if (pendingFastModeUpdate) await pendingFastModeUpdate.catch(() => false);
+
+    // A brand-new Side Chat does not have a conversation UUID immediately.
+    // The dedicated microphone can still target its verified right-side
+    // composer without guessing an existing task. The provisional timestamp
+    // is handed to the real UUID as soon as Codex publishes it.
+    if (sideChatCreation) {
+      const composerReady = await sideChatCreation.composerReadyPromise;
+      if (!composerReady) {
+        if (state.held && currentVoicePressByContext.get(context) === state) {
+          setVoiceVisualState(context, "error");
+        }
+        return false;
+      }
+      if (!state.held
+          || currentVoicePressByContext.get(context) !== state
+          || contexts.get(context) !== ACTIONS.voice) return false;
+      const pending = pendingSideChatTarget?.requestedAtMs === composerReady.requestedAtMs
+        ? pendingSideChatTarget
+        : null;
+      const targetThreadId = sideChatCreation.targetThreadId
+        ?? pending?.targetThreadId
+        ?? "";
+      let composerFocused = await focusSideChatComposer();
+      const focusedThread = sideChatCreation.focusedThread;
+      if (!composerFocused && targetThreadId && focusedThread?.id === targetThreadId) {
+        composerFocused = await focusComposer()
+          && await threadIsFocused(focusedThread, { probe: options.focusProbe });
+      }
+      if (!composerFocused) {
+        setVoiceVisualState(context, "error");
+        return false;
+      }
+      if (!state.held || currentVoicePressByContext.get(context) !== state) return false;
+      state.voiceStarted = beginVoice(context, {
+        targetThreadId,
+        provisionalSideChatRequestedAtMs: targetThreadId
+          ? null
+          : composerReady.requestedAtMs,
+        composerAlreadyFocused: true
+      });
+      return state.voiceStarted;
+    }
+
     const pendingNavigation = options.navigationPromise ?? currentNavigationPromise();
     if (pendingNavigation) {
       try {
@@ -3020,7 +3122,9 @@ function beginVoiceHoldSync(context, options = {}) {
     bridge("codex-focus-composer", null, { quiet: true });
   }
   let baseline = stateReader();
-  if (!baseline && options.composerAlreadyFocused) {
+  if (!baseline
+      && options.composerAlreadyFocused
+      && !Number.isFinite(options.provisionalSideChatRequestedAtMs)) {
     // The prepared focus can become stale if Codex replaces the composer DOM
     // during the final navigation frame. Retry only in that exceptional case.
     bridge("codex-focus-composer", null, { quiet: true });
@@ -3046,6 +3150,10 @@ function beginVoiceHoldSync(context, options = {}) {
     releasedAtMs: null,
     autoSubmit: Boolean(options.autoSubmit),
     targetThreadId: targetThreadId ?? null,
+    provisionalSideChatRequestedAtMs:
+      Number.isFinite(options.provisionalSideChatRequestedAtMs)
+        ? options.provisionalSideChatRequestedAtMs
+        : null,
     sessionId
   });
   if (voiceHeldContexts.size === 0) {
@@ -3187,6 +3295,7 @@ function releaseVoiceKeysSync(rawOptions = {}) {
   fastModePressStartedAt.clear();
   fastModeLongPressArmedContexts.clear();
   fastModeLongPressUpdates.clear();
+  cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningPendingCountByThreadId.clear();
@@ -3854,8 +3963,13 @@ function toggleFastMode(context, options = {}) {
   return update;
 }
 
-function performReasoningEffortStep(context, options = {}) {
-  const productionNativeAction = !options.stepEffort;
+function performReasoningEffortChange(context, options = {}) {
+  let requestedEffort = normalizedReasoningEffort(options.targetEffort);
+  let requestedTargetDirection = options.targetDirection;
+  const productionNativeAction = !options.stepEffort && !options.setEffort;
+  const bridgeCapability = requestedEffort || options.coalesced
+    ? "reasoning-effort-set"
+    : "reasoning-effort-step";
   const synchronizeCurrent = options.synchronizeCurrent
     ?? (productionNativeAction
       ? synchronizeCurrentCodexThread
@@ -3870,7 +3984,7 @@ function performReasoningEffortStep(context, options = {}) {
   const initialDirection = options.direction ?? nextReasoningDirection(initialThreadId);
   const update = (async () => {
     if (productionNativeAction
-        && !ensureCommandPermissions("reasoning-effort-step", context)) return false;
+        && !ensureCommandPermissions(bridgeCapability, context)) return false;
     reasoningBusyContexts.add(context);
     renderFastModeContexts();
     try {
@@ -3897,18 +4011,42 @@ function performReasoningEffortStep(context, options = {}) {
       const direction = options.direction ?? (threadId === initialThreadId
         ? initialDirection
         : nextReasoningDirection(threadId));
+      if (!requestedEffort && options.coalesced) {
+        const currentEffort = fastModeState?.threadId === threadId
+          ? normalizedReasoningEffort(fastModeState.reasoningEffort)
+          : normalizedReasoningEffort(thread?.nextReasoningEffort)
+            ?? normalizedReasoningEffort(thread?.reasoningEffort);
+        const planned = optimisticReasoningSequence(
+          threadId,
+          direction,
+          { threadId, reasoningEffort: currentEffort },
+          Math.max(1, options.tapCount ?? 1)
+        );
+        requestedEffort = planned?.effort ?? null;
+        requestedTargetDirection = planned?.direction ?? requestedTargetDirection;
+      }
       const stepEffort = options.stepEffort
         ?? ((stepDirection) => execFileAsync(
           KEY_BRIDGE,
           ["reasoning-effort-step", stepDirection],
           { timeout: 6000, maxBuffer: 4096 }
         ));
-      const result = await stepEffort(direction);
+      const setEffort = options.setEffort
+        ?? ((targetEffort) => execFileAsync(
+          KEY_BRIDGE,
+          ["reasoning-effort-set", targetEffort],
+          { timeout: 6000, maxBuffer: 4096 }
+        ));
+      const result = requestedEffort
+        ? await setEffort(requestedEffort)
+        : await stepEffort(direction);
       const confirmed = parseReasoningStepState(result?.stdout ?? result ?? "");
+      const confirmedEffort = normalizedReasoningEffort(confirmed?.reasoningEffort);
       if (primaryThreadId !== threadId
           || confirmed?.verified !== true
-          || confirmed?.changed !== true
-          || !normalizedReasoningEffort(confirmed.reasoningEffort)) {
+          || (!requestedEffort && confirmed?.changed !== true)
+          || !confirmedEffort
+          || (requestedEffort && confirmedEffort !== requestedEffort)) {
         throw new Error("Codex reasoning effort change was not confirmed");
       }
 
@@ -3916,7 +4054,7 @@ function performReasoningEffortStep(context, options = {}) {
       fastModeState = {
         threadId,
         ...merged,
-        reasoningEffort: confirmed.reasoningEffort,
+        reasoningEffort: confirmedEffort,
         composerFocused: confirmed.composerFocused,
         failed: false
       };
@@ -3924,7 +4062,7 @@ function performReasoningEffortStep(context, options = {}) {
         ? "down"
         : confirmed.atMinimum === true
           ? "up"
-          : confirmed.direction ?? direction;
+          : requestedTargetDirection ?? confirmed.direction ?? direction;
       reasoningDirectionByThreadId.set(threadId, nextDirection);
       applyFocusedComposerState(thread, fastModeState);
 
@@ -3936,18 +4074,18 @@ function performReasoningEffortStep(context, options = {}) {
       if (confirmed.composerFocused !== true && focusComposer) {
         fastModeState = { ...fastModeState, composerFocused: true };
       }
-      noteBridgeSuccess("reasoning-effort-step");
+      noteBridgeSuccess(bridgeCapability);
       clearFeedback(context);
       return true;
     } catch (error) {
       if (focusComposer) await focusComposer();
       const permissionFailure = noteBridgeFailure(
-        "reasoning-effort-step",
+        bridgeCapability,
         error,
         context
       );
       if (!permissionFailure) showFeedback(context, "error", "변경 실패", 1600);
-      console.error(`Could not change Codex reasoning effort: ${error?.message ?? "unknown error"}`);
+      console.error(`Could not set Codex reasoning effort: ${error?.message ?? "unknown error"}`);
       return false;
     }
   })();
@@ -3959,12 +4097,43 @@ function incrementReasoningPending(map, key) {
   map.set(key, (map.get(key) ?? 0) + 1);
 }
 
-function decrementReasoningPending(map, key) {
-  if (!key) return 0;
-  const remaining = Math.max(0, (map.get(key) ?? 0) - 1);
-  if (remaining > 0) map.set(key, remaining);
-  else map.delete(key);
-  return remaining;
+function optimisticReasoningSequence(threadId, direction, state, count = 1) {
+  let currentState = state;
+  let currentDirection = direction;
+  let result = null;
+  for (let index = 0; index < count; index += 1) {
+    result = optimisticReasoningStep(threadId, currentDirection, currentState);
+    if (!result) return null;
+    currentDirection = result.direction;
+    currentState = {
+      ...currentState,
+      threadId,
+      reasoningEffort: result.effort
+    };
+  }
+  return result;
+}
+
+function reasoningInputBatchKey(context, threadId) {
+  return threadId ? `thread:${threadId}` : `context:${context}`;
+}
+
+function resetReasoningInputSettleTimer(batch, delayMs) {
+  if (batch.timer) clearTimeout(batch.timer);
+  batch.timer = setTimeout(() => {
+    batch.timer = null;
+    batch.release();
+  }, Math.max(0, delayMs));
+}
+
+function cancelReasoningInputBatches() {
+  for (const batch of reasoningInputBatchByKey.values()) {
+    batch.cancelled = true;
+    if (batch.timer) clearTimeout(batch.timer);
+    batch.timer = null;
+    batch.release();
+  }
+  reasoningInputBatchByKey.clear();
 }
 
 function stepReasoningEffort(context, options = {}) {
@@ -3978,17 +4147,17 @@ function stepReasoningEffort(context, options = {}) {
   const direction = options.direction
     ?? visual?.direction
     ?? nextReasoningDirection(queuedThreadId);
-  // Paint every tap immediately from the last requested position. Native AX
-  // transactions remain serialized behind `activeFastModeUpdate`, so rapid
-  // presses can safely build a multi-step request without racing the Codex
-  // model picker or sending focus to a different composer control.
+  let optimistic = null;
+  // Paint every tap immediately from the last requested position. The native
+  // Codex picker is debounced separately, so a burst moves the hardware track
+  // on every press but selects only the final stopped effort once.
   if (queuedThreadId) {
     const baseState = {
       ...fastModeState,
       threadId: queuedThreadId,
       reasoningEffort: visual?.effort ?? fastModeState.reasoningEffort
     };
-    const optimistic = optimisticReasoningStep(queuedThreadId, direction, baseState);
+    optimistic = optimisticReasoningStep(queuedThreadId, direction, baseState);
     if (optimistic) {
       reasoningVisualOverrideByThreadId.set(queuedThreadId, optimistic);
       reasoningDirectionByThreadId.set(queuedThreadId, optimistic.direction);
@@ -3999,40 +4168,126 @@ function stepReasoningEffort(context, options = {}) {
   reasoningBusyContexts.add(context);
   renderFastModeContexts();
 
+  const batchKey = reasoningInputBatchKey(context, queuedThreadId);
+  const existingBatch = reasoningInputBatchByKey.get(batchKey);
+  if (existingBatch && !existingBatch.dispatched) {
+    existingBatch.tapCount += 1;
+    existingBatch.contexts.add(context);
+    existingBatch.options = { ...existingBatch.options, ...options };
+    existingBatch.targetEffort = optimistic?.effort ?? existingBatch.targetEffort;
+    existingBatch.targetDirection = optimistic?.direction
+      ?? existingBatch.targetDirection;
+    resetReasoningInputSettleTimer(
+      existingBatch,
+      options.settleMs ?? REASONING_INPUT_SETTLE_MS
+    );
+    return existingBatch.promise;
+  }
+
   const blocker = activeFastModeUpdate;
+  let release;
+  const settled = new Promise((resolve) => {
+    release = resolve;
+  });
+  const batch = {
+    key: batchKey,
+    context,
+    contexts: new Set([
+      ...(existingBatch?.contexts ?? []),
+      context
+    ]),
+    queuedThreadId,
+    startingDirection: direction,
+    targetDirection: optimistic?.direction ?? direction,
+    targetEffort: optimistic?.effort ?? null,
+    tapCount: 1,
+    options: { ...options, navigationPromise: pendingNavigation },
+    timer: null,
+    cancelled: false,
+    dispatched: false,
+    release,
+    promise: null
+  };
   let update;
   update = Promise.resolve(blocker)
     .catch(() => false)
-    .then(() => performReasoningEffortStep(context, {
-      ...options,
-      queuedThreadId,
-      direction
-    }))
+    .then(() => settled)
+    .then(() => {
+      batch.dispatched = true;
+      return batch.cancelled
+        ? false
+        : performReasoningEffortChange(context, {
+          ...batch.options,
+          queuedThreadId: batch.queuedThreadId,
+          direction: batch.startingDirection,
+          targetDirection: batch.targetDirection,
+          targetEffort: batch.targetEffort,
+          tapCount: batch.tapCount,
+          coalesced: true
+        });
+    })
     .finally(() => {
-      const threadRemaining = decrementReasoningPending(
-        reasoningPendingCountByThreadId,
-        queuedThreadId
-      );
-      const contextRemaining = decrementReasoningPending(
-        reasoningPendingCountByContext,
-        context
-      );
-      if (threadRemaining === 0) reasoningVisualOverrideByThreadId.delete(queuedThreadId);
-      if (contextRemaining === 0) reasoningBusyContexts.delete(context);
+      if (batch.timer) clearTimeout(batch.timer);
+      const isLatestBatch = reasoningInputBatchByKey.get(batch.key) === batch;
+      if (isLatestBatch) {
+        reasoningInputBatchByKey.delete(batch.key);
+        if (batch.queuedThreadId) {
+          reasoningPendingCountByThreadId.delete(batch.queuedThreadId);
+          reasoningVisualOverrideByThreadId.delete(batch.queuedThreadId);
+        }
+        for (const batchContext of batch.contexts) {
+          reasoningPendingCountByContext.delete(batchContext);
+          reasoningBusyContexts.delete(batchContext);
+        }
+      }
       if (activeFastModeUpdate === update) activeFastModeUpdate = null;
       renderFastModeContexts();
     });
+  batch.promise = update;
+  reasoningInputBatchByKey.set(batch.key, batch);
+  resetReasoningInputSettleTimer(
+    batch,
+    options.settleMs ?? REASONING_INPUT_SETTLE_MS
+  );
   activeFastModeUpdate = update;
   return update;
 }
 
 function applyQueueState(threads, windows, nowMs = Date.now()) {
-  const observedIds = new Set();
+  const observations = new Map();
   for (const window of windows) {
-    const thread = matchQueueWindowThread(window, threads);
+    const candidates = queueWindowThreadCandidates(window, threads);
+    const positionedCounts = queueCountsByThreadForWindow(window, candidates);
+    if (positionedCounts) {
+      for (const thread of candidates) {
+        if (!positionedCounts.has(thread.id)) continue;
+        const count = positionedCounts.get(thread.id);
+        const previous = observations.get(thread.id);
+        observations.set(thread.id, {
+          thread,
+          count: Math.max(previous?.count ?? 0, count)
+        });
+      }
+      continue;
+    }
+    // Never attach an aggregate window count to one arbitrarily selected task
+    // when Codex is showing multiple conversation panes. A transiently
+    // incomplete geometry read is safer to retry than to merge Side Chat rows
+    // into the primary task badge.
+    if (candidates.length !== 1) continue;
+    const thread = candidates[0];
     if (!thread?.id) continue;
-    observedIds.add(thread.id);
     const count = queueCountForWindow(window);
+    const previous = observations.get(thread.id);
+    observations.set(thread.id, {
+      thread,
+      count: Math.max(previous?.count ?? 0, count)
+    });
+  }
+
+  const observedIds = new Set();
+  for (const { thread, count } of observations.values()) {
+    observedIds.add(thread.id);
     const cached = queueStateByThreadId.get(thread.id);
     if (count > 0) {
       queueStateByThreadId.set(thread.id, {
@@ -4290,6 +4545,8 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
     sideChatLifecycleCache.clear();
     closedSideChatAtMs.clear();
     sideChatCloseLogOffsets.clear();
+    sideChatDiscoveryState = createSideChatDiscoveryState();
+    sideChatDiscoveryLogCursors.clear();
   }
   appServerSessionCache = { checkedAtMs: nowMs, startedAtMs };
   return startedAtMs;
@@ -4298,20 +4555,47 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
 async function readEphemeralSideChats(
   persistentRowsOrIds,
   parentId,
-  globalStatePromise = null
+  globalStatePromise = null,
+  options = {}
 ) {
   const sessionStartedAtMs = await readAppServerSessionStartMs();
   if (!Number.isFinite(sessionStartedAtMs)) return [];
   const persistentIds = persistentRowsOrIds instanceof Set
     ? persistentRowsOrIds
     : new Set(persistentRowsOrIds.map((row) => row.id));
-
+  const cachedById = new Map(sideChatRowsCache.map((thread) => [thread.id, thread]));
+  let promptHistory = null;
+  let promptHistoryAvailable = false;
   try {
     const state = await (globalStatePromise ?? readGlobalStateSnapshot());
-    const promptHistory = promptHistoryFromState(state);
-    if (!promptHistory) return sideChatRowsCache.filter((thread) => !persistentIds.has(thread.id));
-    const sideChats = [];
+    promptHistory = promptHistoryFromState(state);
+    promptHistoryAvailable = Boolean(promptHistory);
+  } catch {
+    // Preserve the last valid prompt-history snapshot. Log discovery below is
+    // independent and may still add or close Side Chats during a state rewrite.
+  }
 
+  let discoveredRows = [];
+  if (options.discoverFromLogs !== false) {
+    try {
+      discoveredRows = await refreshDiscoveredSideChatsFromLogs(
+        persistentIds,
+        sessionStartedAtMs
+      );
+    } catch {
+      discoveredRows = openDiscoveredSideChats(sideChatDiscoveryState, persistentIds);
+    }
+  }
+  const discoveredById = new Map(discoveredRows.map((thread) => [thread.id, thread]));
+  const sideChatsById = new Map();
+
+  if (!promptHistoryAvailable) {
+    for (const thread of sideChatRowsCache) {
+      if (!persistentIds.has(thread.id) && !closedSideChatAtMs.has(thread.id)) {
+        sideChatsById.set(thread.id, { ...thread });
+      }
+    }
+  } else {
     for (const [id, prompts] of Object.entries(promptHistory)) {
       if (!UUID_PATTERN.test(id) || persistentIds.has(id) || !Array.isArray(prompts)) continue;
       const createdAtMs = uuidV7TimestampMs(id);
@@ -4319,11 +4603,15 @@ async function readEphemeralSideChats(
           || createdAtMs + APP_SERVER_START_TOLERANCE_MS < sessionStartedAtMs) continue;
       const firstPrompt = prompts.find((prompt) => typeof prompt === "string" && prompt.trim());
       if (!firstPrompt || isInternalThreadRecord({ title: firstPrompt })) continue;
-      const rememberedParentId = sideChatParentById.get(id) ?? parentId ?? null;
+      const rememberedParentId = discoveredById.get(id)?.parentId
+        ?? sideChatParentById.get(id)
+        ?? parentId
+        ?? null;
       if (rememberedParentId) sideChatParentById.set(id, rememberedParentId);
-      sideChats.push({
+      sideChatsById.set(id, {
         id,
         title: normalizeTitle(firstPrompt),
+        fallbackTitle: false,
         cwd: "",
         rollout_path: null,
         recency_at: Math.floor(createdAtMs / 1000),
@@ -4335,20 +4623,57 @@ async function readEphemeralSideChats(
         pinned: false
       });
     }
-
-    const activeSideChatIds = new Set(sideChats.map((thread) => thread.id));
-    for (const id of sideChatParentById.keys()) {
-      if (!activeSideChatIds.has(id)) sideChatParentById.delete(id);
-    }
-    // Prompt history is persisted asynchronously and can briefly omit an
-    // entry while Codex rewrites the state file. Keep lifecycle/close memory
-    // for the lifetime of the app-server session so a closed side chat cannot
-    // flash back into the list after one transient read.
-    sideChatRowsCache = sideChats.sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
-    return [...sideChatRowsCache];
-  } catch {
-    return sideChatRowsCache.filter((thread) => !persistentIds.has(thread.id));
   }
+
+  for (const record of discoveredRows) {
+    if (persistentIds.has(record.id) || closedSideChatAtMs.has(record.id)) continue;
+    const current = sideChatsById.get(record.id) ?? cachedById.get(record.id) ?? null;
+    const rememberedParentId = record.parentId
+      ?? current?.parentId
+      ?? sideChatParentById.get(record.id)
+      ?? parentId
+      ?? null;
+    if (rememberedParentId) sideChatParentById.set(record.id, rememberedParentId);
+    const createdAtMs = record.createdAtMs;
+    sideChatsById.set(record.id, {
+      id: record.id,
+      title: current?.fallbackTitle === false ? current.title : "",
+      fallbackTitle: current?.fallbackTitle !== false,
+      cwd: "",
+      rollout_path: null,
+      recency_at: Math.floor(createdAtMs / 1000),
+      updated_at: Math.floor(createdAtMs / 1000),
+      createdAtMs,
+      promptCount: current?.promptCount ?? 0,
+      parentId: rememberedParentId,
+      ephemeral: true,
+      pinned: false
+    });
+  }
+
+  const ordinalByParent = new Map();
+  const sideChats = [...sideChatsById.values()]
+    .filter((thread) => !persistentIds.has(thread.id) && !closedSideChatAtMs.has(thread.id))
+    .sort((left, right) => left.createdAtMs - right.createdAtMs)
+    .map((thread) => {
+      const group = thread.parentId ?? "unknown";
+      const ordinal = (ordinalByParent.get(group) ?? 0) + 1;
+      ordinalByParent.set(group, ordinal);
+      return thread.fallbackTitle
+        ? { ...thread, title: `${t("activity.sideChat")} ${ordinal}` }
+        : thread;
+    });
+
+  const activeSideChatIds = new Set(sideChats.map((thread) => thread.id));
+  for (const id of sideChatParentById.keys()) {
+    if (!activeSideChatIds.has(id)) sideChatParentById.delete(id);
+  }
+  // Prompt history is persisted asynchronously and can briefly omit an
+  // entry while Codex rewrites the state file. Keep lifecycle/close memory
+  // for the lifetime of the app-server session so a closed side chat cannot
+  // flash back into the list after one transient read.
+  sideChatRowsCache = sideChats.sort((a, b) => threadRecencyMs(b) - threadRecencyMs(a));
+  return [...sideChatRowsCache];
 }
 
 function datedLogDirectory(date) {
@@ -4396,6 +4721,97 @@ async function readCurrentDesktopLogPaths(nowMs = Date.now()) {
 
 async function readLatestDesktopLogPath(nowMs = Date.now()) {
   return (await readCurrentDesktopLogPaths(nowMs))[0] ?? null;
+}
+
+async function refreshDiscoveredSideChatsFromLogs(persistentIds, sessionStartedAtMs) {
+  const filePaths = await readCurrentDesktopLogPaths();
+  const files = [];
+  for (const filePath of filePaths) {
+    try {
+      files.push({ filePath, stat: await fs.stat(filePath) });
+    } catch {
+      // A rotating log can disappear between discovery and inspection.
+    }
+  }
+  files.sort((left, right) => left.stat.mtimeMs - right.stat.mtimeMs);
+  const activePaths = new Set(files.map(({ filePath }) => filePath));
+
+  for (const { filePath } of files) {
+    let handle;
+    try {
+      handle = await fs.open(filePath, "r");
+      const stat = await handle.stat();
+      const previous = sideChatDiscoveryLogCursors.get(filePath) ?? null;
+      let observedBoundary = Buffer.alloc(0);
+      if (Number.isSafeInteger(previous?.offset)
+          && previous.offset >= 0
+          && previous.offset <= stat.size
+          && Buffer.isBuffer(previous.boundaryBytes)
+          && previous.boundaryBytes.length > 0) {
+        const boundaryLength = Math.min(previous.boundaryBytes.length, previous.offset);
+        observedBoundary = Buffer.alloc(boundaryLength);
+        const { bytesRead } = await handle.read(
+          observedBoundary,
+          0,
+          boundaryLength,
+          previous.offset - boundaryLength
+        );
+        observedBoundary = observedBoundary.subarray(0, bytesRead);
+      }
+      const continuing = canContinueLogCursor(previous, stat, observedBoundary);
+      const start = continuing
+        ? previous.offset
+        : Math.max(0, stat.size - SIDE_CHAT_LOG_SEARCH_LIMIT_BYTES);
+      if (start >= stat.size) {
+        if (!continuing) {
+          sideChatDiscoveryLogCursors.set(filePath, {
+            offset: stat.size,
+            fileIdentity: logFileIdentity(stat),
+            boundaryBytes: Buffer.alloc(0),
+            lineState: null
+          });
+        }
+        continue;
+      }
+
+      let discardLeadingPartial = false;
+      if (!continuing && start > 0) {
+        const previousByte = Buffer.alloc(1);
+        const { bytesRead } = await handle.read(previousByte, 0, 1, start - 1);
+        discardLeadingPartial = bytesRead !== 1 || previousByte[0] !== 0x0a;
+      }
+      const buffer = Buffer.alloc(stat.size - start);
+      const { bytesRead } = await handle.read(buffer, 0, buffer.length, start);
+      const chunk = buffer.subarray(0, bytesRead);
+      const { lines, state: lineState } = consumeLogBytes(
+        continuing ? previous.lineState : null,
+        chunk,
+        { discardLeadingPartial }
+      );
+      for (const line of lines) {
+        applySideChatLogLine(sideChatDiscoveryState, line, {
+          sessionStartedAtMs,
+          sessionToleranceMs: APP_SERVER_START_TOLERANCE_MS
+        });
+      }
+      sideChatDiscoveryLogCursors.set(filePath, {
+        offset: start + bytesRead,
+        fileIdentity: logFileIdentity(stat),
+        boundaryBytes: nextLogBoundary(continuing ? previous.boundaryBytes : null, chunk),
+        lineState
+      });
+    } finally {
+      await handle?.close();
+    }
+  }
+
+  for (const filePath of sideChatDiscoveryLogCursors.keys()) {
+    if (!activePaths.has(filePath)) sideChatDiscoveryLogCursors.delete(filePath);
+  }
+  for (const [id, closedAtMs] of sideChatDiscoveryState.closedAtById) {
+    closedSideChatAtMs.set(id, closedAtMs);
+  }
+  return openDiscoveredSideChats(sideChatDiscoveryState, persistentIds);
 }
 
 function applyRemoteActivityLogLine(line, activities = remoteActivityByThreadId) {
@@ -6431,14 +6847,30 @@ function beginComposerCreation(kind, operation) {
   activeDeepLinkNavigation?.controller.abort();
   activeComposerCreation?.controller.abort();
   const controller = new AbortController();
+  let resolveComposerReady;
+  const composerReadyPromise = new Promise((resolve) => {
+    resolveComposerReady = resolve;
+  });
   const creation = {
     kind,
     controller,
-    promise: null
+    promise: null,
+    composerReadyPromise,
+    composerReadySettled: false,
+    requestedAtMs: null,
+    targetThreadId: null,
+    focusedThread: null,
+    markComposerReady(value) {
+      if (creation.composerReadySettled) return false;
+      creation.composerReadySettled = true;
+      resolveComposerReady(value || null);
+      return true;
+    }
   };
   creation.promise = Promise.resolve()
-    .then(() => operation(controller.signal))
+    .then(() => operation(controller.signal, creation))
     .finally(() => {
+      creation.markComposerReady(null);
       if (activeComposerCreation === creation) activeComposerCreation = null;
     });
   activeComposerCreation = creation;
@@ -6493,11 +6925,19 @@ async function openSideChat(context, options = {}) {
   const scheduleRefreshes = options.scheduleRefreshes ?? scheduleSideChatTargetRefreshes;
   const synchronizeCurrent = options.synchronizeCurrent ?? synchronizeCurrentCodexThread;
   const waitFocused = options.waitFocused ?? waitForPendingSideChatFocus;
-  return beginComposerCreation("side-chat", async (signal) => {
+  const waitComposerReady = options.waitComposerReady ?? waitForPendingSideChatComposerReady;
+  const focusSideChatComposer = options.focusSideChatComposer
+    ?? (() => runKeyBridgeAwaited(
+      "codex-focus-side-chat-composer",
+      context,
+      { quiet: true }
+    ));
+  return beginComposerCreation("side-chat", async (signal, creation) => {
     try {
       pendingSideChatTarget = null;
       showFeedback(context, "loading", "사이드챗 전환");
       const requestedAtMs = options.nowMs ?? Date.now();
+      creation.requestedAtMs = requestedAtMs;
       const currentThread = await synchronizeCurrent({
         force: true,
         quiet: true,
@@ -6519,6 +6959,19 @@ async function openSideChat(context, options = {}) {
         targetThreadId: null
       };
       scheduleRefreshes(requestedAtMs);
+      void Promise.resolve(waitComposerReady(requestedAtMs, {
+        signal,
+        sleep,
+        focusComposer: focusSideChatComposer
+      })).then((ready) => {
+        if (ready) creation.markComposerReady(ready);
+      }).catch((error) => {
+        if (!isAbortError(error)) {
+          console.error(
+            `Could not prepare provisional Side Chat composer: ${error?.message ?? "unknown error"}`
+          );
+        }
+      });
       const focusedSideChat = await waitFocused(requestedAtMs, {
         signal,
         sleep,
@@ -6526,6 +6979,13 @@ async function openSideChat(context, options = {}) {
       });
       throwIfAborted(signal);
       if (!focusedSideChat?.id) throw new Error("new Side Chat focus was not confirmed");
+      creation.targetThreadId = focusedSideChat.id;
+      creation.focusedThread = focusedSideChat;
+      bindPendingVoiceContextsToThread(focusedSideChat.id, Date.now(), requestedAtMs);
+      creation.markComposerReady({
+        requestedAtMs,
+        targetThreadId: focusedSideChat.id
+      });
       showFeedback(context, "success", "사이드챗 준비");
       return true;
     } catch (error) {
@@ -6540,19 +7000,22 @@ async function openSideChat(context, options = {}) {
   });
 }
 
-function switchProfilePage(context, device, action, settings = {}) {
-  const direction = PAGE_DIRECTION_BY_ACTION.get(action);
-  if (!direction || !device) return;
+function visibleActionsForDevice(device) {
+  const actions = [];
+  for (const [context, action] of contexts) {
+    if (contextDeviceIds.get(context) === device) actions.push(action);
+  }
+  return actions;
+}
 
-  const configuredCount = Number(settings.pageCount);
-  const pageCount = Number.isInteger(configuredCount) && configuredCount > 0
-    ? configuredCount
-    : DEFAULT_PROFILE_PAGE_COUNT;
-  const configuredPage = Number(settings.currentPage);
-  const currentPage = Number.isInteger(configuredPage) && configuredPage >= 0 && configuredPage < pageCount
-    ? configuredPage
-    : direction < 0 ? 0 : pageCount - 1;
-  const page = (currentPage + direction + pageCount) % pageCount;
+function switchProfilePage(context, device, action, settings = {}) {
+  if (!device) return false;
+  const target = resolveProfilePageTarget(action, settings, visibleActionsForDevice(device));
+  if (!target) {
+    showFeedback(context, "error", t("feedback.stateCheck"));
+    console.warn("Could not identify the visible ThreadDeck profile page; navigation was not sent.");
+    return false;
+  }
 
   const message = {
     event: "switchToProfile",
@@ -6562,10 +7025,11 @@ function switchProfilePage(context, device, action, settings = {}) {
     device,
     payload: {
       profile: DISTRIBUTED_PROFILE_NAME,
-      page
+      page: target.page
     }
   };
   send(message);
+  return true;
 }
 
 function registerPlugin() {
@@ -6601,6 +7065,7 @@ function registerPlugin() {
 
     if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
       contexts.set(message.context, message.action);
+      if (message.device) contextDeviceIds.set(message.context, message.device);
       if (!hasLoadedUsageState) void refreshUsage();
       // Completion monitoring must have a baseline even when the active page
       // contains only usage, media, or navigation actions.
@@ -6643,6 +7108,7 @@ function registerPlugin() {
       voiceStateByContext.delete(message.context);
       voiceSessionIdByContext.delete(message.context);
       contexts.delete(message.context);
+      contextDeviceIds.delete(message.context);
       contextImages.delete(message.context);
       contextSentImages.delete(message.context);
       contextFeedback.delete(message.context);
@@ -6782,6 +7248,7 @@ function resetDemoEffects() {
   voiceSessionIdByContext.clear();
   sendLongPressArmedContexts.clear();
   fastModeLongPressArmedContexts.clear();
+  cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningPendingCountByThreadId.clear();
@@ -7770,29 +8237,34 @@ async function verifyThreadRefreshResilience() {
     const first = await readEphemeralSideChats(
       persistentRows,
       stableThread.id,
-      Promise.resolve(sideChatState)
+      Promise.resolve(sideChatState),
+      { discoverFromLogs: false }
     );
     const afterReadFailure = await readEphemeralSideChats(
       persistentRows,
       stableThread.id,
-      Promise.reject(new Error("simulated global-state rewrite"))
+      Promise.reject(new Error("simulated global-state rewrite")),
+      { discoverFromLogs: false }
     );
     const afterSemanticFailure = await readEphemeralSideChats(
       persistentRows,
       stableThread.id,
-      Promise.resolve({ "electron-persisted-atom-state": "{partial" })
+      Promise.resolve({ "electron-persisted-atom-state": "{partial" }),
+      { discoverFromLogs: false }
     );
     const afterValidEmptyState = await readEphemeralSideChats(
       persistentRows,
       stableThread.id,
       Promise.resolve({
         "electron-persisted-atom-state": { "prompt-history": {} }
-      })
+      }),
+      { discoverFromLogs: false }
     );
     const blockedPersistentId = await readEphemeralSideChats(
       new Set([stableThread.id, sideChatId]),
       stableThread.id,
-      Promise.resolve(sideChatState)
+      Promise.resolve(sideChatState),
+      { discoverFromLogs: false }
     );
     sideChatCachePreserved = first[0]?.id === sideChatId
       && afterReadFailure[0]?.id === sideChatId
@@ -9857,12 +10329,13 @@ async function verifyInteractionPolicy() {
   const reasoningContext = "interaction-reasoning";
   contexts.set(reasoningContext, ACTIONS.reasoning);
   reasoningDirectionByThreadId.delete(localThreadB.id);
-  let requestedReasoningDirection = null;
+  let requestedReasoningTarget = null;
   const reasoningStepResult = await stepReasoningEffort(reasoningContext, {
+    settleMs: 0,
     synchronizeCurrent: async () => localThreadB,
     focusProbe: async () => ({ stdout: "match=uuid" }),
-    stepEffort: async (direction) => {
-      requestedReasoningDirection = direction;
+    setEffort: async (target) => {
+      requestedReasoningTarget = target;
       return {
         stdout: "previous=max reasoning=xhigh service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n"
       };
@@ -9875,7 +10348,7 @@ async function verifyInteractionPolicy() {
     "previous=max reasoning=ultra service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=1 composer_focused=1"
   );
   const reasoningPingPongStateIsVerified = reasoningStepResult
-    && requestedReasoningDirection === "down"
+    && requestedReasoningTarget === "xhigh"
     && reasoningDirectionByThreadId.get(localThreadB.id) === "down"
     && fastModeState.reasoningEffort === "xhigh"
     && minimumStep?.atMinimum === true
@@ -9900,21 +10373,27 @@ async function verifyInteractionPolicy() {
       && downward?.effort === "max"
       && downward.direction === "down";
   })();
-  const rapidReasoningOutputs = [
-    "previous=xhigh reasoning=high service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n",
-    "previous=high reasoning=medium service_tier=priority available=1 changed=1 verified=1 direction=down at_min=0 at_max=0 composer_focused=1\n",
-    "previous=medium reasoning=low service_tier=priority available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1\n"
-  ];
-  const rapidReasoningDirections = [];
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    reasoningEffort: "xhigh",
+    failed: false
+  };
+  reasoningDirectionByThreadId.set(localThreadB.id, "down");
+  reasoningVisualOverrideByThreadId.delete(localThreadB.id);
+  const rapidReasoningTargets = [];
   let rapidReasoningCalls = 0;
   const rapidReasoningOptions = {
+    settleMs: 0,
     synchronizeCurrent: async () => localThreadB,
     focusProbe: async () => ({ stdout: "match=uuid" }),
-    stepEffort: async (direction) => {
-      rapidReasoningDirections.push(direction);
-      const stdout = rapidReasoningOutputs[rapidReasoningCalls];
+    setEffort: async (target) => {
+      rapidReasoningTargets.push(target);
       rapidReasoningCalls += 1;
-      return { stdout };
+      return {
+        stdout: "requested=low previous=xhigh reasoning=low service_tier=priority available=1 changed=1 verified=1 direction=down at_min=1 at_max=0 composer_focused=1\n"
+      };
     }
   };
   const rapidReasoningA = stepReasoningEffort(reasoningContext, rapidReasoningOptions);
@@ -9930,12 +10409,65 @@ async function verifyInteractionPolicy() {
     rapidReasoningB,
     rapidReasoningC
   ]);
-  const rapidReasoningQueuesEveryTap = rapidReasoningPaintsEveryTapImmediately
+  const rapidReasoningCoalescesToFinalTarget = rapidReasoningPaintsEveryTapImmediately
     && rapidReasoningResults.every(Boolean)
-    && rapidReasoningCalls === 3
-    && rapidReasoningDirections.join(",") === "down,down,down"
+    && rapidReasoningCalls === 1
+    && rapidReasoningTargets.join(",") === "low"
     && fastModeState.reasoningEffort === "low"
     && reasoningDirectionByThreadId.get(localThreadB.id) === "up"
+    && !reasoningVisualOverrideByThreadId.has(localThreadB.id)
+    && !reasoningPendingCountByThreadId.has(localThreadB.id)
+    && !reasoningPendingCountByContext.has(reasoningContext)
+    && !reasoningBusyContexts.has(reasoningContext);
+  fastModeState = {
+    threadId: localThreadB.id,
+    enabled: true,
+    available: true,
+    reasoningEffort: "low",
+    failed: false
+  };
+  reasoningDirectionByThreadId.set(localThreadB.id, "up");
+  let releaseFirstReasoningApply;
+  const firstReasoningApplyGate = new Promise((resolve) => {
+    releaseFirstReasoningApply = resolve;
+  });
+  let markFirstReasoningApplyStarted;
+  const firstReasoningApplyStarted = new Promise((resolve) => {
+    markFirstReasoningApplyStarted = resolve;
+  });
+  const duringApplyTargets = [];
+  const duringApplyOptions = {
+    settleMs: 0,
+    synchronizeCurrent: async () => localThreadB,
+    focusProbe: async () => ({ stdout: "match=uuid" }),
+    setEffort: async (target) => {
+      duringApplyTargets.push(target);
+      if (duringApplyTargets.length === 1) {
+        markFirstReasoningApplyStarted();
+        await firstReasoningApplyGate;
+        return {
+          stdout: "requested=medium previous=low reasoning=medium service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
+        };
+      }
+      return {
+        stdout: "requested=xhigh previous=medium reasoning=xhigh service_tier=priority available=1 changed=1 verified=1 direction=up at_min=0 at_max=0 composer_focused=1\n"
+      };
+    }
+  };
+  const duringApplyFirst = stepReasoningEffort(reasoningContext, duringApplyOptions);
+  await firstReasoningApplyStarted;
+  const duringApplySecond = stepReasoningEffort(reasoningContext, duringApplyOptions);
+  const duringApplyThird = stepReasoningEffort(reasoningContext, duringApplyOptions);
+  releaseFirstReasoningApply();
+  const duringApplyResults = await Promise.all([
+    duringApplyFirst,
+    duringApplySecond,
+    duringApplyThird
+  ]);
+  const reasoningInputDuringApplyStartsOneSuccessor = duringApplyResults.every(Boolean)
+    && duringApplyTargets.join(",") === "medium,xhigh"
+    && fastModeState.reasoningEffort === "xhigh"
+    && !reasoningInputBatchByKey.size
     && !reasoningVisualOverrideByThreadId.has(localThreadB.id)
     && !reasoningPendingCountByThreadId.has(localThreadB.id)
     && !reasoningPendingCountByContext.has(reasoningContext)
@@ -10075,6 +10607,7 @@ async function verifyInteractionPolicy() {
       return true;
     },
     scheduleRefreshes: () => { sideChatMutations += 1; },
+    waitComposerReady: async (requestedAtMs) => ({ requestedAtMs }),
     waitFocused: async () => {
       sideChatMutations += 1;
       return { id: "00000000-0000-7000-8000-000000000033" };
@@ -10112,6 +10645,7 @@ async function verifyInteractionPolicy() {
     sleep: async () => {},
     bridge: () => true,
     scheduleRefreshes: () => {},
+    waitComposerReady: async (requestedAtMs) => ({ requestedAtMs }),
     waitFocused: async () => {
       sideChatFocusWaitStarted();
       await sideChatFocusGate;
@@ -10123,40 +10657,56 @@ async function verifyInteractionPolicy() {
     }
   });
   await sideChatFocusReady;
+  await activeComposerCreation?.composerReadyPromise;
   const sideChatVoiceContext = "interaction-side-chat-focus-voice-control";
   contexts.set(sideChatVoiceContext, ACTIONS.voice);
   contextImages.set(sideChatVoiceContext, voiceSvg("idle"));
   let sideChatVoiceSynchronizations = 0;
   let sideChatVoiceTargetId = null;
+  let sideChatVoiceProvisionalAtMs = null;
   const sideChatVoiceStarted = beginCurrentVoicePress(sideChatVoiceContext, {
     synchronizeCurrent: async () => {
       sideChatVoiceSynchronizations += 1;
       return focusedSideChatThread;
     },
     focusComposer: async () => true,
+    focusSideChatComposer: async () => true,
     focusProbe: async () => ({ stdout: "match=uuid" }),
-    beginVoice: (_context, voiceOptions) => {
+    beginVoice: (voiceContext, voiceOptions) => {
       sideChatVoiceTargetId = voiceOptions.targetThreadId;
+      sideChatVoiceProvisionalAtMs = voiceOptions.provisionalSideChatRequestedAtMs;
+      voiceTranscriptionByContext.set(voiceContext, {
+        targetThreadId: null,
+        provisionalSideChatRequestedAtMs: voiceOptions.provisionalSideChatRequestedAtMs
+      });
       return true;
     }
   });
-  await Promise.resolve();
-  const sideChatVoiceWaitedForFocus = sideChatVoiceSynchronizations === 0
-    && sideChatVoiceTargetId === null;
-  releaseSideChatFocus();
-  const sideChatCreationFocused = await sideChatCreationForVoice;
   const sideChatVoiceState = currentVoicePressByContext.get(sideChatVoiceContext);
   const sideChatVoicePrepared = await sideChatVoiceState?.promise;
+  const sideChatVoiceStartedBeforeIdentity = sideChatVoicePrepared
+    && sideChatVoiceSynchronizations === 0
+    && sideChatVoiceTargetId === ""
+    && sideChatVoiceProvisionalAtMs === 2234
+    && voiceTranscriptionByContext.get(sideChatVoiceContext)
+      ?.provisionalSideChatRequestedAtMs === 2234;
+  releaseSideChatFocus();
+  const sideChatCreationFocused = await sideChatCreationForVoice;
+  const sideChatVoiceWasBoundToRealTask = voiceTargetThreadByContext.get(sideChatVoiceContext)
+      === focusedSideChatThread.id
+    && voiceTranscriptionByContext.get(sideChatVoiceContext)?.targetThreadId
+      === focusedSideChatThread.id
+    && voiceTranscriptionByContext.get(sideChatVoiceContext)
+      ?.provisionalSideChatRequestedAtMs === undefined;
   cancelCurrentVoicePress(sideChatVoiceContext, false);
   cancelVoiceTranscription(sideChatVoiceContext, true);
   contexts.delete(sideChatVoiceContext);
   contextImages.delete(sideChatVoiceContext);
-  const sideChatVoiceUsesFocusedTask = sideChatVoiceStarted
-    && sideChatVoiceWaitedForFocus
+  const sideChatVoiceUsesProvisionalComposer = sideChatVoiceStarted
+    && sideChatVoiceStartedBeforeIdentity
     && sideChatCreationFocused
-    && sideChatVoicePrepared
-    && sideChatVoiceSynchronizations === 1
-    && sideChatVoiceTargetId === focusedSideChatThread.id;
+    && sideChatVoiceWasBoundToRealTask
+    && sideChatVoiceSynchronizations === 0;
 
   primaryThreadId = localThreadB.id;
   primaryThreadRow = localThreadB;
@@ -10434,7 +10984,8 @@ async function verifyInteractionPolicy() {
     && reasoningFastToggleStartsAtThreshold
     && reasoningPingPongStateIsVerified
     && optimisticReasoningMovesBeforeNativeConfirmation
-    && rapidReasoningQueuesEveryTap
+    && rapidReasoningCoalescesToFinalTarget
+    && reasoningInputDuringApplyStartsOneSuccessor
     && reasoningControlUsesCenteredAnimatedTrack
     && fastParticlesAnimateAcrossFrames
     && staleFastRefreshCannotOverwriteToggle
@@ -10442,7 +10993,7 @@ async function verifyInteractionPolicy() {
     && navigationWaitsForFastToggle
     && composerCreatingActionsWaitForFastToggle
     && sideChatUsesCurrentParent
-    && sideChatVoiceUsesFocusedTask
+    && sideChatVoiceUsesProvisionalComposer
     && sideChatReasoningUsesFocusedTask
     && creationAndFastLeaseIsBidirectional
     && navigationSupersedesPendingCreation
@@ -10508,7 +11059,8 @@ async function verifyInteractionPolicy() {
     reasoningFastToggleStartsAtThreshold,
     reasoningPingPongStateIsVerified,
     optimisticReasoningMovesBeforeNativeConfirmation,
-    rapidReasoningQueuesEveryTap,
+    rapidReasoningCoalescesToFinalTarget,
+    reasoningInputDuringApplyStartsOneSuccessor,
     reasoningControlUsesCenteredAnimatedTrack,
     fastParticlesAnimateAcrossFrames,
     staleFastRefreshCannotOverwriteToggle,
@@ -10517,7 +11069,7 @@ async function verifyInteractionPolicy() {
     navigationWaitsForFastToggle,
     composerCreatingActionsWaitForFastToggle,
     sideChatUsesCurrentParent,
-    sideChatVoiceUsesFocusedTask,
+    sideChatVoiceUsesProvisionalComposer,
     sideChatReasoningUsesFocusedTask,
     creationAndFastLeaseIsBidirectional,
     navigationSupersedesPendingCreation,
@@ -10545,6 +11097,7 @@ async function verifyInteractionPolicy() {
   fastModeLongPressTimers.clear();
   fastModeLongPressArmedContexts.clear();
   fastModeLongPressUpdates.clear();
+  cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
   reasoningDirectionByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();

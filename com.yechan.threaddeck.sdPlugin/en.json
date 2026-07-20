@@ -67,7 +67,7 @@
   },
   "com.yechan.threaddeck.reasoning": {
     "Name": "Codex effort + Fast mode",
-    "Tooltip": "Tap repeatedly to move effort up and down with immediate visual feedback. Hold for 0.6 seconds to toggle Fast mode immediately."
+    "Tooltip": "Tap repeatedly to move effort immediately; after you stop, ThreadDeck applies only the final level. Hold for 0.6 seconds to toggle Fast mode immediately."
   },
   "com.yechan.threaddeck.media.previous": {
     "Name": "Previous track",

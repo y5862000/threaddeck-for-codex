@@ -35,7 +35,7 @@ const ENGLISH_ACTIONS = new Map(Object.entries({
   "com.yechan.threaddeck.send": ["Send to Codex", "Release quickly to send Return. Hold until the key turns blue, then release to send Command+Return."],
   "com.yechan.threaddeck.appswitch": ["Switch app", "Switches to the next macOS app with Command+Tab."],
   "com.yechan.threaddeck.fastmode": ["Codex Fast mode", "Toggles Fast mode for the current Codex task and shows only the verified state."],
-  "com.yechan.threaddeck.reasoning": ["Codex effort + Fast mode", "Tap repeatedly to move effort up and down with immediate visual feedback. Hold for 0.6 seconds to toggle Fast mode immediately."],
+  "com.yechan.threaddeck.reasoning": ["Codex effort + Fast mode", "Tap repeatedly to move effort immediately; after you stop, ThreadDeck applies only the final level. Hold for 0.6 seconds to toggle Fast mode immediately."],
   "com.yechan.threaddeck.media.previous": ["Previous track", "Moves to the previous media track."],
   "com.yechan.threaddeck.media.rewind": ["Rewind media", "Rewinds the current media."],
   "com.yechan.threaddeck.media.playpause": ["Play / pause media", "Plays or pauses the current media."],

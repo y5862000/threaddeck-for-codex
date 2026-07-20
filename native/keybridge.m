@@ -3432,13 +3432,14 @@ typedef struct {
 
 typedef struct {
   StringFingerprint fingerprint;
-  unsigned count;
-} CountedFingerprint;
+  CGPoint position;
+  CGSize size;
+} PositionedFingerprint;
 
 typedef struct {
-  StringFingerprint headers[CODEX_QUEUE_MAX_HEADERS];
+  PositionedFingerprint headers[CODEX_QUEUE_MAX_HEADERS];
   unsigned header_count;
-  CountedFingerprint buttons[CODEX_QUEUE_MAX_BUTTONS];
+  PositionedFingerprint buttons[CODEX_QUEUE_MAX_BUTTONS];
   unsigned button_count;
   unsigned visited;
   CGPoint window_origin;
@@ -3447,6 +3448,19 @@ typedef struct {
 
 static bool fingerprints_equal(StringFingerprint left, StringFingerprint right) {
   return left.length == right.length && left.hash == right.hash;
+}
+
+static bool queue_geometries_equal(
+  PositionedFingerprint candidate,
+  StringFingerprint fingerprint,
+  CGPoint position,
+  CGSize size
+) {
+  return fingerprints_equal(candidate.fingerprint, fingerprint)
+    && fabs(candidate.position.x - position.x) <= 1
+    && fabs(candidate.position.y - position.y) <= 1
+    && fabs(candidate.size.width - size.width) <= 1
+    && fabs(candidate.size.height - size.height) <= 1;
 }
 
 static bool copy_element_fingerprint(
@@ -3501,25 +3515,92 @@ static bool element_is_hidden(AXUIElementRef element) {
   return hidden;
 }
 
-static void add_header_fingerprint(CodexQueueWindowState *state, StringFingerprint fingerprint) {
+static void add_header_fingerprint(
+  CodexQueueWindowState *state,
+  StringFingerprint fingerprint,
+  CGPoint position,
+  CGSize size
+) {
   for (unsigned index = 0; index < state->header_count; index += 1) {
-    if (fingerprints_equal(state->headers[index], fingerprint)) return;
+    if (queue_geometries_equal(state->headers[index], fingerprint, position, size)) return;
   }
   if (state->header_count >= CODEX_QUEUE_MAX_HEADERS) return;
-  state->headers[state->header_count++] = fingerprint;
+  state->headers[state->header_count++] = (PositionedFingerprint) {
+    .fingerprint = fingerprint,
+    .position = position,
+    .size = size
+  };
 }
 
-static void add_button_fingerprint(CodexQueueWindowState *state, StringFingerprint fingerprint) {
+static void add_button_fingerprint(
+  CodexQueueWindowState *state,
+  StringFingerprint fingerprint,
+  CGPoint position,
+  CGSize size
+) {
   for (unsigned index = 0; index < state->button_count; index += 1) {
-    if (!fingerprints_equal(state->buttons[index].fingerprint, fingerprint)) continue;
-    state->buttons[index].count += 1;
-    return;
+    if (queue_geometries_equal(state->buttons[index], fingerprint, position, size)) return;
   }
   if (state->button_count >= CODEX_QUEUE_MAX_BUTTONS) return;
-  state->buttons[state->button_count++] = (CountedFingerprint) {
+  state->buttons[state->button_count++] = (PositionedFingerprint) {
     .fingerprint = fingerprint,
-    .count = 1
+    .position = position,
+    .size = size
   };
+}
+
+static bool queue_signal_fingerprint(StringFingerprint fingerprint) {
+  CFStringRef labels[] = {
+    CFSTR("대기열에 있는 메시지 삭제"),
+    CFSTR("Delete queued message"),
+    CFSTR("대기열에 있는 메시지 액션"),
+    CFSTR("Queued message actions")
+  };
+  for (size_t index = 0; index < sizeof(labels) / sizeof(labels[0]); index += 1) {
+    StringFingerprint expected = { 0 };
+    if (string_fingerprint(labels[index], &expected.length, &expected.hash)
+        && fingerprints_equal(fingerprint, expected)) return true;
+  }
+  return false;
+}
+
+static bool copy_queue_row_geometry(
+  AXUIElementRef element,
+  CGPoint window_origin,
+  CGSize window_size,
+  CGPoint *position_out,
+  CGSize *size_out
+) {
+  AXUIElementRef current = element;
+  CFRetain(current);
+  bool found = false;
+  for (unsigned level = 0; level < 5 && current != NULL; level += 1) {
+    CFTypeRef parent = NULL;
+    if (AXUIElementCopyAttributeValue(current, kAXParentAttribute, &parent) != kAXErrorSuccess
+        || parent == NULL || CFGetTypeID(parent) != AXUIElementGetTypeID()) {
+      if (parent != NULL) CFRelease(parent);
+      break;
+    }
+    CFRelease(current);
+    current = (AXUIElementRef)parent;
+    CGPoint position = CGPointZero;
+    CGSize size = CGSizeZero;
+    bool has_geometry = copy_element_position(current, &position)
+      && copy_element_size(current, &size);
+    bool inside_window = has_geometry
+      && position.x >= window_origin.x - 2
+      && position.y >= window_origin.y - 2
+      && position.x + size.width <= window_origin.x + window_size.width + 2
+      && position.y + size.height <= window_origin.y + window_size.height + 2;
+    if (inside_window && size.width >= 120 && size.height >= 20) {
+      *position_out = position;
+      *size_out = size;
+      found = true;
+      break;
+    }
+  }
+  if (current != NULL) CFRelease(current);
+  return found;
 }
 
 // Traverse only accessibility metadata. Queue message text is deliberately
@@ -3568,6 +3649,7 @@ static void collect_codex_queue_descendants(
   };
   StringFingerprint element_fingerprints[5];
   unsigned element_fingerprint_count = 0;
+  bool has_queue_signal = false;
   for (size_t index = 0; index < sizeof(attributes) / sizeof(attributes[0]); index += 1) {
     StringFingerprint fingerprint = { 0 };
     if (!copy_element_fingerprint(element, attributes[index], &fingerprint)) continue;
@@ -3580,8 +3662,31 @@ static void collect_codex_queue_descendants(
     }
     if (duplicate) continue;
     element_fingerprints[element_fingerprint_count++] = fingerprint;
-    if (is_header_region) add_header_fingerprint(state, fingerprint);
-    if (is_visible_button) add_button_fingerprint(state, fingerprint);
+    has_queue_signal = has_queue_signal || queue_signal_fingerprint(fingerprint);
+    if (is_header_region) {
+      add_header_fingerprint(state, fingerprint, position, size);
+    }
+  }
+  if (is_visible_button) {
+    CGPoint association_position = position;
+    CGSize association_size = size;
+    if (has_queue_signal) {
+      copy_queue_row_geometry(
+        element,
+        state->window_origin,
+        state->window_size,
+        &association_position,
+        &association_size
+      );
+    }
+    for (unsigned index = 0; index < element_fingerprint_count; index += 1) {
+      add_button_fingerprint(
+        state,
+        element_fingerprints[index],
+        association_position,
+        association_size
+      );
+    }
   }
 
   CFTypeRef children_value = NULL;
@@ -3656,17 +3761,24 @@ static int print_codex_queue_state(void) {
     printf("window\t%ld\t%d\n", (long)window_index, focused ? 1 : 0);
     for (unsigned index = 0; index < state.header_count; index += 1) {
       printf(
-        "header\t%zu:%016llx\n",
-        state.headers[index].length,
-        (unsigned long long)state.headers[index].hash
+        "header\t%zu:%016llx\t%.3f\t%.3f\t%.3f\t%.3f\n",
+        state.headers[index].fingerprint.length,
+        (unsigned long long)state.headers[index].fingerprint.hash,
+        state.headers[index].position.x,
+        state.headers[index].position.y,
+        state.headers[index].size.width,
+        state.headers[index].size.height
       );
     }
     for (unsigned index = 0; index < state.button_count; index += 1) {
       printf(
-        "button\t%zu:%016llx\t%u\n",
+        "button\t%zu:%016llx\t1\t%.3f\t%.3f\t%.3f\t%.3f\n",
         state.buttons[index].fingerprint.length,
         (unsigned long long)state.buttons[index].fingerprint.hash,
-        state.buttons[index].count
+        state.buttons[index].position.x,
+        state.buttons[index].position.y,
+        state.buttons[index].size.width,
+        state.buttons[index].size.height
       );
     }
     printf("end\n");
@@ -5422,6 +5534,12 @@ static int codex_visible_reasoning_effort_index(const char *effort) {
   return strcmp(effort, "none") == 0 || strcmp(effort, "minimal") == 0 ? 0 : -1;
 }
 
+static bool codex_reasoning_effort_is_visible_target(const char *effort) {
+  int rank = codex_reasoning_effort_rank(effort);
+  return rank >= codex_reasoning_effort_rank("low")
+    && rank <= codex_reasoning_effort_rank("ultra");
+}
+
 static int codex_reasoning_track_target_index(
   const char *effort,
   CodexReasoningDirection *direction_in_out
@@ -6178,6 +6296,197 @@ static int step_codex_reasoning_effort(CodexReasoningDirection requested) {
   return verified ? 0 : 1;
 }
 
+static int set_codex_reasoning_effort(const char *requested) {
+  if (!codex_reasoning_effort_is_visible_target(requested)) return 64;
+
+  CodexFastModeScan scan = { 0 };
+  AXUIElementRef trigger = NULL;
+  if (!copy_codex_reasoning_control_scan(&scan, &trigger)) {
+    bool composer_focused = restore_codex_composer_after_fast_mode();
+    printf(
+      "requested=%s reasoning=unknown available=0 changed=0 verified=0 direction=up at_min=0 at_max=0 composer_focused=%d\n",
+      requested,
+      composer_focused ? 1 : 0
+    );
+    return 2;
+  }
+
+  const char *previous = scan.reasoning_effort;
+  int previous_index = codex_visible_reasoning_effort_index(previous);
+  int requested_index = codex_visible_reasoning_effort_index(requested);
+  CodexReasoningDirection direction = requested_index < previous_index
+    ? CODEX_REASONING_DIRECTION_DOWN
+    : CODEX_REASONING_DIRECTION_UP;
+  bool already_selected = previous != NULL && strcmp(previous, requested) == 0;
+  bool acted = false;
+  bool at_minimum = requested_index == 0;
+  bool at_maximum = requested_index == CODEX_VISIBLE_REASONING_EFFORT_COUNT - 1;
+  bool boundaries_known = false;
+  bool range_known = false;
+  bool after_range_known = false;
+  double before_value = 0;
+  double minimum = 0;
+  double maximum = 0;
+  double after_value = 0;
+  double after_minimum = 0;
+  double after_maximum = 0;
+
+  if (!already_selected
+      && scan.reasoning_control != NULL
+      && scan.reasoning_control_count == 1) {
+    // Prefer Codex's exact Effort option list. One activation selects the
+    // final debounced target directly, no matter how many hardware taps led
+    // to it, so intermediate menu transactions never run.
+    bool opened_options = scan.reasoning_control_is_advanced
+      ? activate_accessibility_element_with_return(scan.reasoning_control)
+        || perform_codex_accessibility_press(scan.reasoning_control)
+      : focus_accessibility_element(scan.reasoning_control);
+    if (opened_options && !scan.reasoning_control_is_advanced) {
+      usleep(12000);
+      tap_key(KEY_RIGHT, 0);
+    }
+    usleep(65000);
+    CodexFastModeScan options = { 0 };
+    if (opened_options && copy_codex_reasoning_options_scan(&options)) {
+      int requested_rank = codex_reasoning_effort_rank(requested);
+      int first = -1;
+      int last = -1;
+      for (int rank = 0; rank < CODEX_REASONING_EFFORT_COUNT; rank += 1) {
+        if (options.reasoning_options[rank] == NULL
+            || options.reasoning_option_counts[rank] != 1) continue;
+        if (first < 0) first = rank;
+        last = rank;
+      }
+      boundaries_known = first >= 0 && last >= first;
+      at_minimum = boundaries_known && requested_rank == first;
+      at_maximum = boundaries_known && requested_rank == last;
+      if (requested_rank >= 0
+          && options.reasoning_options[requested_rank] != NULL
+          && options.reasoning_option_counts[requested_rank] == 1) {
+        acted = activate_accessibility_element_with_return(
+          options.reasoning_options[requested_rank]
+        );
+        if (acted) usleep(70000);
+      }
+      if (getenv("THREADDECK_REASONING_DEBUG") != NULL) {
+        printf(
+          "reasoning_stage=set_options count=%u requested=%s acted=%d\n",
+          codex_reasoning_option_count(&options),
+          requested,
+          acted ? 1 : 0
+        );
+      }
+      release_codex_fast_mode_scan(&options);
+    }
+  } else if (!already_selected
+      && scan.reasoning_slider != NULL
+      && scan.reasoning_slider_count == 1
+      && previous_index >= 0
+      && requested_index >= 0) {
+    // Some Codex builds expose only the compact slider. Keep this in one
+    // verified transaction too. A real AXSlider is assigned its final value
+    // directly; the anonymous Chromium track needs ordinary arrow notches.
+    range_known = copy_codex_reasoning_slider_range(
+      scan.reasoning_slider,
+      &before_value,
+      &minimum,
+      &maximum
+    );
+    if (!scan.reasoning_slider_is_track && range_known) {
+      double target_value = minimum + (maximum - minimum)
+        * ((double)requested_index
+          / (double)(CODEX_VISIBLE_REASONING_EFFORT_COUNT - 1));
+      CFNumberRef value = CFNumberCreate(
+        kCFAllocatorDefault,
+        kCFNumberDoubleType,
+        &target_value
+      );
+      acted = codex_is_frontmost()
+        && AXUIElementSetAttributeValue(
+          scan.reasoning_slider,
+          kAXValueAttribute,
+          value
+        ) == kAXErrorSuccess;
+      CFRelease(value);
+    } else {
+      int distance = abs(requested_index - previous_index);
+      acted = distance > 0;
+      for (int step = 0; acted && step < distance; step += 1) {
+        acted = step_codex_reasoning_track(
+          scan.reasoning_slider,
+          scan.reasoning_slider_size,
+          direction
+        );
+        if (acted) usleep(35000);
+      }
+    }
+    if (acted) usleep(70000);
+    after_range_known = copy_codex_reasoning_slider_range(
+      scan.reasoning_slider,
+      &after_value,
+      &after_minimum,
+      &after_maximum
+    );
+    boundaries_known = true;
+  }
+
+  CodexUltraConfirmationResult ultra_confirmation = CODEX_ULTRA_CONFIRMATION_ABSENT;
+  if (acted && strcmp(requested, "ultra") == 0) {
+    ultra_confirmation = confirm_codex_ultra_full_access_warning(1.1);
+    if (ultra_confirmation == CODEX_ULTRA_CONFIRMATION_BLOCKED) acted = false;
+  }
+
+  CodexFastModeValue fast_value = scan.value;
+  if (ultra_confirmation != CODEX_ULTRA_CONFIRMATION_BLOCKED) {
+    close_codex_intelligence_popover_if_opened(trigger);
+  }
+  const char *reasoning = acted
+    ? wait_for_codex_reasoning_effort_change(
+      previous,
+      requested,
+      2.4,
+      &fast_value
+    )
+    : previous;
+  bool label_changed = reasoning != NULL
+    && (previous == NULL || strcmp(reasoning, previous) != 0);
+  double epsilon = range_known && after_range_known
+    ? fmax((after_maximum - after_minimum) / 1000.0, 0.000001)
+    : 0;
+  bool numeric_changed = acted && range_known && after_range_known
+    && fabs(after_value - before_value) > epsilon;
+  bool changed = label_changed || numeric_changed;
+  bool verified = reasoning != NULL
+    && strcmp(reasoning, requested) == 0
+    && (already_selected || acted);
+  if (!boundaries_known) {
+    at_minimum = codex_reasoning_effort_is_minimum(reasoning);
+    at_maximum = codex_reasoning_effort_is_maximum(reasoning);
+  }
+  bool composer_focused = restore_codex_composer_after_fast_mode();
+  const char *service_tier = fast_value == CODEX_FAST_MODE_ON
+    ? "priority"
+    : fast_value == CODEX_FAST_MODE_OFF
+      ? "default"
+      : "unknown";
+  printf(
+    "requested=%s previous=%s reasoning=%s service_tier=%s available=1 changed=%d verified=%d direction=%s at_min=%d at_max=%d composer_focused=%d\n",
+    requested,
+    previous != NULL ? previous : "unknown",
+    reasoning != NULL ? reasoning : "unknown",
+    service_tier,
+    changed ? 1 : 0,
+    verified ? 1 : 0,
+    codex_reasoning_direction_name(direction),
+    at_minimum ? 1 : 0,
+    at_maximum ? 1 : 0,
+    composer_focused ? 1 : 0
+  );
+  release_codex_fast_mode_scan(&scan);
+  CFRelease(trigger);
+  return verified ? 0 : 1;
+}
+
 static int codex_reasoning_effort_selftest(void) {
   bool upper_reverses = codex_reasoning_direction_for_boundary(
     CODEX_REASONING_DIRECTION_UP,
@@ -6211,6 +6520,15 @@ static int codex_reasoning_effort_selftest(void) {
     0,
     0
   ) == CODEX_REASONING_DIRECTION_UP;
+  bool exact_set_targets_are_bounded =
+    !codex_reasoning_effort_is_visible_target("minimal")
+    && codex_reasoning_effort_is_visible_target("low")
+    && codex_reasoning_effort_is_visible_target("medium")
+    && codex_reasoning_effort_is_visible_target("high")
+    && codex_reasoning_effort_is_visible_target("xhigh")
+    && codex_reasoning_effort_is_visible_target("max")
+    && codex_reasoning_effort_is_visible_target("ultra")
+    && !codex_reasoning_effort_is_visible_target("unknown");
   bool exact_ultra_warning_vocabulary =
     (codex_ultra_warning_text_flags(CFSTR("Use Ultra with Full access?"))
       & CODEX_ULTRA_WARNING_TITLE) != 0
@@ -6223,15 +6541,17 @@ static int codex_reasoning_effort_selftest(void) {
       & CODEX_ULTRA_WARNING_CONTINUE) != 0
     && codex_ultra_warning_text_flags(CFSTR("Confirm another setting")) == 0;
   printf(
-    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_ultra_warning_vocabulary=%d\n",
+    "upper_reverses=%d lower_reverses=%d middle_preserves=%d max_can_advance_to_ultra=%d exact_set_targets_are_bounded=%d exact_ultra_warning_vocabulary=%d\n",
     upper_reverses ? 1 : 0,
     lower_reverses ? 1 : 0,
     middle_preserves ? 1 : 0,
     max_can_advance_to_ultra ? 1 : 0,
+    exact_set_targets_are_bounded ? 1 : 0,
     exact_ultra_warning_vocabulary ? 1 : 0
   );
   return upper_reverses && lower_reverses && middle_preserves
-    && max_can_advance_to_ultra && exact_ultra_warning_vocabulary ? 0 : 1;
+    && max_can_advance_to_ultra && exact_set_targets_are_bounded
+    && exact_ultra_warning_vocabulary ? 0 : 1;
 }
 
 static int toggle_codex_fast_mode(void) {
@@ -6560,6 +6880,43 @@ typedef struct {
   unsigned right_index;
 } CodexComposerControls;
 
+static bool codex_side_chat_composer_pair_geometry_is_plausible(
+  CGPoint left_position,
+  CGSize left_size,
+  CGPoint right_position,
+  CGPoint window_origin,
+  CGSize window_size
+) {
+  if (window_size.width <= 0 || window_size.height <= 0) return false;
+  const double minimum_x = window_origin.x + window_size.width * 0.72;
+  const double minimum_y = window_origin.y + window_size.height * 0.60;
+  const double row_delta = fabs(left_position.y - right_position.y);
+  const double gap = right_position.x - (left_position.x + left_size.width);
+  return left_position.x >= minimum_x
+    && right_position.x >= minimum_x
+    && left_position.y >= minimum_y
+    && row_delta <= 3
+    && gap >= 4
+    && gap <= 18;
+}
+
+static bool codex_composer_controls_target_side_chat(
+  const CodexComposerControls *controls
+) {
+  if (controls == NULL
+      || controls->left_index >= controls->button_state.button_count
+      || controls->right_index >= controls->button_state.button_count) return false;
+  CodexDictationButton left = controls->button_state.buttons[controls->left_index];
+  CodexDictationButton right = controls->button_state.buttons[controls->right_index];
+  return codex_side_chat_composer_pair_geometry_is_plausible(
+    left.position,
+    left.size,
+    right.position,
+    controls->window_origin,
+    controls->window_size
+  );
+}
+
 static bool find_codex_composer_button_pair(
   CodexDictationButtonState *state,
   CGPoint window_origin,
@@ -6701,6 +7058,7 @@ typedef struct {
   unsigned visited;
   CGPoint window_origin;
   CGSize window_size;
+  double minimum_x;
   double best_score;
 } CodexComposerInputState;
 
@@ -6725,7 +7083,7 @@ static void collect_codex_composer_inputs(
     && copy_element_size(element, &size);
   const double geometry_tolerance = 2.0;
   bool in_composer_region = has_geometry
-    && position.x >= state->window_origin.x - geometry_tolerance
+    && position.x >= state->minimum_x - geometry_tolerance
     && position.x + size.width <= state->window_origin.x + state->window_size.width + geometry_tolerance
     && position.y >= state->window_origin.y + state->window_size.height * 0.55
     && position.y + size.height <= state->window_origin.y + state->window_size.height + geometry_tolerance
@@ -6760,26 +7118,40 @@ static void collect_codex_composer_inputs(
   CFRelease(children_value);
 }
 
-static AXUIElementRef copy_codex_composer_input(CodexComposerControls *controls) {
+static AXUIElementRef copy_codex_composer_input_in_region(
+  CodexComposerControls *controls,
+  double minimum_x
+) {
   CodexComposerInputState state = {
     .element = NULL,
     .visited = 0,
     .window_origin = controls->window_origin,
     .window_size = controls->window_size,
+    .minimum_x = minimum_x,
     .best_score = -1
   };
   collect_codex_composer_inputs(controls->window, 0, &state);
   return state.element;
 }
 
-static bool focus_codex_composer_with_controls(CodexComposerControls *controls) {
+static bool focus_codex_composer_with_controls_in_region(
+  CodexComposerControls *controls,
+  double minimum_x
+) {
   if (!codex_is_frontmost()) return false;
-  AXUIElementRef input = copy_codex_composer_input(controls);
+  AXUIElementRef input = copy_codex_composer_input_in_region(controls, minimum_x);
   bool focused = focus_accessibility_element(input);
   if (input != NULL) CFRelease(input);
   if (!focused) return false;
   usleep(12000);
   return frontmost_focused_element_is_text_input();
+}
+
+static bool focus_codex_composer_with_controls(CodexComposerControls *controls) {
+  return focus_codex_composer_with_controls_in_region(
+    controls,
+    controls->window_origin.x
+  );
 }
 
 static bool focus_codex_composer_if_visible(void) {
@@ -6809,6 +7181,54 @@ static bool focus_codex_composer_if_visible(void) {
   bool focused = focus_codex_composer_with_controls(&controls);
   release_codex_composer_controls(&controls);
   return focused;
+}
+
+static bool focus_codex_side_chat_composer_if_visible(void) {
+  if (!codex_is_frontmost()) return false;
+  CodexComposerControls controls = { 0 };
+  if (!copy_codex_composer_controls_with_timeout(&controls, 0.22)) return false;
+  bool focused = false;
+  if (codex_composer_controls_target_side_chat(&controls)) {
+    focused = focus_codex_composer_with_controls_in_region(
+      &controls,
+      controls.window_origin.x + controls.window_size.width * 0.58
+    );
+  }
+  release_codex_composer_controls(&controls);
+  return focused;
+}
+
+static int codex_side_chat_composer_selftest(void) {
+  CGPoint origin = CGPointMake(100, 80);
+  CGSize window = CGSizeMake(1200, 800);
+  bool side_chat = codex_side_chat_composer_pair_geometry_is_plausible(
+    CGPointMake(1030, 742),
+    CGSizeMake(34, 34),
+    CGPointMake(1072, 742),
+    origin,
+    window
+  );
+  bool main_composer_rejected = !codex_side_chat_composer_pair_geometry_is_plausible(
+    CGPointMake(760, 742),
+    CGSizeMake(34, 34),
+    CGPointMake(802, 742),
+    origin,
+    window
+  );
+  bool upper_panel_rejected = !codex_side_chat_composer_pair_geometry_is_plausible(
+    CGPointMake(1030, 300),
+    CGSizeMake(34, 34),
+    CGPointMake(1072, 300),
+    origin,
+    window
+  );
+  printf(
+    "side_chat=%d main_rejected=%d upper_rejected=%d\n",
+    side_chat ? 1 : 0,
+    main_composer_rejected ? 1 : 0,
+    upper_panel_rejected ? 1 : 0
+  );
+  return side_chat && main_composer_rejected && upper_panel_rejected ? 0 : 1;
 }
 
 static bool submit_codex_composer_if_visible(void) {
@@ -8248,6 +8668,10 @@ int main(int argc, char **argv) {
     }
     return 64;
   }
+  if (strcmp(argv[1], "reasoning-effort-set") == 0) {
+    if (argc != 3) return 64;
+    return set_codex_reasoning_effort(argv[2]);
+  }
   if (strcmp(argv[1], "codex-find-thread") == 0) {
     if (argc < 4) return 64;
     return find_or_open_codex_thread(
@@ -8329,6 +8753,9 @@ int main(int argc, char **argv) {
   }
   if (strcmp(argv[1], "focused-thread-geometry-selftest") == 0) {
     return focused_thread_geometry_selftest();
+  }
+  if (strcmp(argv[1], "side-chat-composer-selftest") == 0) {
+    return codex_side_chat_composer_selftest();
   }
   if (strcmp(argv[1], "media-bundle-selftest") == 0) return media_bundle_selftest();
   if (strcmp(argv[1], "preflight") == 0) {
@@ -8424,6 +8851,9 @@ int main(int argc, char **argv) {
   }
   else if (strcmp(argv[1], "codex-focus-composer") == 0) {
     return focus_codex_composer_if_visible() ? 0 : 1;
+  }
+  else if (strcmp(argv[1], "codex-focus-side-chat-composer") == 0) {
+    return focus_codex_side_chat_composer_if_visible() ? 0 : 1;
   }
   else if (strcmp(argv[1], "codex-submit-composer") == 0) {
     return submit_codex_composer_if_visible() ? 0 : 1;
