@@ -24,7 +24,7 @@
 
 기능 개요와 ThreadDeck 제스처 GIF는 개인정보 없는 예시 작업을 사용해 플러그인의 실제 SVG 버튼 렌더러에서 생성했습니다. 설명용 타임라인은 실제 버튼 그림 바깥에만 놓입니다. 기본 앱 실행 버튼은 Elgato 소유 액션이므로 별도 GIF에는 Stream Deck이나 앱 그림을 복제하지 않고 중립적인 안내 버튼을 사용합니다.
 
-![진행 중인 작업, 작업 버튼 음성 입력, 대기열 진행, 전체 완료 펄스를 보여주는 ThreadDeck 흐름](docs/media/threaddeck-demo.gif)
+![진행 중인 작업, 작업 버튼 음성 입력, 대기열 진행, 전체 완료 펄스를 보여주는 ThreadDeck 흐름](docs/media/threaddeck-overview.gif)
 
 > [!IMPORTANT]
 > ThreadDeck은 Codex의 공개되지 않은 로컬 메타데이터를 읽는 독립 베타입니다. Codex 업데이트 뒤 작업 감지가 일시적으로 깨질 수 있습니다. Codex 데이터베이스와 세션 파일에는 절대 쓰지 않습니다.

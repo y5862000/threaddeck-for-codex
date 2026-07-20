@@ -24,7 +24,7 @@
 
 The overview and ThreadDeck gesture demos below are generated from the plugin's real SVG key renderer with sanitized example tasks. Their explanatory timelines sit outside the real key image. The bundled app launchers are Elgato-owned actions, so their separate GIF uses a neutral guide key instead of copying Stream Deck or application artwork.
 
-![ThreadDeck workflow showing a live task, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-demo.gif)
+![ThreadDeck workflow showing a live task, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-overview.gif)
 
 > [!IMPORTANT]
 > ThreadDeck is an independent beta that reads undocumented local Codex metadata. A Codex update can temporarily break task detection. It never writes to Codex database or session files.

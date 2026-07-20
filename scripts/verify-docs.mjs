@@ -31,7 +31,7 @@ for (const file of markdownFiles) {
 const requiredImages = [
   "docs/media/neo-preview.png",
   "docs/media/neo-preview-light.png",
-  "docs/media/threaddeck-demo.gif",
+  "docs/media/threaddeck-overview.gif",
   "docs/media/task-hold-to-talk.gif",
   "docs/media/voice-hold-to-dictate.gif",
   "docs/media/send-long-press.gif",
@@ -140,7 +140,7 @@ function gifMetadata(buffer) {
 }
 
 const expectedGifMetadata = new Map([
-  ["docs/media/threaddeck-demo.gif", { width: 960, height: 507, frames: 72, delay: 8 }],
+  ["docs/media/threaddeck-overview.gif", { width: 960, height: 507, frames: 72, delay: 8 }],
   ["docs/media/task-hold-to-talk.gif", { width: 960, height: 420, frames: 60, delay: 10 }],
   ["docs/media/voice-hold-to-dictate.gif", { width: 960, height: 420, frames: 52, delay: 10 }],
   ["docs/media/send-long-press.gif", { width: 960, height: 420, frames: 54, delay: 10 }],

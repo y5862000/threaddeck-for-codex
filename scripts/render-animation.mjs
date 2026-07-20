@@ -8,7 +8,7 @@ import { rasterizeSvg } from "./rasterize.mjs";
 
 const root = path.resolve(import.meta.dirname, "..");
 const overviewOutputPath = path.resolve(
-  process.argv[2] || path.join(root, "docs", "media", "threaddeck-demo.gif")
+  process.argv[2] || path.join(root, "docs", "media", "threaddeck-overview.gif")
 );
 const temporaryDirectory = fs.mkdtempSync(path.join(os.tmpdir(), "threaddeck-animation-"));
 const mediaDirectory = path.join(root, "docs", "media");
