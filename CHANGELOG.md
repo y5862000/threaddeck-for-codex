@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+## 0.5.1-beta — 2026-07-21
+
+- Replaced the Effort transport with the exact internal composer command used by the Codex Micro encoder. Ordinary visible levels now coalesce for only 90 ms and apply the final movement once, while the hardware track begins a 320 ms eased transition immediately on every tap.
+- Added a guarded exact-level correction for `Max` and `Ultra`, plus any encoder result that skips the requested level. ThreadDeck waits for the 1.1-second input pause, opens the verified `Advanced` picker, scans only the levels exposed by the current model/account, and selects the exact target. The Ultra warning still activates only `Use Full access`, never the permission-changing `Continue` path.
+- Applied the same bidirectional progress animation to both the next-run Effort control and a task header when that task's actual turn metadata changes. A running task still preserves the Effort/Fast values captured for its current turn instead of borrowing the next-run composer setting.
+- Normalized renderer-local Micro slot keys such as `local:<UUID>` to ThreadDeck's canonical task identity while preserving the exact raw key for native switching. A task selected manually in Codex now immediately supersedes a provisional Side Chat lease, so Current Task, Effort, Fast, microphone, Send, and new Side Chat actions follow the visible task instead of switching back.
+
 ## 0.5.0-beta — 2026-07-21
 
 - Introduced a Micro-first control plane that separates user intent from the transport used to reach Codex. Effort, Fast mode, Side Chat, normal Send, New Task, push-to-talk, and the six native Micro task slots now use Codex's internal renderer events when the guarded loopback bridge is available; the existing Accessibility/keybridge path remains a verified fallback.

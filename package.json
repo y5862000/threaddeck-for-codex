@@ -1,6 +1,6 @@
 {
   "name": "threaddeck-for-codex",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "private": true,
   "description": "A bilingual Codex Stream Deck plugin for monitoring, switching, and dictating into Codex Desktop tasks on Stream Deck Neo.",
   "license": "MIT",

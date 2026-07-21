@@ -169,9 +169,11 @@ if (effortUpdateStart < 0 || effortUpdateEnd < 0) {
 }
 const effortUpdateBody = pluginSource.slice(effortUpdateStart, effortUpdateEnd);
 if (!effortUpdateBody.includes('["reasoning-effort-step", stepDirection, String(count)]')
+    || !effortUpdateBody.includes('["reasoning-effort-set", effort]')
+    || !effortUpdateBody.includes("needsAdvancedFallback || microNeedsExactCorrection")
     || !effortUpdateBody.includes("confirmed?.availableEfforts")
-    || effortUpdateBody.includes("reasoning-effort-set")) {
-  throw new Error("Reasoning updates must send step counts and trust only native-scanned options");
+    || !effortUpdateBody.includes("confirmedEffort !== exactTargetEffort")) {
+  throw new Error("Reasoning updates must use Micro steps normally and exact Advanced correction only for a verified target");
 }
 const ultraConfirmationBody = functionBodyFromSignature(
   "static CodexUltraConfirmationResult confirm_codex_ultra_full_access_warning("

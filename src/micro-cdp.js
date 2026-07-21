@@ -34,6 +34,7 @@ const REASONING_ENCODER_KEYS = Object.freeze({
   decrease: "ENC_CW",
   increase: "ENC_CC"
 });
+const CODEX_THREAD_UUID_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const OFFICIAL_KEYCAP_IDS = new Set([
   "FAST",
   "PARTY",
@@ -107,6 +108,14 @@ function parseDebugPortFromCommand(command) {
   return Number.isInteger(value) && value > 0 && value <= 65535 ? value : null;
 }
 
+function microThreadIdFromKey(value) {
+  const key = typeof value === "string" ? value.trim() : "";
+  if (!key) return null;
+  const uuid = key.match(CODEX_THREAD_UUID_PATTERN)?.[1];
+  if (uuid) return uuid.toLowerCase();
+  return key.startsWith("local:") ? key.slice("local:".length) || null : key;
+}
+
 function normalizeMicroSlot(slot, index) {
   if (!slot || typeof slot !== "object") return null;
   const id = Number.isInteger(slot.id) ? slot.id : index;
@@ -117,6 +126,7 @@ function normalizeMicroSlot(slot, index) {
   return {
     id,
     threadKey,
+    threadId: microThreadIdFromKey(threadKey),
     title: typeof slot.title === "string" ? slot.title : null,
     status: typeof slot.status === "string" ? slot.status : null,
     selected: slot.selected === true,
@@ -128,9 +138,7 @@ function normalizeMicroSnapshot(value) {
   const snapshot = value && typeof value === "object" ? value : {};
   return {
     connected: snapshot.connected === true,
-    activeThreadKey: typeof snapshot.activeThreadKey === "string" && snapshot.activeThreadKey
-      ? snapshot.activeThreadKey
-      : null,
+    activeThreadKey: microThreadIdFromKey(snapshot.activeThreadKey),
     reasoningEffort: typeof snapshot.reasoningEffort === "string" && snapshot.reasoningEffort
       ? snapshot.reasoningEffort.toLowerCase()
       : null,
@@ -434,6 +442,122 @@ function runKeycapExpression(keycapId) {
   })()`;
 }
 
+function runReasoningEncoderExpression(direction, count = 1, options = {}) {
+  const powerSelectionDirection = direction === "decrease"
+    ? "decrease"
+    : direction === "increase" ? "increase" : null;
+  if (!powerSelectionDirection) {
+    throw new TypeError(`Unknown reasoning direction: ${direction}`);
+  }
+  const repeat = Math.max(1, Math.min(64, Math.trunc(count)));
+  const confirmUltra = options.confirmUltra === true;
+  return `(async () => {
+    ${ASSET_URLS_SOURCE}
+    const moduleUrl = (prefix) => urls.find((value) => value.includes('/assets/' + prefix));
+    const commandsUrl = moduleUrl('run-command-');
+    const bridgeUrl = moduleUrl('codex-micro-bridge-');
+    let commandRunner = null;
+    if (commandsUrl) {
+      const commands = await import(commandsUrl);
+      commandRunner = Object.values(commands).find((candidate) => typeof candidate === 'function' && Function.prototype.toString.call(candidate).includes('codex_micro')) ?? commands.i ?? null;
+    }
+    if (!commandRunner && bridgeUrl) {
+      const bridgeSource = await (await fetch(bridgeUrl)).text();
+      const runnerMatch = bridgeSource.match(/([A-Za-z_$][\\w$]*)\\(\\s*[A-Za-z_$][\\w$]*\\??\\.command\\s*,["'\\x60]codex_micro_hid["'\\x60]\\)/);
+      const runnerLocal = runnerMatch?.[1];
+      const importPattern = /import\\s*\\{([^}]*)\\}\\s*from\\s*["']([^"']+)["']/g;
+      let importMatch;
+      while (runnerLocal && (importMatch = importPattern.exec(bridgeSource))) {
+        for (const specifier of importMatch[1].split(',')) {
+          const parts = specifier.trim().split(/\\s+as\\s+/);
+          const exportName = parts[0];
+          const localName = parts[1] ?? parts[0];
+          if (localName !== runnerLocal) continue;
+          const namespace = await import(new URL(importMatch[2], bridgeUrl).href);
+          if (typeof namespace[exportName] === 'function') commandRunner = namespace[exportName];
+          break;
+        }
+        if (commandRunner) break;
+      }
+    }
+    if (typeof commandRunner !== 'function') {
+      return { deliveredCount: 0, requestedCount: ${repeat}, error: 'Codex command runner is unavailable.' };
+    }
+    let deliveredCount = 0;
+    let error = null;
+    for (let index = 0; index < ${repeat}; index += 1) {
+      try {
+        const handled = commandRunner(
+          'composer.openModelPicker',
+          'codex_micro_encoder',
+          {
+            modelPicker: {
+              menuView: 'simple',
+              powerSelectionDirection: ${JSON.stringify(powerSelectionDirection)}
+            }
+          }
+        );
+        if (handled === false) {
+          error = 'Codex reasoning command is not active in the current view.';
+          break;
+        }
+        deliveredCount += 1;
+        if (index + 1 < ${repeat}) await new Promise((resolve) => setTimeout(resolve, 90));
+      } catch (caught) {
+        error = String(caught?.message ?? caught ?? 'Codex reasoning command failed.');
+        break;
+      }
+    }
+    let ultraConfirmed = false;
+    if (${confirmUltra} && deliveredCount > 0) {
+      try {
+        const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
+        const deadline = Date.now() + 900;
+        while (Date.now() < deadline && !ultraConfirmed) {
+          const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+            .filter((dialog) => dialog.getClientRects().length > 0);
+          for (const dialog of dialogs) {
+            const text = normalize(dialog.innerText || dialog.textContent);
+            const exactWarning = (
+              (text.includes('use ultra with full access?')
+                && text.includes('extended reasoning')
+                && text.includes('without asking'))
+              || (text.includes('ultra')
+                && text.includes('전체 액세스')
+                && text.includes('확장')
+                && text.includes('묻지 않'))
+            );
+            if (!exactWarning) continue;
+            const buttons = [...dialog.querySelectorAll('button')]
+              .filter((button) => button.getClientRects().length > 0 && !button.disabled);
+            const fullAccessButtons = buttons.filter((button) => [
+              'use full access',
+              '전체 액세스 사용',
+              '전체 접근 권한 사용'
+            ].includes(normalize(button.innerText || button.textContent || button.getAttribute('aria-label'))));
+            const continueButtons = buttons.filter((button) => [
+              'continue',
+              '계속',
+              '계속하기'
+            ].includes(normalize(button.innerText || button.textContent || button.getAttribute('aria-label'))));
+            if (fullAccessButtons.length !== 1 || continueButtons.length !== 1) {
+              throw new Error('Ultra confirmation controls are ambiguous.');
+            }
+            fullAccessButtons[0].click();
+            ultraConfirmed = true;
+            break;
+          }
+          if (!ultraConfirmed) await new Promise((resolve) => setTimeout(resolve, 30));
+        }
+        if (ultraConfirmed) await new Promise((resolve) => setTimeout(resolve, 120));
+      } catch (caught) {
+        error = String(caught?.message ?? caught ?? 'Ultra confirmation failed.');
+      }
+    }
+    return { deliveredCount, requestedCount: ${repeat}, ultraConfirmed, error };
+  })()`;
+}
+
 function dispatchHostMessageExpression(type) {
   return `(async () => {
     ${ASSET_URLS_SOURCE}
@@ -635,8 +759,7 @@ class CodexMicroBridge {
   }
 
   async adjustReasoning(direction, count = 1, options = {}) {
-    const key = REASONING_ENCODER_KEYS[direction];
-    if (!key) {
+    if (!REASONING_ENCODER_KEYS[direction]) {
       throw new MicroBridgeError(`Unknown reasoning direction: ${direction}`, {
         code: "MICRO_CAPABILITY_UNAVAILABLE",
         delivery: "none"
@@ -645,16 +768,26 @@ class CodexMicroBridge {
     try {
       await this.ensureConnected();
       await this.activateRuntime();
-      return await this.evaluate(dispatchHidExpression({
-        key,
-        act: 2,
-        slot: null,
-        threadKey: null
-      }, {
-        repeat: count,
-        intervalMs: 70,
-        confirmUltra: options.confirmUltra === true
-      }), { timeoutMs: 3600 + Math.max(1, count) * 120 });
+      const requestedCount = Math.max(1, Math.min(64, Math.trunc(count)));
+      const result = await this.evaluate(
+        runReasoningEncoderExpression(direction, requestedCount, options),
+        { timeoutMs: 3600 + requestedCount * 140 }
+      );
+      const deliveredCount = Math.max(0, Math.trunc(result?.deliveredCount ?? 0));
+      if (result?.error || deliveredCount !== requestedCount) {
+        throw new MicroBridgeError(
+          result?.error
+            ? `Codex Micro reasoning adjustment stopped: ${result.error}`
+            : `Codex Micro reasoning adjustment delivered ${deliveredCount}/${requestedCount} steps.`,
+          {
+            code: deliveredCount > 0
+              ? "MICRO_PARTIAL_DELIVERY"
+              : "MICRO_CAPABILITY_UNAVAILABLE",
+            delivery: deliveredCount > 0 ? "unknown" : "none"
+          }
+        );
+      }
+      return result;
     } catch (error) {
       throw this.normalizeError(error, "reasoning adjustment");
     }
@@ -662,14 +795,15 @@ class CodexMicroBridge {
 
   async openThread(threadKey, options = {}) {
     await this.activateRuntime();
+    const threadId = microThreadIdFromKey(threadKey);
     let snapshot = options.snapshot ?? this.lastSnapshot ?? await this.refreshReadOnly();
-    let slot = snapshot.slots.find((candidate) => candidate.threadKey === threadKey);
+    let slot = snapshot.slots.find((candidate) => candidate.threadId === threadId);
     if (!slot) {
       try {
         await this.ensureConnected();
         await this.evaluate(ACTIVATE_HID_EXPRESSION);
         snapshot = await this.refreshReadOnly();
-        slot = snapshot.slots.find((candidate) => candidate.threadKey === threadKey);
+        slot = snapshot.slots.find((candidate) => candidate.threadId === threadId);
       } catch (error) {
         throw this.normalizeError(error, "Micro slot activation");
       }
@@ -686,9 +820,9 @@ class CodexMicroBridge {
         key: `AG0${slot.id}`,
         act: 1,
         slot: slot.id,
-        threadKey
+        threadKey: slot.threadKey
       }, { repeat: 1, intervalMs: 0 }));
-      return { slot: slot.id, threadKey };
+      return { slot: slot.id, threadKey: slot.threadKey, threadId: slot.threadId };
     } catch (error) {
       throw this.normalizeError(error, "task switch");
     }
@@ -915,9 +1049,11 @@ module.exports = {
   MicroBridgeError,
   REASONING_ENCODER_KEYS,
   isLoopbackWebSocketUrl,
+  microThreadIdFromKey,
   normalizeMicroSnapshot,
   parseDebugPortFromCommand,
   retainEvaluationPromise,
+  runReasoningEncoderExpression,
   runKeycapExpression,
   selectCodexMainTarget
 };

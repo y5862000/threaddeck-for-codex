@@ -9,9 +9,11 @@ const {
   CodexMicroBridge,
   MicroBridgeError,
   isLoopbackWebSocketUrl,
+  microThreadIdFromKey,
   normalizeMicroSnapshot,
   parseDebugPortFromCommand,
   retainEvaluationPromise,
+  runReasoningEncoderExpression,
   runKeycapExpression,
   selectCodexMainTarget
 } = require("../src/micro-cdp");
@@ -76,6 +78,7 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
     slots: [{
       id: 0,
       threadKey: "thread-1",
+      threadId: "thread-1",
       title: "Build",
       status: "working",
       selected: true,
@@ -83,6 +86,19 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
     }],
     capabilities: { command: true, hostMessage: true, hid: false, slots: true }
   });
+});
+
+test("normalizes renderer-local Micro keys while preserving their HID identity", () => {
+  const threadId = "019f6bcb-ad00-7bf2-96a4-7a35f3709515";
+  const snapshot = normalizeMicroSnapshot({
+    connected: true,
+    activeThreadKey: `local:${threadId}`,
+    slots: [{ id: 0, threadKey: `local:${threadId}` }]
+  });
+  assert.equal(snapshot.activeThreadKey, threadId);
+  assert.equal(snapshot.slots[0].threadId, threadId);
+  assert.equal(snapshot.slots[0].threadKey, `local:${threadId}`);
+  assert.equal(microThreadIdFromKey(`remote:macbook:${threadId}`), threadId);
 });
 
 test("keeps each awaited renderer evaluation reachable", () => {
@@ -96,6 +112,10 @@ test("all generated renderer entrypoints remain syntactically valid", () => {
   assertRendererExpressionParses(READ_ONLY_SNAPSHOT_EXPRESSION);
   assertRendererExpressionParses(ACTIVATE_RUNTIME_EXPRESSION);
   assertRendererExpressionParses(runKeycapExpression("FAST"));
+  assertRendererExpressionParses(runReasoningEncoderExpression("increase", 3));
+  assert.match(runReasoningEncoderExpression("decrease"), /composer\.openModelPicker/);
+  assert.match(runReasoningEncoderExpression("decrease"), /codex_micro_encoder/);
+  assert.match(runReasoningEncoderExpression("decrease"), /powerSelectionDirection: "decrease"/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /3207467860/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /codex-micro-device-state-changed/);
 });
@@ -150,4 +170,51 @@ test("an ambiguous keycap failure is never replayed during activation", async ()
   };
   await assert.rejects(() => bridge.runKeycap("PARTY"), /timeout/);
   assert.equal(activations, 0);
+});
+
+test("reasoning adjustment uses the native Micro encoder command and detects partial delivery", async () => {
+  const bridge = new CodexMicroBridge();
+  bridge.ensureConnected = async () => {};
+  bridge.activateRuntime = async () => true;
+  let expression = "";
+  bridge.evaluate = async (value) => {
+    expression = value;
+    return { deliveredCount: 2, requestedCount: 2, ultraConfirmed: false, error: null };
+  };
+  assert.equal((await bridge.adjustReasoning("increase", 2)).deliveredCount, 2);
+  assert.match(expression, /powerSelectionDirection: "increase"/);
+
+  bridge.evaluate = async () => ({
+    deliveredCount: 1,
+    requestedCount: 2,
+    ultraConfirmed: false,
+    error: "stopped"
+  });
+  await assert.rejects(
+    () => bridge.adjustReasoning("increase", 2),
+    (error) => error.code === "MICRO_PARTIAL_DELIVERY" && error.delivery === "unknown"
+  );
+});
+
+test("task switching matches canonical ids but sends the exact Micro slot key", async () => {
+  const threadId = "019f6bcb-ad00-7bf2-96a4-7a35f3709515";
+  const bridge = new CodexMicroBridge();
+  bridge.activateRuntime = async () => true;
+  bridge.ensureConnected = async () => {};
+  bridge.lastSnapshot = normalizeMicroSnapshot({
+    connected: true,
+    slots: [{ id: 2, threadKey: `local:${threadId}` }]
+  });
+  let expression = "";
+  bridge.evaluate = async (value) => {
+    expression = value;
+    return { delivered: true };
+  };
+  assert.deepEqual(await bridge.openThread(threadId), {
+    slot: 2,
+    threadKey: `local:${threadId}`,
+    threadId
+  });
+  assert.match(expression, new RegExp(`local:${threadId}`));
+  assert.match(expression, /AG02/);
 });
