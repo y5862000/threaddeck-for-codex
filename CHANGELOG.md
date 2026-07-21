@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+- Switched an already listed Side Chat through its exact renderer UUID before focusing the composer. This avoids stale title-based verification and keeps semantic Side Chat misses local to that key instead of raising a deck-wide input-permission warning.
+- Added a 720 ms eased release when an unread-completion pulse is acknowledged, so the selected task settles back to its resting card instead of losing the green highlight in one frame.
+- Replaced the top-heavy custom Fast overlay on the combined Effort control with the rounded Material Symbols bolt. The Effort label remains geometrically centered while the separately positioned glyph keeps a measured safe gap for every supported level.
+
 ## 0.5.3-beta — 2026-07-21
 
 - Moved the verified Fast bolt on the combined Reasoning control from the upper-right corner to immediately left of the current Effort label. The level name itself remains fixed at the exact key center; the larger bolt now uses measured bold-system-font advances for every visible label plus a safe raster gap, instead of the generic title-width estimate that could overlap `MAX`.

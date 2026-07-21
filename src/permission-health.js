@@ -55,7 +55,9 @@ function bridgeFailureStaysLocal(command) {
   // permission. Real Accessibility / event-posting failures are classified
   // from permission-health (or native exit codes 77-79) before this helper is
   // consulted.
-  return String(command ?? "").startsWith("reasoning-effort-");
+  const value = String(command ?? "");
+  return value.startsWith("reasoning-effort-")
+    || value === "codex-open-side-chat";
 }
 
 module.exports = {

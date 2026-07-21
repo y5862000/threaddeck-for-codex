@@ -135,6 +135,7 @@ const {
   THREAD_VOICE_LONG_PRESS_MS,
   UNREAD_COMPLETION_FRAME_INTERVAL_MS,
   UNREAD_COMPLETION_GROUP_COUNT,
+  UNREAD_COMPLETION_DISMISS_FADE_MS,
   UNREAD_COMPLETION_PULSE_PERIOD_MS,
   VOICE_AUTO_SUBMIT_STABLE_MS,
   VOICE_COMPLETE_DISPLAY_MS,
@@ -359,6 +360,7 @@ const operationFailureByCapability = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
 const unreadCompletionByThreadId = new Map();
+const completionDismissFadeByThreadId = new Map();
 const observedCompletionEndMs = new Map();
 const completionQueueBarrierMsByThreadId = new Map();
 const pendingCompletionByThreadId = new Map();
@@ -1090,10 +1092,28 @@ function unreadCompletionPulseState(threadId, nowMs = renderTimeMs()) {
   };
 }
 
+function completionDismissFadeState(threadId, nowMs = renderTimeMs()) {
+  const fade = completionDismissFadeByThreadId.get(threadId);
+  if (!fade) return null;
+  const elapsedMs = Math.max(0, nowMs - fade.startedAtMs);
+  if (elapsedMs >= UNREAD_COMPLETION_DISMISS_FADE_MS) return null;
+  const progress = elapsedMs / UNREAD_COMPLETION_DISMISS_FADE_MS;
+  // Preserve the exact brightness visible when the completion is acknowledged,
+  // then ease both opacity and stroke width to rest without a one-frame cut.
+  const release = 1 - smootherStep01(progress);
+  return {
+    elapsedMs,
+    progress,
+    strength: fade.initialStrength * release,
+    dismissal: true
+  };
+}
+
 function visibleCompletionPulseState(thread, nowMs = renderTimeMs()) {
   if (!thread?.id || thread.status !== "completed") return null;
   return completionPulseState(thread.id, nowMs)
-    ?? unreadCompletionPulseState(thread.id, nowMs);
+    ?? unreadCompletionPulseState(thread.id, nowMs)
+    ?? completionDismissFadeState(thread.id, nowMs);
 }
 
 function globalCompletionPulseState(nowMs = renderTimeMs()) {
@@ -1748,6 +1768,14 @@ const REASONING_CONTROL_LABEL_METRICS = Object.freeze({
   EFFORT: Object.freeze({ fontSize: 23, width: 82.0 })
 });
 
+// Material Symbols Rounded `bolt`, weight 600, fill 1 (Apache-2.0).
+// Its rounded, full-height silhouette stays balanced at Neo key resolution.
+// Keep the source path intact; crop through the nested viewBox instead of
+// distorting the artwork. See NOTICE.md and the packaged license text.
+const REASONING_FAST_BOLT_PATH = "M343.04-338.52H232.61q-31.91 0-47.09-28.28-15.17-28.29 3.35-55.07l327.26-471.26q11.7-16.26 30.24-22.33 18.54-6.06 37.24 1.07 18.7 7.13 28.67 24.11 9.98 16.97 7.42 36.8l-33.7 272h142.57q33.91 0 48.08 30.35 14.18 30.35-7.91 56.56L410.91-63.82q-12.69 15.26-30.95 19.26-18.26 4-36.09-3.57-17.83-7.56-27.18-24.32-9.34-16.77-6.78-36.03l33.13-230.04Z";
+const REASONING_FAST_GLYPH_WIDTH = 12;
+const REASONING_FAST_GLYPH_HEIGHT = 18;
+
 function reasoningControlSvg(
   state = fastModeState,
   activeThreadId = primaryThreadId,
@@ -1779,7 +1807,7 @@ function reasoningControlSvg(
   const labelMetrics = REASONING_CONTROL_LABEL_METRICS[levelLabel]
     ?? REASONING_CONTROL_LABEL_METRICS.EFFORT;
   const levelFontSizePx = labelMetrics.fontSize;
-  const speedGlyphWidth = 12;
+  const speedGlyphWidth = REASONING_FAST_GLYPH_WIDTH;
   const speedGlyphGap = 7;
   const levelLabelWidth = labelMetrics.width;
   const speedGlyphX = Math.max(
@@ -1809,7 +1837,7 @@ function reasoningControlSvg(
     }
   );
   const speedGlyph = fast
-    ? `<g data-reasoning-fast-overlay="label-left" pointer-events="none"><path data-reasoning-fast="on" d="M7.7 0L0 12.5H4.8L3.2 20L12 7.9H7.7L10.2 0Z" transform="translate(${speedGlyphX.toFixed(1)} 37)" fill="${accent}"/></g>`
+    ? `<g data-reasoning-fast-overlay="label-left" pointer-events="none"><svg data-reasoning-fast="on" data-reasoning-fast-left="${speedGlyphX.toFixed(1)}" x="${speedGlyphX.toFixed(1)}" y="38" width="${REASONING_FAST_GLYPH_WIDTH}" height="${REASONING_FAST_GLYPH_HEIGHT}" viewBox="180 -930 600 900" overflow="visible"><path d="${REASONING_FAST_BOLT_PATH}" fill="${accent}"/></svg></g>`
     : "";
   const chrome = busy
     ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.blue}" fill-opacity=".05" stroke="${THEME.blue}" stroke-opacity=".78" stroke-width="2.6"/>`
@@ -6789,10 +6817,21 @@ function clearUnreadCompletion(threadId, options = {}) {
 }
 
 function acknowledgeCompletion(threadId, options = {}) {
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : renderTimeMs();
+  const visibleEffect = completionPulseState(threadId, nowMs)
+    ?? unreadCompletionPulseState(threadId, nowMs);
   const hadTransientEffect = completionPulseStartedAt.has(threadId)
     || globalCompletionThreadId === threadId;
   const clearedUnread = clearUnreadCompletion(threadId, options);
   if (!clearedUnread && !hadTransientEffect) return false;
+  if (options.fade !== false && visibleEffect?.strength >= 0.002) {
+    completionDismissFadeByThreadId.set(threadId, {
+      startedAtMs: nowMs,
+      initialStrength: visibleEffect.strength
+    });
+  } else {
+    completionDismissFadeByThreadId.delete(threadId);
+  }
   cancelCompletionEffects(threadId);
   if (options.render !== false) renderThreadContexts();
   return true;
@@ -7747,6 +7786,7 @@ function renderStaticContexts() {
 }
 
 function startCompletionEffects(threadId, nowMs = Date.now(), endedAtMs = nowMs) {
+  completionDismissFadeByThreadId.delete(threadId);
   markUnreadCompletion(threadId, endedAtMs, nowMs);
   completionPulseStartedAt.set(threadId, nowMs);
   globalCompletionStartedAtMs = nowMs;
@@ -7893,15 +7933,22 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
   const unreadRenderGroup = unreadCompletionRenderGroup;
   let hasVisibleUnreadCompletion = false;
   let threadContextIndex = 0;
+  const visibleThreadIds = new Set();
+  const expiredDismissFadeThreadIds = new Set();
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
     const thread = slot === undefined ? null : threadForSlot(slot);
     if (slot === undefined) continue;
+    if (thread?.id) visibleThreadIds.add(thread.id);
     const completionStartedAtMs = thread?.id ? completionPulseStartedAt.get(thread.id) : null;
     const completionAnimating = Number.isFinite(completionStartedAtMs)
       && nowMs - completionStartedAtMs < THREAD_COMPLETION_PULSE_DURATION_MS;
     const unreadAnimating = thread?.status === "completed"
       && unreadCompletionByThreadId.has(thread.id);
+    const dismissFade = thread?.id ? completionDismissFadeByThreadId.get(thread.id) : null;
+    const dismissAnimating = thread?.status === "completed"
+      && Number.isFinite(dismissFade?.startedAtMs)
+      && nowMs - dismissFade.startedAtMs < UNREAD_COMPLETION_DISMISS_FADE_MS;
     if (unreadAnimating) hasVisibleUnreadCompletion = true;
     const renderUnreadFrame = unreadAnimating
       && unreadFrameDue
@@ -7909,8 +7956,12 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
     if (
       threadReasoningTrackShouldAnimate(thread)
       || completionAnimating
+      || dismissAnimating
       || renderUnreadFrame
     ) {
+      setImage(context, threadSvg(thread, slot));
+    } else if (dismissFade) {
+      expiredDismissFadeThreadIds.add(thread.id);
       setImage(context, threadSvg(thread, slot));
     } else if (Number.isFinite(completionStartedAtMs)) {
       clearCompletionEffect(thread.id);
@@ -7922,6 +7973,15 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
     lastUnreadCompletionFrameAtMs = nowMs;
     unreadCompletionRenderGroup = (unreadCompletionRenderGroup + 1)
       % UNREAD_COMPLETION_GROUP_COUNT;
+  }
+  for (const threadId of expiredDismissFadeThreadIds) {
+    completionDismissFadeByThreadId.delete(threadId);
+  }
+  for (const [threadId, fade] of completionDismissFadeByThreadId) {
+    if (visibleThreadIds.has(threadId)) continue;
+    if (nowMs - fade.startedAtMs >= UNREAD_COMPLETION_DISMISS_FADE_MS) {
+      completionDismissFadeByThreadId.delete(threadId);
+    }
   }
 }
 
@@ -8411,20 +8471,35 @@ async function performListedSideChatNavigation(thread, slot, options = {}) {
 
   const fingerprints = [...titleFingerprints(thread.title)];
   const activateSideChat = options.activateSideChat
-    ?? (() => execFileAsync(
-      KEY_BRIDGE,
-      ["codex-open-side-chat", thread.id, ...fingerprints],
-      { timeout: 3000, maxBuffer: 32 * 1024, signal }
-    ));
+    ?? (async () => {
+      const result = await codexControlPlane.execute("side-chat-switch", {
+        micro: (bridge) => bridge.focusSideChat(thread.id),
+        legacy: () => execFileAsync(
+          KEY_BRIDGE,
+          ["codex-open-side-chat", thread.id, ...fingerprints],
+          { timeout: 3000, maxBuffer: 32 * 1024, signal }
+        )
+      }, { quiet: true });
+      if (!result.ok) {
+        throw result.error ?? new Error("Side Chat tab activation failed");
+      }
+      return {
+        backend: result.backend,
+        identityVerified: result.backend === "micro"
+          && result.value?.threadId === thread.id
+          && result.value?.selected === true
+      };
+    });
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
     if (attempt > 0) await sleepWithSignal(REMOTE_APP_ACTIVATION_RETRY_MS, signal);
     try {
-      await activateSideChat();
+      const activation = await activateSideChat();
       throwIfAborted(signal);
       if (!await focusSideChatComposer()) {
         throw new Error("Side Chat composer did not become visible");
       }
+      if (activation?.identityVerified === true) return true;
       if (await sideChatFocused({ signal, probe: options.focusProbe })) return true;
       lastError = new Error("Side Chat tab did not become focused");
     } catch (error) {
@@ -8646,7 +8721,7 @@ async function openListedSideChat(context, thread, options = {}) {
     if (!await focusSideChatComposer()) {
       throw new Error("Side Chat composer was not focused");
     }
-    noteBridgeSuccess("codex-current-thread");
+    noteBridgeSuccess("codex-open-side-chat");
     feedback(context, "success", "사이드챗 전환");
     scheduleRefresh();
     return true;
@@ -8660,7 +8735,7 @@ async function openListedSideChat(context, thread, options = {}) {
       });
       return false;
     }
-    const permissionFailure = noteBridgeFailure("codex-current-thread", error, context);
+    const permissionFailure = noteBridgeFailure("codex-open-side-chat", error, context);
     if (!permissionFailure) feedback(context, "error", "열기 실패");
     console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
     return false;
@@ -9118,6 +9193,7 @@ const DEMO_COMPLETED_ID = "00000000-0000-4000-8000-000000000002";
 function resetDemoEffects() {
   completionPulseStartedAt.clear();
   unreadCompletionByThreadId.clear();
+  completionDismissFadeByThreadId.clear();
   completionQueueBarrierMsByThreadId.clear();
   pendingCompletionByThreadId.clear();
   voiceHeldContexts.clear();
@@ -9625,6 +9701,7 @@ function verifyCompletionTransitionPolicy(nowMs) {
   };
   const noCompletionEffect = () => !completionPulseStartedAt.has(threadId)
     && !unreadCompletionByThreadId.has(threadId)
+    && !completionDismissFadeByThreadId.has(threadId)
     && globalCompletionStartedAtMs === null
     && globalCompletionThreadId === null;
 
@@ -9794,12 +9871,29 @@ function verifyCompletionTransitionPolicy(nowMs) {
   const unreadCompletionPersistsAfterInitialPulse = persistentEffect?.persistent === true
     && persistentEffect?.unread === true
     && persistentEffect.strength >= 0.3;
-  acknowledgeCompletion(threadId, { persist: false, render: false });
-  const acknowledgementClearsUnreadCompletion = !unreadCompletionByThreadId.has(threadId)
-    && visibleCompletionPulseState(
-      finalTerminal,
-      firstPulseStartedAtMs + THREAD_COMPLETION_PULSE_DURATION_MS + 700
-    ) === null;
+  const acknowledgementAtMs = firstPulseStartedAtMs
+    + THREAD_COMPLETION_PULSE_DURATION_MS + 700;
+  acknowledgeCompletion(threadId, {
+    persist: false,
+    render: false,
+    nowMs: acknowledgementAtMs
+  });
+  const dismissalStartEffect = visibleCompletionPulseState(finalTerminal, acknowledgementAtMs);
+  const dismissalMidEffect = visibleCompletionPulseState(
+    finalTerminal,
+    acknowledgementAtMs + UNREAD_COMPLETION_DISMISS_FADE_MS / 2
+  );
+  const dismissalEndEffect = visibleCompletionPulseState(
+    finalTerminal,
+    acknowledgementAtMs + UNREAD_COMPLETION_DISMISS_FADE_MS
+  );
+  const acknowledgementClearsUnreadCompletion = !unreadCompletionByThreadId.has(threadId);
+  const acknowledgementFadesUnreadCompletion = dismissalStartEffect?.dismissal === true
+    && Math.abs(dismissalStartEffect.strength - persistentEffect.strength) < 0.001
+    && dismissalMidEffect?.dismissal === true
+    && dismissalMidEffect.strength > 0
+    && dismissalMidEffect.strength < dismissalStartEffect.strength
+    && dismissalEndEffect === null;
 
   const passed = queueEditIgnored
     && remoteQueueHandoffIgnored
@@ -9813,7 +9907,8 @@ function verifyCompletionTransitionPolicy(nowMs) {
     && confirmedFinalCompletionUnread
     && identicalTerminalDidNotRetrigger
     && unreadCompletionPersistsAfterInitialPulse
-    && acknowledgementClearsUnreadCompletion;
+    && acknowledgementClearsUnreadCompletion
+    && acknowledgementFadesUnreadCompletion;
   resetTracker(false);
   return {
     passed,
@@ -9835,7 +9930,8 @@ function verifyCompletionTransitionPolicy(nowMs) {
     confirmedFinalCompletionUnread,
     identicalTerminalDidNotRetrigger,
     unreadCompletionPersistsAfterInitialPulse,
-    acknowledgementClearsUnreadCompletion
+    acknowledgementClearsUnreadCompletion,
+    acknowledgementFadesUnreadCompletion
   };
 }
 
@@ -12777,17 +12873,22 @@ async function verifyInteractionPolicy() {
       failed: false
     }, threadId);
     const glyphX = Number.parseFloat(
-      svg.match(/data-reasoning-fast="on"[^>]*transform="translate\(([0-9.]+) 37\)"/)?.[1]
+      svg.match(/data-reasoning-fast="on"[^>]*data-reasoning-fast-left="([0-9.]+)"/)?.[1]
         ?? "NaN"
     );
     const metrics = REASONING_CONTROL_LABEL_METRICS[label];
     const labelLeftX = 72 - metrics.width / 2;
-    const expectedGlyphX = Math.max(2, labelLeftX - 7 - 12);
+    const expectedGlyphX = Math.max(
+      2,
+      labelLeftX - 7 - REASONING_FAST_GLYPH_WIDTH
+    );
     return Number.isFinite(glyphX)
       && glyphX >= 2
       && Math.abs(glyphX - expectedGlyphX) <= 0.051
-      && labelLeftX - (glyphX + 12) >= 5.4
+      && labelLeftX - (glyphX + REASONING_FAST_GLYPH_WIDTH) >= 5.4
       && svg.includes('data-reasoning-fast-overlay="label-left"')
+      && svg.includes('viewBox="180 -930 600 900"')
+      && svg.includes(`d="${REASONING_FAST_BOLT_PATH}"`)
       && svg.includes('data-reasoning-label-layer="center"')
       && svg.indexOf('data-reasoning-fast="on"')
         > svg.indexOf(`data-reasoning-label="${effort}"`)
@@ -13152,6 +13253,29 @@ async function verifyInteractionPolicy() {
     && pairedTabActivations === 1
     && pairedFocusChecks === 2;
 
+  let exactSideChatTabActivations = 0;
+  let staleSideChatTitleChecks = 0;
+  const exactSideChatNavigation = await performListedSideChatNavigation(
+    focusedSideChatThread,
+    1,
+    {
+      parentThread: localThreadB,
+      focusSideChatComposer: async () => true,
+      sideChatFocused: async () => {
+        staleSideChatTitleChecks += 1;
+        return false;
+      },
+      navigateParent: async () => true,
+      activateSideChat: async () => {
+        exactSideChatTabActivations += 1;
+        return { identityVerified: true };
+      }
+    }
+  );
+  const exactSideChatUuidBypassesStaleTitle = exactSideChatNavigation
+    && exactSideChatTabActivations === 1
+    && staleSideChatTitleChecks === 1;
+
   let listedSideChatFinalFocuses = 0;
   const listedSideChatOpenResult = await openListedSideChat(
     "interaction-listed-side-chat-focus",
@@ -13489,6 +13613,7 @@ async function verifyInteractionPolicy() {
     && sideChatReasoningUsesFocusedTask
     && sideChatFocusPersistsAcrossControls
     && listedSideChatRestoresPairedView
+    && exactSideChatUuidBypassesStaleTitle
     && listedSideChatKeyFocusesComposer
     && explicitTaskSwitchClearsSideChatPlaceholder
     && rendererSelectionRevokesSideChatLease
@@ -13579,6 +13704,7 @@ async function verifyInteractionPolicy() {
     sideChatReasoningUsesFocusedTask,
     sideChatFocusPersistsAcrossControls,
     listedSideChatRestoresPairedView,
+    exactSideChatUuidBypassesStaleTitle,
     listedSideChatKeyFocusesComposer,
     explicitTaskSwitchClearsSideChatPlaceholder,
     rendererSelectionRevokesSideChatLease,

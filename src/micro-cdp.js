@@ -35,6 +35,7 @@ const REASONING_ENCODER_KEYS = Object.freeze({
   increase: "ENC_CC"
 });
 const CODEX_THREAD_UUID_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
+const CODEX_EXACT_THREAD_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OFFICIAL_KEYCAP_IDS = new Set([
   "FAST",
   "PARTY",
@@ -780,6 +781,57 @@ function runUltraWarningConfirmationExpression(timeoutMs = 4500) {
   })()`;
 }
 
+function runSideChatFocusExpression(threadId) {
+  const normalizedThreadId = String(threadId ?? "").trim().toLowerCase();
+  if (!CODEX_EXACT_THREAD_UUID_PATTERN.test(normalizedThreadId)) {
+    throw new MicroBridgeError("Invalid Side Chat thread id.", {
+      code: "MICRO_CAPABILITY_UNAVAILABLE",
+      delivery: "none"
+    });
+  }
+  const tabId = `sidechat:${normalizedThreadId}`;
+  return `(async () => {
+    const tabId = ${JSON.stringify(tabId)};
+    const threadId = ${JSON.stringify(normalizedThreadId)};
+    const visible = (element) => Boolean(
+      element
+      && element.getClientRects().length > 0
+      && getComputedStyle(element).visibility !== 'hidden'
+    );
+    const roots = [...document.querySelectorAll('[data-tab-id]')]
+      .filter((element) => element.getAttribute('data-tab-id') === tabId && visible(element));
+    const tabs = [...new Set(roots.flatMap((root) => (
+      root.matches('[role="tab"]')
+        ? [root]
+        : [...root.querySelectorAll('[role="tab"]')]
+    )))].filter(visible);
+    if (tabs.length !== 1) {
+      return {
+        delivered: false,
+        error: tabs.length === 0
+          ? 'The exact Side Chat tab is not mounted.'
+          : 'The exact Side Chat tab is ambiguous.',
+        matches: tabs.length,
+        threadId
+      };
+    }
+    const tab = tabs[0];
+    const alreadySelected = tab.getAttribute('aria-selected') === 'true';
+    tab.click();
+    tab.focus({ preventScroll: true });
+    const deadline = Date.now() + 700;
+    while (tab.getAttribute('aria-selected') !== 'true' && Date.now() < deadline) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return {
+      delivered: true,
+      selected: tab.getAttribute('aria-selected') === 'true',
+      alreadySelected,
+      threadId
+    };
+  })()`;
+}
+
 function dispatchHostMessageExpression(type) {
   return `(async () => {
     ${ASSET_URLS_SOURCE}
@@ -1050,6 +1102,34 @@ class CodexMicroBridge {
     }
   }
 
+  async focusSideChat(threadId) {
+    try {
+      await this.ensureConnected();
+      const result = await this.evaluate(
+        runSideChatFocusExpression(threadId),
+        { timeoutMs: 1800 }
+      );
+      if (result?.delivered !== true) {
+        throw new MicroBridgeError(
+          `The Side Chat tab could not be selected: ${result?.error ?? "unknown error"}`,
+          {
+            code: "MICRO_CAPABILITY_UNAVAILABLE",
+            delivery: "none"
+          }
+        );
+      }
+      if (result.selected !== true) {
+        throw new MicroBridgeError("The Side Chat tab did not confirm selection.", {
+          code: "MICRO_POST_DELIVERY_ERROR",
+          delivery: "unknown"
+        });
+      }
+      return result;
+    } catch (error) {
+      throw this.normalizeError(error, "Side Chat focus");
+    }
+  }
+
   async openThread(threadKey, options = {}) {
     await this.activateRuntime();
     const threadId = microThreadIdFromKey(threadKey);
@@ -1315,6 +1395,7 @@ module.exports = {
   retainEvaluationPromise,
   runReasoningEncoderExpression,
   runPowerSelectionExpression,
+  runSideChatFocusExpression,
   runUltraWarningConfirmationExpression,
   runKeycapExpression,
   selectCodexMainTarget

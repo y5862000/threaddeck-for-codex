@@ -18,6 +18,7 @@ const {
   retainEvaluationPromise,
   runPowerSelectionExpression,
   runReasoningEncoderExpression,
+  runSideChatFocusExpression,
   runUltraWarningConfirmationExpression,
   runKeycapExpression,
   selectCodexMainTarget
@@ -200,6 +201,9 @@ test("all generated renderer entrypoints remain syntactically valid", () => {
   assertRendererExpressionParses(runKeycapExpression("FAST"));
   assertRendererExpressionParses(runPowerSelectionExpression("gpt-5.6-terra", "low"));
   assertRendererExpressionParses(runReasoningEncoderExpression("increase", 3));
+  assertRendererExpressionParses(runSideChatFocusExpression(
+    "019f6bcb-ad00-7bf2-96a4-7a35f3709515"
+  ));
   assertRendererExpressionParses(runUltraWarningConfirmationExpression());
   assert.match(runReasoningEncoderExpression("decrease"), /composer\.openModelPicker/);
   assert.match(runReasoningEncoderExpression("decrease"), /codex_micro_encoder/);
@@ -207,6 +211,45 @@ test("all generated renderer entrypoints remain syntactically valid", () => {
   assert.match(runPowerSelectionExpression("gpt-5.6-terra", "low"), /onSelectPower/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /3207467860/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /codex-micro-device-state-changed/);
+});
+
+test("focuses an exact Side Chat tab by renderer UUID", async () => {
+  const threadId = "019f8442-7025-7b42-8fc0-0b93f0be2073";
+  const bridge = new CodexMicroBridge();
+  bridge.ensureConnected = async () => {};
+  let expression = "";
+  bridge.evaluate = async (value, options) => {
+    expression = value;
+    assert.equal(options.timeoutMs, 1800);
+    return { delivered: true, selected: true, alreadySelected: false, threadId };
+  };
+  assert.deepEqual(await bridge.focusSideChat(threadId), {
+    delivered: true,
+    selected: true,
+    alreadySelected: false,
+    threadId
+  });
+  assert.match(expression, new RegExp(`sidechat:${threadId}`));
+  assert.match(expression, /data-tab-id/);
+  assert.match(expression, /aria-selected/);
+
+  bridge.evaluate = async () => ({
+    delivered: false,
+    selected: false,
+    matches: 0,
+    error: "not mounted",
+    threadId
+  });
+  await assert.rejects(
+    () => bridge.focusSideChat(threadId),
+    (error) => error.code === "MICRO_CAPABILITY_UNAVAILABLE" && error.delivery === "none"
+  );
+
+  bridge.evaluate = async () => ({ delivered: true, selected: false, threadId });
+  await assert.rejects(
+    () => bridge.focusSideChat(threadId),
+    (error) => error.code === "MICRO_POST_DELIVERY_ERROR" && error.delivery === "unknown"
+  );
 });
 
 test("selects an exact compact model and effort pair through the mounted Codex controller", async () => {

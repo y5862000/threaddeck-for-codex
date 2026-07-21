@@ -51,6 +51,7 @@ test("uses short default English labels that fit a Neo key", () => {
 test("keeps semantic Effort picker failures on the Effort key", () => {
   assert.equal(bridgeFailureStaysLocal("reasoning-effort-set"), true);
   assert.equal(bridgeFailureStaysLocal("reasoning-effort-step"), true);
+  assert.equal(bridgeFailureStaysLocal("codex-open-side-chat"), true);
   assert.equal(bridgeFailureStaysLocal("send"), false);
   assert.equal(bridgeFailureStaysLocal("fast-mode-set"), false);
 });
