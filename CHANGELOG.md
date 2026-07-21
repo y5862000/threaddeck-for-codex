@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Flattened the Fast bolt from a nested SVG viewport into a single transformed path for the physical Stream Deck renderer, which was showing particles but silently dropping the glyph. The visible bolt is also shifted 2 px lower to align its optical center with the Effort label.
 - Switched an already listed Side Chat through its exact renderer UUID before focusing the composer. This avoids stale title-based verification and keeps semantic Side Chat misses local to that key instead of raising a deck-wide input-permission warning.
 - Added a 720 ms eased release when an unread-completion pulse is acknowledged, so the selected task settles back to its resting card instead of losing the green highlight in one frame.
 - Replaced the top-heavy custom Fast overlay on the combined Effort control with the rounded Material Symbols bolt. The Effort label remains geometrically centered while the separately positioned glyph keeps a measured safe gap for every supported level.

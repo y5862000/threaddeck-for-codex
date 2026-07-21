@@ -1770,11 +1770,14 @@ const REASONING_CONTROL_LABEL_METRICS = Object.freeze({
 
 // Material Symbols Rounded `bolt`, weight 600, fill 1 (Apache-2.0).
 // Its rounded, full-height silhouette stays balanced at Neo key resolution.
-// Keep the source path intact; crop through the nested viewBox instead of
-// distorting the artwork. See NOTICE.md and the packaged license text.
+// Keep the source path intact and map it through one ordinary SVG transform:
+// Stream Deck's hardware renderer can omit a nested <svg> even though desktop
+// preview renderers display it. See NOTICE.md and the packaged license text.
 const REASONING_FAST_BOLT_PATH = "M343.04-338.52H232.61q-31.91 0-47.09-28.28-15.17-28.29 3.35-55.07l327.26-471.26q11.7-16.26 30.24-22.33 18.54-6.06 37.24 1.07 18.7 7.13 28.67 24.11 9.98 16.97 7.42 36.8l-33.7 272h142.57q33.91 0 48.08 30.35 14.18 30.35-7.91 56.56L410.91-63.82q-12.69 15.26-30.95 19.26-18.26 4-36.09-3.57-17.83-7.56-27.18-24.32-9.34-16.77-6.78-36.03l33.13-230.04Z";
 const REASONING_FAST_GLYPH_WIDTH = 12;
-const REASONING_FAST_GLYPH_HEIGHT = 18;
+const REASONING_FAST_GLYPH_SCALE = 0.02;
+const REASONING_FAST_GLYPH_SOURCE_LEFT = 180;
+const REASONING_FAST_GLYPH_TRANSLATE_Y = 58.6;
 
 function reasoningControlSvg(
   state = fastModeState,
@@ -1836,8 +1839,10 @@ function reasoningControlSvg(
       )
     }
   );
+  const speedGlyphTransformX = speedGlyphX
+    - REASONING_FAST_GLYPH_SOURCE_LEFT * REASONING_FAST_GLYPH_SCALE;
   const speedGlyph = fast
-    ? `<g data-reasoning-fast-overlay="label-left" pointer-events="none"><svg data-reasoning-fast="on" data-reasoning-fast-left="${speedGlyphX.toFixed(1)}" x="${speedGlyphX.toFixed(1)}" y="38" width="${REASONING_FAST_GLYPH_WIDTH}" height="${REASONING_FAST_GLYPH_HEIGHT}" viewBox="180 -930 600 900" overflow="visible"><path d="${REASONING_FAST_BOLT_PATH}" fill="${accent}"/></svg></g>`
+    ? `<g data-reasoning-fast-overlay="label-left" data-reasoning-fast="on" data-reasoning-fast-left="${speedGlyphX.toFixed(1)}" transform="translate(${speedGlyphTransformX.toFixed(1)} ${REASONING_FAST_GLYPH_TRANSLATE_Y}) scale(${REASONING_FAST_GLYPH_SCALE})" pointer-events="none"><path d="${REASONING_FAST_BOLT_PATH}" fill="${accent}"/></g>`
     : "";
   const chrome = busy
     ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.blue}" fill-opacity=".05" stroke="${THEME.blue}" stroke-opacity=".78" stroke-width="2.6"/>`
@@ -12887,7 +12892,13 @@ async function verifyInteractionPolicy() {
       && Math.abs(glyphX - expectedGlyphX) <= 0.051
       && labelLeftX - (glyphX + REASONING_FAST_GLYPH_WIDTH) >= 5.4
       && svg.includes('data-reasoning-fast-overlay="label-left"')
-      && svg.includes('viewBox="180 -930 600 900"')
+      && !svg.includes('<svg data-reasoning-fast="on"')
+      && svg.includes(
+        `transform="translate(${(
+          expectedGlyphX
+          - REASONING_FAST_GLYPH_SOURCE_LEFT * REASONING_FAST_GLYPH_SCALE
+        ).toFixed(1)} ${REASONING_FAST_GLYPH_TRANSLATE_Y}) scale(${REASONING_FAST_GLYPH_SCALE})"`
+      )
       && svg.includes(`d="${REASONING_FAST_BOLT_PATH}"`)
       && svg.includes('data-reasoning-label-layer="center"')
       && svg.indexOf('data-reasoning-fast="on"')
