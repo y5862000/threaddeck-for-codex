@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.5.3-beta — 2026-07-21
+
+- Moved the verified Fast bolt on the combined Reasoning control from the upper-right corner to immediately left of the current Effort label. The level name itself remains fixed at the exact key center; the larger bolt now uses measured bold-system-font advances for every visible label plus a safe raster gap, instead of the generic title-width estimate that could overlap `MAX`.
+- Kept a same-task Micro/composer Fast observation authoritative over a late task-metadata scan. This removes the brief bolt disappearance caused when an older `next_settings` row arrived between renderer polls, while direct changes made in Codex still reconcile through the lightweight Micro observer.
+- Regenerated the dark/light dashboard previews and the 20 fps overview GIF from the real renderer so the published media matches the physical key layout.
+
 ## 0.5.2-beta — 2026-07-21
 
 - Fixed a false `Switch check` result on native Codex Micro task keys. ThreadDeck now confirms the canonical target UUID from either the active composer or the official Micro slot's selected state, then keeps a bounded 1.3-second retry window for a late renderer frame. A verified switch clears that task's persisted unread-completion pulse without promoting the previous composer again.

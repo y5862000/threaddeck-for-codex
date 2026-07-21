@@ -1733,6 +1733,21 @@ function fastModeSvg(
     ${warningText}`, "", chrome);
 }
 
+// AppKit measurements for the same bold system-font labels rendered on the
+// physical key. These deliberately use the full typographic advance rather
+// than the generic title-width heuristic so the separate Fast overlay never
+// touches a wide glyph such as M, even after low-resolution rasterization.
+const REASONING_CONTROL_LABEL_METRICS = Object.freeze({
+  "TERRA LIGHT": Object.freeze({ fontSize: 16, width: 105.1 }),
+  LIGHT: Object.freeze({ fontSize: 23, width: 67.4 }),
+  MEDIUM: Object.freeze({ fontSize: 23, width: 93.0 }),
+  HIGH: Object.freeze({ fontSize: 23, width: 57.5 }),
+  "EXTRA HIGH": Object.freeze({ fontSize: 16, width: 98.4 }),
+  MAX: Object.freeze({ fontSize: 23, width: 52.1 }),
+  ULTRA: Object.freeze({ fontSize: 23, width: 72.7 }),
+  EFFORT: Object.freeze({ fontSize: 23, width: 82.0 })
+});
+
 function reasoningControlSvg(
   state = fastModeState,
   activeThreadId = primaryThreadId,
@@ -1761,7 +1776,16 @@ function reasoningControlSvg(
     max: "MAX",
     ultra: "ULTRA"
   }[effort] ?? "EFFORT");
-  const levelFontSize = ["EXTRA HIGH", "TERRA LIGHT"].includes(levelLabel) ? 16 : 22;
+  const labelMetrics = REASONING_CONTROL_LABEL_METRICS[levelLabel]
+    ?? REASONING_CONTROL_LABEL_METRICS.EFFORT;
+  const levelFontSizePx = labelMetrics.fontSize;
+  const speedGlyphWidth = 12;
+  const speedGlyphGap = 7;
+  const levelLabelWidth = labelMetrics.width;
+  const speedGlyphX = Math.max(
+    2,
+    72 - levelLabelWidth / 2 - speedGlyphGap - speedGlyphWidth
+  );
   const slider = flowingReasoningSlider(
     accent,
     { effort },
@@ -1785,15 +1809,15 @@ function reasoningControlSvg(
     }
   );
   const speedGlyph = fast
-    ? `<path data-reasoning-fast="on" d="M117 15L108 29H114L111 39L124 24H117Z" fill="${accent}"/>`
+    ? `<g data-reasoning-fast-overlay="label-left" pointer-events="none"><path data-reasoning-fast="on" d="M7.7 0L0 12.5H4.8L3.2 20L12 7.9H7.7L10.2 0Z" transform="translate(${speedGlyphX.toFixed(1)} 37)" fill="${accent}"/></g>`
     : "";
   const chrome = busy
     ? `<rect x="5.5" y="5.5" width="133" height="133" rx="15" fill="${THEME.blue}" fill-opacity=".05" stroke="${THEME.blue}" stroke-opacity=".78" stroke-width="2.6"/>`
     : "";
   return shell(accent, `
     <g data-reasoning-state="${status}" data-reasoning-direction="${direction !== "down" ? "up" : "down"}" data-fast-state="${fast ? "on" : "off"}">
+      <g data-reasoning-label-layer="center"><text data-reasoning-label="${status}" x="72" y="58" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${levelFontSizePx}" font-weight="760" text-anchor="middle">${levelLabel}</text></g>
       ${speedGlyph}
-      <text data-reasoning-label="${status}" x="72" y="58" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${levelFontSize + 1}" font-weight="760" text-anchor="middle">${levelLabel}</text>
       ${slider}
     </g>`, "", chrome);
 }
@@ -4720,26 +4744,28 @@ function fastModeStateFromThread(thread, fallback = null) {
   const nextMetadataEnabled = hasNextSettingsSnapshot && nextServiceTier
     ? isFastServiceTier(nextServiceTier)
     : null;
-  // An explicit next-turn snapshot beats the cache. When no such snapshot is
-  // available, keep a verified composer observation instead of replacing it
-  // with the already-running turn's older speed.
-  const enabled = typeof nextMetadataEnabled === "boolean"
-    ? nextMetadataEnabled
-    : fallbackMatches
-      ? fallback.enabled
+  // A verified composer/Micro observation owns the live next-turn control for
+  // the same task. The three-second task scan can briefly replay an older
+  // next_settings row after a native toggle; letting that row win made the
+  // Fast bolt disappear until the next renderer poll. Metadata remains the
+  // startup/task-switch seed when no same-task observation exists.
+  const enabled = fallbackMatches
+    ? fallback.enabled
+    : typeof nextMetadataEnabled === "boolean"
+      ? nextMetadataEnabled
       : activeMetadataEnabled;
   return {
     threadId,
     model: fallbackModel,
     enabled,
     available: typeof enabled === "boolean"
-      ? typeof nextMetadataEnabled !== "boolean" && fallbackMatches
+      ? fallbackMatches
         ? fallback.available ?? true
         : true
       : null,
-    reasoningEffort: hasNextSettingsSnapshot
-      ? nextReasoning ?? fallbackReasoning ?? activeReasoning
-      : fallbackReasoning ?? activeReasoning,
+    reasoningEffort: fallbackReasoning
+      ?? (hasNextSettingsSnapshot ? nextReasoning : null)
+      ?? activeReasoning,
     failed: false
   };
 }
@@ -12054,10 +12080,10 @@ async function verifyInteractionPolicy() {
     reasoningEffort: "high",
     failed: false
   });
-  const nextTurnMetadataDrivesControls = nextTurnMetadataState.threadId === localThreadB.id
-    && nextTurnMetadataState.enabled === false
+  const confirmedComposerStateSurvivesStaleMetadata = nextTurnMetadataState.threadId === localThreadB.id
+    && nextTurnMetadataState.enabled === true
     && nextTurnMetadataState.available === true
-    && nextTurnMetadataState.reasoningEffort === "medium";
+    && nextTurnMetadataState.reasoningEffort === "high";
   const directComposerThread = {
     ...localThreadB,
     status: "working",
@@ -12636,8 +12662,14 @@ async function verifyInteractionPolicy() {
   ) && reasoningVisual.includes('data-reasoning-direction="down"')
     && reasoningVisual.includes('data-fast-state="on"')
     && reasoningVisual.includes('data-reasoning-fast="on"')
+    && reasoningVisual.includes('data-reasoning-fast-overlay="label-left"')
+    && reasoningVisual.includes('data-reasoning-label-layer="center"')
     && reasoningVisual.includes('data-reasoning-label="ultra"')
     && reasoningVisual.includes('>ULTRA</text>')
+    && reasoningVisual.indexOf('data-reasoning-fast="on"')
+      > reasoningVisual.indexOf('data-reasoning-label="ultra"')
+    && reasoningVisual.includes('x="72" y="58"')
+    && reasoningVisual.includes('text-anchor="middle">ULTRA</text>')
     && reasoningVisual.includes('x="16" y="79" width="114" height="24"')
     && !reasoningVisual.includes('M59 109L50 100L59 91');
   const previousFixedRenderTimeMs = fixedRenderTimeMs;
@@ -12721,6 +12753,51 @@ async function verifyInteractionPolicy() {
     ...fastHighState,
     enabled: false
   }, localThreadB.id);
+  const reasoningFastLabelCases = [
+    ["low", "gpt-5.6-terra", "TERRA LIGHT"],
+    ["low", "gpt-5.6-sol", "LIGHT"],
+    ["medium", "gpt-5.6-sol", "MEDIUM"],
+    ["high", "gpt-5.6-sol", "HIGH"],
+    ["xhigh", "gpt-5.6-sol", "EXTRA HIGH"],
+    ["max", "gpt-5.6-sol", "MAX"],
+    ["ultra", "gpt-5.6-sol", "ULTRA"]
+  ];
+  const reasoningFastGlyphStaysLeftOfLabel = reasoningFastLabelCases.every(([
+    effort,
+    model,
+    label
+  ]) => {
+    const threadId = `layout-${effort}-${model}`;
+    const svg = reasoningControlSvg({
+      threadId,
+      enabled: true,
+      available: true,
+      reasoningEffort: effort,
+      model,
+      failed: false
+    }, threadId);
+    const glyphX = Number.parseFloat(
+      svg.match(/data-reasoning-fast="on"[^>]*transform="translate\(([0-9.]+) 37\)"/)?.[1]
+        ?? "NaN"
+    );
+    const metrics = REASONING_CONTROL_LABEL_METRICS[label];
+    const labelLeftX = 72 - metrics.width / 2;
+    const expectedGlyphX = Math.max(2, labelLeftX - 7 - 12);
+    return Number.isFinite(glyphX)
+      && glyphX >= 2
+      && Math.abs(glyphX - expectedGlyphX) <= 0.051
+      && labelLeftX - (glyphX + 12) >= 5.4
+      && svg.includes('data-reasoning-fast-overlay="label-left"')
+      && svg.includes('data-reasoning-label-layer="center"')
+      && svg.indexOf('data-reasoning-fast="on"')
+        > svg.indexOf(`data-reasoning-label="${effort}"`)
+      && svg.includes('x="72" y="58"')
+      && svg.includes(`text-anchor="middle">${label}</text>`);
+  })
+    && !reasoningVisual.includes('M117 15L108 29H114L111 39L124 24H117Z')
+    && !standardHighVisual.includes('data-reasoning-fast="on"')
+    && standardHighVisual.includes('x="72" y="58"')
+    && standardHighVisual.includes('text-anchor="middle">HIGH</text>');
   fixedRenderTimeMs = previousFixedRenderTimeMs;
   const fastParticlesAnimateAcrossFrames = fastReasoningFrameA.includes('<circle cx="')
     && fastThreadFrameA.includes('<circle cx="')
@@ -13382,7 +13459,7 @@ async function verifyInteractionPolicy() {
     && offExitIsConfirmedState
     && passiveComposerReadDoesNotClaimSpeed
     && taskMetadataRestoresFastWithoutMenu
-    && nextTurnMetadataDrivesControls
+    && confirmedComposerStateSurvivesStaleMetadata
     && directCodexComposerChangeRefreshesControlOnly
     && fastModeVisualsAreIconFirst
     && fastToggleWaitedForNavigation
@@ -13400,6 +13477,7 @@ async function verifyInteractionPolicy() {
     && rapidReasoningCoalescesToFinalTarget
     && reasoningInputDuringApplyStartsOneSuccessor
     && reasoningControlUsesCenteredAnimatedTrack
+    && reasoningFastGlyphStaysLeftOfLabel
     && effortBarsAnimateBidirectionally
     && fastParticlesAnimateAcrossFrames
     && staleFastRefreshCannotOverwriteToggle
@@ -13470,7 +13548,7 @@ async function verifyInteractionPolicy() {
     offExitIsConfirmedState,
     passiveComposerReadDoesNotClaimSpeed,
     taskMetadataRestoresFastWithoutMenu,
-    nextTurnMetadataDrivesControls,
+    confirmedComposerStateSurvivesStaleMetadata,
     directCodexComposerChangeRefreshesControlOnly,
     fastModeVisualsAreIconFirst,
     fastToggleWaitedForNavigation,
@@ -13488,6 +13566,7 @@ async function verifyInteractionPolicy() {
     rapidReasoningCoalescesToFinalTarget,
     reasoningInputDuringApplyStartsOneSuccessor,
     reasoningControlUsesCenteredAnimatedTrack,
+    reasoningFastGlyphStaysLeftOfLabel,
     effortBarsAnimateBidirectionally,
     fastParticlesAnimateAcrossFrames,
     staleFastRefreshCannotOverwriteToggle,
