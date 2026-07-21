@@ -738,6 +738,26 @@ test("queue geometry retains multiple rows inside the same conversation pane", (
   assert.equal(counts.get("side"), 1);
 });
 
+test("queue parsing counts row-local Steer controls when delete controls collapse", () => {
+  const title = "스트림덱";
+  const deleteFingerprint = stringFingerprint("Delete queued message");
+  const steerFingerprint = stringFingerprint("Steer");
+  const output = [
+    "window\t0\t1",
+    `header\t${stringFingerprint(title)}\t291\t46\t49\t16`,
+    // Chromium currently exposes one shared Delete group for both rows.
+    `button\t${deleteFingerprint}\t1\t743\t836\t710\t68`,
+    `button\t${steerFingerprint}\t1\t1315\t844\t69\t24`,
+    `button\t${steerFingerprint}\t1\t1315\t873\t69\t24`,
+    "end"
+  ].join("\n");
+  const [window] = parseCodexQueueWindows(output);
+  const counts = queueCountsByThreadForWindow(window, [{ id: "main", title }]);
+
+  assert.equal(queueCountForWindow(window), 2);
+  assert.equal(counts.get("main"), 2);
+});
+
 test("thread selection keeps local duplicates and only pinned remote rows", () => {
   const localRecent = { id: "local-recent", title: "로컬 최근", recency_at: 400 };
   const localPinned = { id: "local-pinned", title: "로컬 고정", recency_at: 300 };

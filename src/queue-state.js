@@ -10,7 +10,13 @@ const QUEUED_MESSAGE_DELETE_LABELS = [
 ];
 const QUEUED_MESSAGE_ACTION_LABELS = [
   "대기열에 있는 메시지 액션",
-  "Queued message actions"
+  "Queued message actions",
+  // Recent Codex builds expose one visible Steer control per queued row, but
+  // collapse every hidden Delete control into one shared accessibility group.
+  // Counting the row-local control preserves multiple queued messages without
+  // merging adjacent normal-task and Side Chat panes.
+  "Steer",
+  "조정"
 ];
 
 const QUEUED_MESSAGE_DELETE_FINGERPRINTS = new Set(QUEUED_MESSAGE_DELETE_LABELS.map(stringFingerprint));

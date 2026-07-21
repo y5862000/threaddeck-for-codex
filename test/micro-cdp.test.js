@@ -9,12 +9,16 @@ const {
   CodexMicroBridge,
   MicroBridgeError,
   confirmedMicroThreadSnapshot,
+  fastEnabledFromIntelligenceTrigger,
   isLoopbackWebSocketUrl,
   microThreadIdFromKey,
   normalizeMicroSnapshot,
+  normalizeMicroPowerSelections,
   parseDebugPortFromCommand,
   retainEvaluationPromise,
+  runPowerSelectionExpression,
   runReasoningEncoderExpression,
+  runUltraWarningConfirmationExpression,
   runKeycapExpression,
   selectCodexMainTarget
 } = require("../src/micro-cdp");
@@ -62,7 +66,12 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
   assert.deepEqual(normalizeMicroSnapshot({
     connected: true,
     activeThreadKey: "thread-1",
+    model: "GPT-5.6-TERRA",
     reasoningEffort: "High",
+    powerSelections: [
+      { id: "gpt-5.6-terra:low", model: "gpt-5.6-terra", reasoningEffort: "low" },
+      { id: "gpt-5.6-sol:low", model: "gpt-5.6-sol", reasoningEffort: "low" }
+    ],
     fastEnabled: true,
     theme: "dark",
     slots: [
@@ -73,7 +82,25 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
   }), {
     connected: true,
     activeThreadKey: "thread-1",
+    model: "gpt-5.6-terra",
     reasoningEffort: "high",
+    powerSelectionId: null,
+    powerSelections: [
+      {
+        id: "gpt-5.6-terra:low",
+        model: "gpt-5.6-terra",
+        reasoningEffort: "low",
+        label: null,
+        isMax: false
+      },
+      {
+        id: "gpt-5.6-sol:low",
+        model: "gpt-5.6-sol",
+        reasoningEffort: "low",
+        label: null,
+        isMax: false
+      }
+    ],
     fastEnabled: true,
     theme: "dark",
     slots: [{
@@ -85,8 +112,25 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
       selected: true,
       activityAt: null
     }],
-    capabilities: { command: true, hostMessage: true, hid: false, slots: true }
+    capabilities: {
+      command: true,
+      hostMessage: true,
+      hid: false,
+      slots: true,
+      powerSelections: true
+    }
   });
+  assert.deepEqual(normalizeMicroPowerSelections([
+    { model: "gpt-5.6-terra", reasoningEffort: "LOW" },
+    { model: "gpt-5.6-terra", reasoningEffort: "low" },
+    { model: "bad model", reasoningEffort: "low" }
+  ]), [{
+    id: "gpt-5.6-terra:low",
+    model: "gpt-5.6-terra",
+    reasoningEffort: "low",
+    label: null,
+    isMax: false
+  }]);
 });
 
 test("normalizes renderer-local Micro keys while preserving their HID identity", () => {
@@ -121,6 +165,28 @@ test("accepts the selected Micro slot while the composer identity is one frame b
   }, targetId), null);
 });
 
+test("reads the mounted Fast indicator value without treating its reserved slot as enabled", () => {
+  const trigger = (state, indicatorValue, hasIndicator = true) => ({
+    getAttribute(name) {
+      return name === "data-state" ? state : null;
+    },
+    querySelector(selector) {
+      if (selector !== "[data-reserved]" || !hasIndicator) return null;
+      return {
+        getAttribute(name) {
+          return name === "data-reserved" ? indicatorValue : null;
+        }
+      };
+    }
+  });
+
+  assert.equal(fastEnabledFromIntelligenceTrigger(trigger("closed", "false")), false);
+  assert.equal(fastEnabledFromIntelligenceTrigger(trigger("closed", "true")), true);
+  assert.equal(fastEnabledFromIntelligenceTrigger(trigger("closed", null)), true);
+  assert.equal(fastEnabledFromIntelligenceTrigger(trigger("closed", null, false)), false);
+  assert.equal(fastEnabledFromIntelligenceTrigger(trigger("open", "true")), null);
+});
+
 test("keeps each awaited renderer evaluation reachable", () => {
   const expression = retainEvaluationPromise("Promise.resolve(42)", "test");
   assert.match(expression, /__threadDeckPendingEvaluations/);
@@ -132,12 +198,61 @@ test("all generated renderer entrypoints remain syntactically valid", () => {
   assertRendererExpressionParses(READ_ONLY_SNAPSHOT_EXPRESSION);
   assertRendererExpressionParses(ACTIVATE_RUNTIME_EXPRESSION);
   assertRendererExpressionParses(runKeycapExpression("FAST"));
+  assertRendererExpressionParses(runPowerSelectionExpression("gpt-5.6-terra", "low"));
   assertRendererExpressionParses(runReasoningEncoderExpression("increase", 3));
+  assertRendererExpressionParses(runUltraWarningConfirmationExpression());
   assert.match(runReasoningEncoderExpression("decrease"), /composer\.openModelPicker/);
   assert.match(runReasoningEncoderExpression("decrease"), /codex_micro_encoder/);
   assert.match(runReasoningEncoderExpression("decrease"), /powerSelectionDirection: "decrease"/);
+  assert.match(runPowerSelectionExpression("gpt-5.6-terra", "low"), /onSelectPower/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /3207467860/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /codex-micro-device-state-changed/);
+});
+
+test("selects an exact compact model and effort pair through the mounted Codex controller", async () => {
+  const bridge = new CodexMicroBridge();
+  bridge.ensureConnected = async () => {};
+  let expression = "";
+  bridge.evaluate = async (value, options) => {
+    expression = value;
+    assert.equal(options.timeoutMs, 2500);
+    return {
+      delivered: true,
+      id: "gpt-5.6-terra:low",
+      model: "gpt-5.6-terra",
+      reasoningEffort: "low"
+    };
+  };
+  assert.deepEqual(await bridge.setPowerSelection("gpt-5.6-terra", "low"), {
+    delivered: true,
+    id: "gpt-5.6-terra:low",
+    model: "gpt-5.6-terra",
+    reasoningEffort: "low"
+  });
+  assert.match(expression, /gpt-5\.6-terra/);
+  assert.match(expression, /reasoningEffort/);
+
+  bridge.evaluate = async () => ({ delivered: false, error: "unavailable" });
+  await assert.rejects(
+    () => bridge.setPowerSelection("gpt-5.6-terra", "low"),
+    (error) => error.code === "MICRO_CAPABILITY_UNAVAILABLE" && error.delivery === "none"
+  );
+});
+
+test("Ultra confirmation uses only the exact full-access warning action", async () => {
+  const bridge = new CodexMicroBridge();
+  bridge.ensureConnected = async () => {};
+  bridge.evaluate = async (expression, options) => {
+    assert.match(expression, /use ultra with full access\?/);
+    assert.match(expression, /use full access/);
+    assert.match(expression, /continue/);
+    assert.equal(options.timeoutMs, 2200);
+    return { confirmed: true, warningSeen: true };
+  };
+  assert.deepEqual(
+    await bridge.confirmUltraFullAccess({ timeoutMs: 1200 }),
+    { confirmed: true, warningSeen: true }
+  );
 });
 
 test("Micro errors carry fallback and delivery semantics", () => {

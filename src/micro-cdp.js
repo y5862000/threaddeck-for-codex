@@ -134,14 +134,65 @@ function normalizeMicroSlot(slot, index) {
   };
 }
 
+function normalizeMicroModel(value) {
+  const model = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-z0-9][a-z0-9._-]*$/.test(model) ? model : null;
+}
+
+function normalizeMicroPowerSelection(value) {
+  if (!value || typeof value !== "object") return null;
+  const model = normalizeMicroModel(value.model);
+  const reasoningEffort = typeof value.reasoningEffort === "string"
+    ? value.reasoningEffort.trim().toLowerCase()
+    : "";
+  if (!model || !["low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoningEffort)) {
+    return null;
+  }
+  const id = typeof value.id === "string" && value.id.trim()
+    ? value.id.trim().toLowerCase()
+    : `${model}:${reasoningEffort}`;
+  return {
+    id,
+    model,
+    reasoningEffort,
+    label: typeof value.label === "string" && value.label.trim()
+      ? value.label.trim()
+      : null,
+    isMax: value.isMax === true
+  };
+}
+
+function normalizeMicroPowerSelections(values) {
+  const seen = new Set();
+  const selections = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const selection = normalizeMicroPowerSelection(value);
+    if (!selection || seen.has(selection.id)) continue;
+    seen.add(selection.id);
+    selections.push(selection);
+  }
+  return selections;
+}
+
 function normalizeMicroSnapshot(value) {
   const snapshot = value && typeof value === "object" ? value : {};
+  const model = normalizeMicroModel(snapshot.model);
+  const powerSelections = normalizeMicroPowerSelections(snapshot.powerSelections);
+  const reasoningEffort = typeof snapshot.reasoningEffort === "string" && snapshot.reasoningEffort
+    ? snapshot.reasoningEffort.toLowerCase()
+    : null;
+  const powerSelectionId = typeof snapshot.powerSelectionId === "string"
+    ? snapshot.powerSelectionId.trim().toLowerCase()
+    : powerSelections.find((selection) => (
+      selection.model === model && selection.reasoningEffort === reasoningEffort
+    ))?.id ?? null;
   return {
     connected: snapshot.connected === true,
     activeThreadKey: microThreadIdFromKey(snapshot.activeThreadKey),
-    reasoningEffort: typeof snapshot.reasoningEffort === "string" && snapshot.reasoningEffort
-      ? snapshot.reasoningEffort.toLowerCase()
-      : null,
+    model,
+    reasoningEffort,
+    powerSelectionId,
+    powerSelections,
     fastEnabled: typeof snapshot.fastEnabled === "boolean" ? snapshot.fastEnabled : null,
     theme: snapshot.theme === "light" ? "light" : snapshot.theme === "dark" ? "dark" : null,
     slots: (Array.isArray(snapshot.slots) ? snapshot.slots : [])
@@ -151,7 +202,9 @@ function normalizeMicroSnapshot(value) {
       command: snapshot.capabilities?.command === true,
       hostMessage: snapshot.capabilities?.hostMessage === true,
       hid: snapshot.capabilities?.hid === true,
-      slots: snapshot.capabilities?.slots === true
+      slots: snapshot.capabilities?.slots === true,
+      powerSelections: snapshot.capabilities?.powerSelections === true
+        || powerSelections.length >= 2
     }
   };
 }
@@ -171,6 +224,18 @@ function confirmedMicroThreadSnapshot(value, threadKey) {
   // neither report a false failure nor re-promote the previous composer.
   return { ...snapshot, activeThreadKey: threadId };
 }
+
+function fastEnabledFromIntelligenceTrigger(trigger) {
+  if (!trigger || trigger.getAttribute("data-state") !== "closed") return null;
+  const indicator = trigger.querySelector("[data-reserved]");
+  if (!indicator) return false;
+  // Current Codex builds keep the compact Fast indicator mounted for layout
+  // stability and expose its actual state as data-reserved="true|false".
+  // Older builds mounted it only while Fast was enabled, with no value.
+  return indicator.getAttribute("data-reserved") !== "false";
+}
+
+const FAST_ENABLED_FROM_TRIGGER_SOURCE = `const fastEnabledFromIntelligenceTrigger = ${fastEnabledFromIntelligenceTrigger.toString()};`;
 
 function retainEvaluationPromise(expression, id) {
   const key = `threaddeck-${id}`;
@@ -234,6 +299,7 @@ const REFIND_BUS_SOURCE = FIND_BUS_SOURCE.replace("  let bus = null;\n", "");
 const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
   ${ASSET_URLS_SOURCE}
   ${FIND_BUS_SOURCE}
+  ${FAST_ENABLED_FROM_TRIGGER_SOURCE}
   const visible = (element) => Boolean(element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden');
   const composerRoots = [...document.querySelectorAll('[data-codex-composer-root]')].filter(visible);
   const focusedRoot = document.activeElement?.closest?.('[data-codex-composer-root]');
@@ -243,13 +309,50 @@ const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
   const intelligenceTrigger = activeComposerRoot?.querySelector('[data-codex-intelligence-trigger]')
     ?? [...document.querySelectorAll('[data-codex-intelligence-trigger]')].find(visible)
     ?? null;
-  const reasoningEffort = intelligenceTrigger?.getAttribute('data-selected-reasoning-effort') ?? null;
-  // The closed composer trigger reserves its compact leading indicator only
-  // for a selected fast service tier. While the picker is open the same span
-  // is reserved for width measurement, so that transient state is unknown.
-  const fastEnabled = intelligenceTrigger?.getAttribute('data-state') === 'closed'
-    ? intelligenceTrigger.querySelector('[data-reserved]') != null
-    : null;
+  let reasoningEffort = intelligenceTrigger?.getAttribute('data-selected-reasoning-effort') ?? null;
+  let model = null;
+  let powerSelectionId = null;
+  let powerSelections = [];
+  // The compact power slider is a model + effort axis. Its first position can
+  // therefore be Terra Light even though the trigger's effort alone is still
+  // low. Read the mounted component's public props without opening the menu
+  // so ThreadDeck can preserve that otherwise invisible distinction.
+  try {
+    const reactKey = intelligenceTrigger && Object.getOwnPropertyNames(intelligenceTrigger)
+      .find((key) => key.startsWith('__reactFiber$'));
+    let fiber = reactKey ? intelligenceTrigger[reactKey] : null;
+    for (let depth = 0; fiber && depth < 36; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps;
+      if (!props || typeof props !== 'object') continue;
+      if (!model && typeof props.model === 'string') model = props.model;
+      if (!reasoningEffort && typeof props.reasoningEffort === 'string') {
+        reasoningEffort = props.reasoningEffort;
+      }
+      const selected = props.selectedPowerSelection ?? props.selectedLabelCandidate;
+      if (!powerSelectionId && typeof selected?.id === 'string') {
+        powerSelectionId = selected.id;
+      }
+      if (powerSelections.length === 0 && Array.isArray(props.powerSelections)) {
+        powerSelections = props.powerSelections.map((selection) => ({
+          id: typeof selection?.id === 'string' ? selection.id : null,
+          model: typeof selection?.model === 'string' ? selection.model : null,
+          reasoningEffort: typeof selection?.reasoningEffort === 'string'
+            ? selection.reasoningEffort
+            : null,
+          label: typeof selection?.label === 'string' ? selection.label : null,
+          isMax: selection?.isMax === true
+        }));
+      }
+    }
+  } catch {}
+  if (!powerSelectionId && model && reasoningEffort) {
+    powerSelectionId = powerSelections.find((selection) => (
+      selection.model === model && selection.reasoningEffort === reasoningEffort
+    ))?.id ?? null;
+  }
+  // While the picker is open the indicator is reserved for width measurement,
+  // so that transient state remains unknown.
+  const fastEnabled = fastEnabledFromIntelligenceTrigger(intelligenceTrigger);
   const activeThreadKey = activeComposerRoot?.closest('[data-above-composer-conversation-id]')?.getAttribute('data-above-composer-conversation-id')
     ?? document.querySelector('[data-app-action-sidebar-thread-id][aria-current="page"]')?.getAttribute('data-app-action-sidebar-thread-id')
     ?? document.querySelector('[data-above-composer-conversation-id]')?.getAttribute('data-above-composer-conversation-id')
@@ -331,7 +434,10 @@ const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
   return {
     connected: true,
     activeThreadKey,
+    model,
     reasoningEffort,
+    powerSelectionId,
+    powerSelections,
     fastEnabled,
     theme,
     slots,
@@ -339,7 +445,8 @@ const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
       command: urls.some((url) => url.includes('/assets/codex-micro-layout-')),
       hostMessage: typeof bus?.dispatchHostMessage === 'function',
       hid: hidHandlers > 0,
-      slots: slots.length === 6
+      slots: slots.length === 6,
+      powerSelections: powerSelections.length >= 2
     }
   };
 })()`;
@@ -571,6 +678,105 @@ function runReasoningEncoderExpression(direction, count = 1, options = {}) {
       }
     }
     return { deliveredCount, requestedCount: ${repeat}, ultraConfirmed, error };
+  })()`;
+}
+
+function runPowerSelectionExpression(modelValue, effortValue) {
+  const model = normalizeMicroModel(modelValue);
+  const reasoningEffort = typeof effortValue === "string"
+    ? effortValue.trim().toLowerCase()
+    : "";
+  if (!model || !["low", "medium", "high", "xhigh", "max", "ultra"].includes(reasoningEffort)) {
+    throw new TypeError(`Unknown Codex power selection: ${modelValue}:${effortValue}`);
+  }
+  return `(() => {
+    const visible = (element) => Boolean(element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden');
+    const composerRoots = [...document.querySelectorAll('[data-codex-composer-root]')].filter(visible);
+    const focusedRoot = document.activeElement?.closest?.('[data-codex-composer-root]');
+    const activeComposerRoot = focusedRoot && visible(focusedRoot)
+      ? focusedRoot
+      : [...composerRoots].sort((left, right) => right.getBoundingClientRect().x - left.getBoundingClientRect().x)[0] ?? null;
+    const trigger = activeComposerRoot?.querySelector('[data-codex-intelligence-trigger]')
+      ?? [...document.querySelectorAll('[data-codex-intelligence-trigger]')].find(visible)
+      ?? null;
+    const reactKey = trigger && Object.getOwnPropertyNames(trigger)
+      .find((key) => key.startsWith('__reactFiber$'));
+    let fiber = reactKey ? trigger[reactKey] : null;
+    let controller = null;
+    for (let depth = 0; fiber && depth < 36; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps;
+      if (!props || typeof props !== 'object') continue;
+      if (typeof props.onSelectPower === 'function' && Array.isArray(props.powerSelections)) {
+        controller = props;
+        break;
+      }
+    }
+    if (!controller) {
+      return { delivered: false, error: 'Codex power-selection controller is unavailable.' };
+    }
+    const matches = controller.powerSelections.filter((selection) => (
+      selection?.model === ${JSON.stringify(model)}
+      && selection?.reasoningEffort === ${JSON.stringify(reasoningEffort)}
+    ));
+    if (matches.length !== 1) {
+      return { delivered: false, error: matches.length === 0
+        ? 'Requested Codex power selection is unavailable.'
+        : 'Requested Codex power selection is ambiguous.' };
+    }
+    controller.onSelectPower(matches[0]);
+    return {
+      delivered: true,
+      id: matches[0].id ?? ${JSON.stringify(`${model}:${reasoningEffort}`)},
+      model: matches[0].model,
+      reasoningEffort: matches[0].reasoningEffort
+    };
+  })()`;
+}
+
+function runUltraWarningConfirmationExpression(timeoutMs = 4500) {
+  const boundedTimeoutMs = Math.max(250, Math.min(8000, Math.trunc(timeoutMs)));
+  return `(async () => {
+    const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
+    const deadline = Date.now() + ${boundedTimeoutMs};
+    let warningSeen = false;
+    while (Date.now() < deadline) {
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')]
+        .filter((dialog) => dialog.getClientRects().length > 0);
+      for (const dialog of dialogs) {
+        const text = normalize(dialog.innerText || dialog.textContent);
+        const exactWarning = (
+          (text.includes('use ultra with full access?')
+            && text.includes('extended reasoning')
+            && text.includes('without asking'))
+          || (text.includes('ultra')
+            && text.includes('전체 액세스')
+            && text.includes('확장')
+            && text.includes('묻지 않'))
+        );
+        if (!exactWarning) continue;
+        warningSeen = true;
+        const buttons = [...dialog.querySelectorAll('button')]
+          .filter((button) => button.getClientRects().length > 0 && !button.disabled);
+        const fullAccessButtons = buttons.filter((button) => [
+          'use full access',
+          '전체 액세스 사용',
+          '전체 접근 권한 사용'
+        ].includes(normalize(button.innerText || button.textContent || button.getAttribute('aria-label'))));
+        const continueButtons = buttons.filter((button) => [
+          'continue',
+          '계속',
+          '계속하기'
+        ].includes(normalize(button.innerText || button.textContent || button.getAttribute('aria-label'))));
+        if (fullAccessButtons.length !== 1 || continueButtons.length !== 1) {
+          throw new Error('ThreadDeck: Ultra confirmation controls are ambiguous.');
+        }
+        fullAccessButtons[0].click();
+        await new Promise((resolve) => setTimeout(resolve, 140));
+        return { confirmed: true, warningSeen: true };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    return { confirmed: false, warningSeen };
   })()`;
 }
 
@@ -806,6 +1012,41 @@ class CodexMicroBridge {
       return result;
     } catch (error) {
       throw this.normalizeError(error, "reasoning adjustment");
+    }
+  }
+
+  async setPowerSelection(model, reasoningEffort) {
+    try {
+      await this.ensureConnected();
+      const result = await this.evaluate(
+        runPowerSelectionExpression(model, reasoningEffort),
+        { timeoutMs: 2500 }
+      );
+      if (result?.delivered !== true) {
+        throw new MicroBridgeError(
+          `Codex power selection was not delivered: ${result?.error ?? "unknown error"}`,
+          {
+            code: "MICRO_CAPABILITY_UNAVAILABLE",
+            delivery: "none"
+          }
+        );
+      }
+      return result;
+    } catch (error) {
+      throw this.normalizeError(error, "power selection");
+    }
+  }
+
+  async confirmUltraFullAccess(options = {}) {
+    const timeoutMs = Math.max(250, Math.min(8000, Math.trunc(options.timeoutMs ?? 4500)));
+    try {
+      await this.ensureConnected();
+      return await this.evaluate(
+        runUltraWarningConfirmationExpression(timeoutMs),
+        { timeoutMs: timeoutMs + 1000 }
+      );
+    } catch (error) {
+      throw this.normalizeError(error, "Ultra confirmation");
     }
   }
 
@@ -1065,12 +1306,16 @@ module.exports = {
   MicroBridgeError,
   REASONING_ENCODER_KEYS,
   confirmedMicroThreadSnapshot,
+  fastEnabledFromIntelligenceTrigger,
   isLoopbackWebSocketUrl,
   microThreadIdFromKey,
   normalizeMicroSnapshot,
+  normalizeMicroPowerSelections,
   parseDebugPortFromCommand,
   retainEvaluationPromise,
   runReasoningEncoderExpression,
+  runPowerSelectionExpression,
+  runUltraWarningConfirmationExpression,
   runKeycapExpression,
   selectCodexMainTarget
 };

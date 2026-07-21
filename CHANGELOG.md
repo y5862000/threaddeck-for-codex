@@ -4,7 +4,13 @@
 
 ## Unreleased
 
+## 0.5.2-beta — 2026-07-21
+
 - Fixed a false `Switch check` result on native Codex Micro task keys. ThreadDeck now confirms the canonical target UUID from either the active composer or the official Micro slot's selected state, then keeps a bounded 1.3-second retry window for a late renderer frame. A verified switch clears that task's persisted unread-completion pulse without promoting the previous composer again.
+- Kept short task-card taps intentionally foregrounded while Micro-backed voice, Send, Effort, Fast mode, and Side Chat controls can operate against a verified current composer without bringing Codex in front. A Micro UUID mismatch fails closed instead of leaking input into another task.
+- Added the exact Codex power-selection axis, including Terra Light, guarded Max/Ultra correction, and exact Ultra full-access confirmation. Rapid ordinary Effort taps coalesce through the native Micro controller while exceptional endpoints wait for the stable final request.
+- Fixed Fast-state reads that interpreted a reserved Micro slot as enabled, and split queued-follow-up counts with row-local `Steer` controls when Chromium collapses hidden delete actions across a main task and Side Chat.
+- Regenerated the main workflow GIF at 20 fps while preserving the renderer's 320 ms interpolation state across frames. Both the working task header and dedicated Effort key now visibly ease between levels instead of jumping.
 - This correction builds on the renderer-event and slot-state approach adapted from the MIT-licensed [Codex Deck](https://github.com/dazer1234/codex-stream-deck). The MIT-licensed [Codex Micro Stream Deck Emulator](https://github.com/mpociot/codex-micro-stream-deck-emulator) remains a protocol research reference only; its injection, virtual-HID, and runtime implementations are not included in ThreadDeck.
 
 ## 0.5.1-beta — 2026-07-21

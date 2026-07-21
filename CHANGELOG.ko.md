@@ -4,7 +4,13 @@
 
 ## 미배포
 
+## 0.5.2-beta — 2026-07-21
+
 - Codex Micro 작업 버튼에서 실제 전환 뒤에도 `전환 확인`이 뜨던 오판을 수정했습니다. 이제 현재 작성창뿐 아니라 공식 Micro 슬롯의 선택 상태에서도 정확한 대상 UUID를 확인하고, 렌더러 프레임이 늦을 때는 최대 약 1.3초 동안 제한적으로 다시 읽습니다. 확인된 전환만 해당 작업의 미확인 완료 펄스를 해제하며 이전 작성창을 다시 현재 작업으로 올리지 않습니다.
+- 작업 카드를 짧게 누르면 의도대로 Codex를 앞으로 가져오되, Micro로 확인된 현재 작성창의 음성 입력·보내기·Effort·Fast mode·사이드챗은 Codex를 전면으로 띄우지 않고도 작동합니다. Micro UUID가 다르면 다른 작업에 입력을 흘리지 않고 중단합니다.
+- Terra Light를 포함한 Codex의 정확한 모델·Effort 축, 보호된 Max/Ultra 보정, 정확한 Ultra 전체 접근 확인을 추가했습니다. 일반 Effort 연타는 Micro 내부 컨트롤러에서 마지막 입력만 빠르게 적용하고 예외 끝 단계는 안정된 최종 요청을 기다립니다.
+- 예약된 Micro 슬롯을 Fast 활성 상태로 잘못 읽던 문제를 고치고, Chromium이 일반 작업과 사이드챗의 숨은 삭제 동작을 하나로 합쳐도 각 행의 `Steer`/`조정` 컨트롤로 대기 요청 수를 분리하도록 보강했습니다.
+- 메인 흐름 GIF를 20fps로 다시 만들고 프레임 사이에 렌더러의 320ms 보간 상태를 유지합니다. 이제 실행 중 작업 카드 상단과 전용 Effort 버튼의 두 트랙이 단계 사이를 뛰지 않고 부드럽게 움직입니다.
 - 이번 보정은 MIT 라이선스 [Codex Deck](https://github.com/dazer1234/codex-stream-deck)의 렌더러 이벤트·슬롯 상태 접근을 적용·수정한 기존 어댑터 위에서 구현했습니다. MIT 라이선스 [Codex Micro Stream Deck Emulator](https://github.com/mpociot/codex-micro-stream-deck-emulator)는 프로토콜 연구 참고 자료로만 유지하며, 프로세스 주입·가상 HID·런타임 구현은 ThreadDeck에 포함하지 않습니다.
 
 ## 0.5.1-beta — 2026-07-21

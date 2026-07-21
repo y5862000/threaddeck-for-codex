@@ -140,7 +140,7 @@ function gifMetadata(buffer) {
 }
 
 const expectedGifMetadata = new Map([
-  ["docs/media/threaddeck-overview.gif", { width: 960, height: 507, frames: 72, delay: 8 }],
+  ["docs/media/threaddeck-overview.gif", { width: 960, height: 507, frames: 120, delay: 5 }],
   ["docs/media/task-hold-to-talk.gif", { width: 960, height: 420, frames: 60, delay: 10 }],
   ["docs/media/voice-hold-to-dictate.gif", { width: 960, height: 420, frames: 52, delay: 10 }],
   ["docs/media/send-long-press.gif", { width: 960, height: 420, frames: 54, delay: 10 }],

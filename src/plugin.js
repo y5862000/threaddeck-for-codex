@@ -383,6 +383,7 @@ const fastModeLongPressUpdates = new Map();
 const reasoningBusyContexts = new Set();
 const reasoningDirectionByThreadId = new Map();
 const reasoningAvailableEffortsByThreadId = new Map();
+const reasoningPowerSelectionsByThreadId = new Map();
 const reasoningVisualOverrideByThreadId = new Map();
 const reasoningProgressTransitionByKey = new Map();
 const reasoningPendingCountByThreadId = new Map();
@@ -639,6 +640,7 @@ function combinedVisibleThreads(currentThread = currentThreadForDisplay(), ranke
 }
 let fastModeState = {
   threadId: null,
+  model: null,
   enabled: null,
   available: null,
   failed: false
@@ -874,6 +876,20 @@ function reasoningEffortProgress(value) {
   return progress[normalizedReasoningEffort(value)] ?? 0;
 }
 
+function normalizedReasoningModel(value) {
+  const model = typeof value === "string" ? value.trim().toLowerCase() : "";
+  return /^[a-z0-9][a-z0-9._-]*$/.test(model) ? model : null;
+}
+
+function reasoningSelectionProgress(model, effort) {
+  // Codex's compact axis begins at Terra Light, immediately before Sol Light.
+  // Both report the same effort token (`low`), so model identity is required
+  // to keep the physical key at the true first position.
+  if (normalizedReasoningModel(model)?.includes("terra")
+      && normalizedReasoningEffort(effort) === "low") return 0;
+  return reasoningEffortProgress(effort);
+}
+
 function reasoningEffortAppearance(value) {
   const ultra = String(value ?? "").toLowerCase() === "ultra";
   const lightUltra = appearanceMode === "light";
@@ -904,8 +920,14 @@ function reasoningTransitionProgressAt(transition, nowMs = renderTimeMs()) {
   return transition.from + (transition.to - transition.from) * progress;
 }
 
-function animatedReasoningProgress(scope, threadId, effort, nowMs = renderTimeMs()) {
-  const target = reasoningEffortProgress(effort);
+function animatedReasoningProgress(
+  scope,
+  threadId,
+  effort,
+  model = null,
+  nowMs = renderTimeMs()
+) {
+  const target = reasoningSelectionProgress(model, effort);
   const key = reasoningTransitionKey(scope, threadId);
   if (!key) return target;
   const previous = reasoningProgressTransitionByKey.get(key);
@@ -1483,6 +1505,11 @@ function beginThreadPress(context, slot, options = {}) {
     return;
   }
 
+  const productionControl = !options.openThread
+    && !options.focusComposer
+    && !options.beginVoice;
+  const microStatus = options.microStatus
+    ?? (productionControl ? microControlThreadStatus : null);
   const state = {
     slot,
     threadId: thread.id,
@@ -1496,6 +1523,11 @@ function beginThreadPress(context, slot, options = {}) {
     timer: null,
     openPromise: null,
     focusPromise: null,
+    microTargetVerified: false,
+    activateApp: options.activateApp
+      ?? (productionControl
+        ? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 }))
+        : (async () => true)),
     pauseMedia: options.pauseMedia ?? pauseMediaForVoice,
     resumeMedia: options.resumeMedia ?? resumeMediaAfterVoice,
     beginVoice: options.beginVoice ?? beginVoiceHold,
@@ -1520,7 +1552,24 @@ function beginThreadPress(context, slot, options = {}) {
       THREAD_VOICE_FOCUS_SETTLE_MS,
       earliestFocusAtMs - Date.now()
     );
-    const retryDelaysMs = [initialDelayMs, 90, 160, 280];
+    if (initialDelayMs > 0) await state.sleep(initialDelayMs);
+    if (threadPressByContext.get(context) !== state || !state.held) return false;
+    if (microStatus) {
+      try {
+        const status = await microStatus(thread, { useMicro: true });
+        if (threadPressByContext.get(context) !== state || !state.held) return false;
+        if (status?.available) {
+          state.microTargetVerified = status.matches === true;
+          return state.microTargetVerified;
+        }
+      } catch (error) {
+        runtimeTrace("micro-control-target", {
+          result: "unavailable",
+          reason: error?.code ?? "status-error"
+        });
+      }
+    }
+    const retryDelaysMs = [0, 90, 160, 280];
     for (const delayMs of retryDelaysMs) {
       if (delayMs > 0) await state.sleep(delayMs);
       if (threadPressByContext.get(context) !== state || !state.held) return false;
@@ -1555,12 +1604,25 @@ function beginThreadPress(context, slot, options = {}) {
       if (voiceStateByContext.get(context) === "preparing") setVoiceVisualState(context, "idle");
       return;
     }
+    if (!composerFocused) {
+      if (threadPressByContext.get(context) === state) threadPressByContext.delete(context);
+      releaseThreadMediaPause(state, context);
+      setVoiceVisualState(context, "error");
+      runtimeTrace("thread-hold", {
+        slot: slot + 1,
+        phase: "target",
+        result: "unconfirmed",
+        held: true
+      });
+      return;
+    }
     clearFeedback(context);
     const voiceStarted = await Promise.resolve(state.beginVoice(context, {
       targetThreadId: state.threadId,
       autoSubmit: true,
       requireBaseline: true,
       composerAlreadyFocused: composerFocused,
+      allowComposerRefocus: !state.microTargetVerified,
       pauseMedia: () => state.mediaPausePromise
     }));
     if (threadPressByContext.get(context) !== state || !state.held) {
@@ -1582,6 +1644,26 @@ function endThreadPress(context) {
   state.held = false;
   if (state.timer) clearTimeout(state.timer);
   threadPressByContext.delete(context);
+  const shortTap = !state.armed && !state.voiceStarted;
+  if (shortTap) {
+    void Promise.resolve(state.openPromise).then(async (opened) => {
+      if (!opened) return false;
+      await state.activateApp();
+      runtimeTrace("thread-navigation", {
+        slot: state.slot + 1,
+        strategy: "activate-after-micro",
+        result: "frontmost"
+      });
+      return true;
+    }).catch((error) => {
+      runtimeTrace("thread-navigation", {
+        slot: state.slot + 1,
+        strategy: "activate-after-micro",
+        result: "failed",
+        reason: error?.code ?? "activation-error"
+      });
+    });
+  }
   if (state.voiceStarted) void Promise.resolve(state.endVoice(context, true));
   else releaseThreadMediaPause(state, context);
   if (!state.voiceStarted && voiceStateByContext.get(context) === "preparing") {
@@ -1660,12 +1742,16 @@ function reasoningControlSvg(
   const effort = state?.threadId === activeThreadId
     ? normalizedReasoningEffort(state?.reasoningEffort)
     : null;
+  const model = state?.threadId === activeThreadId
+    ? normalizedReasoningModel(state?.model)
+    : null;
+  const terraLight = model?.includes("terra") && effort === "low";
   const fast = state?.threadId === activeThreadId && state?.enabled === true;
   const status = effort ?? "unknown";
   const accent = effort === "ultra"
     ? appearanceMode === "light" ? "#7040C7" : "#B15CE8"
     : effort ? THEME.blue : THEME.amber;
-  const levelLabel = {
+  const levelLabel = terraLight ? "TERRA LIGHT" : ({
     none: "LIGHT",
     minimal: "LIGHT",
     low: "LIGHT",
@@ -1674,8 +1760,8 @@ function reasoningControlSvg(
     xhigh: "EXTRA HIGH",
     max: "MAX",
     ultra: "ULTRA"
-  }[effort] ?? "EFFORT";
-  const levelFontSize = levelLabel === "EXTRA HIGH" ? 17 : 22;
+  }[effort] ?? "EFFORT");
+  const levelFontSize = ["EXTRA HIGH", "TERRA LIGHT"].includes(levelLabel) ? 16 : 22;
   const slider = flowingReasoningSlider(
     accent,
     { effort },
@@ -1690,7 +1776,12 @@ function reasoningControlSvg(
       trackStrokeWidth: 1,
       showLabel: false,
       idSuffix: "Control",
-      progressOverride: animatedReasoningProgress("control", activeThreadId, effort)
+      progressOverride: animatedReasoningProgress(
+        "control",
+        activeThreadId,
+        effort,
+        model
+      )
     }
   );
   const speedGlyph = fast
@@ -1865,6 +1956,7 @@ function staticActionSvg(action, context = null) {
       ? {
         ...fastModeState,
         threadId: controlThreadId,
+        model: visual.model ?? fastModeState.model,
         reasoningEffort: visual.effort,
         failed: false
       }
@@ -2709,6 +2801,12 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
   const waitForDraftReset = options.waitForDraftReset ?? waitForVoiceDraftReset;
   const scheduleRefresh = options.scheduleRefresh ?? (() => setTimeout(() => void refreshThreads(), 500));
   const targetFocused = options.targetFocused ?? voiceTargetIsFocused;
+  const productionControl = !options.openApp
+    && !options.bridge
+    && !options.submit
+    && !options.targetFocused;
+  const microStatus = options.microStatus
+    ?? (productionControl ? microControlThreadStatus : null);
   const requireTargetFocus = async (phase) => {
     if (await targetFocused(targetThreadId)) return true;
     failVoiceTranscription(context);
@@ -2716,22 +2814,55 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
     return false;
   };
   try {
-    await openApp();
-    await sleep(140);
     if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
-    if (!await requireTargetFocus("target-check")) return;
+    let microTargetVerified = false;
+    if (microStatus) {
+      const targetThread = combinedVisibleThreads().find(
+        (candidate) => candidate?.id === targetThreadId
+      ) ?? { id: targetThreadId };
+      try {
+        const status = await microStatus(targetThread, { useMicro: true });
+        if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
+        if (status?.available) {
+          if (!status.matches) {
+            failVoiceTranscription(context);
+            runtimeTrace("voice-submit", { phase: "micro-target-check", result: "mismatch" });
+            return;
+          }
+          microTargetVerified = true;
+        }
+      } catch (error) {
+        runtimeTrace("micro-control-target", {
+          result: "unavailable",
+          reason: error?.code ?? "status-error"
+        });
+      }
+    }
+    if (!microTargetVerified) {
+      await openApp();
+      await sleep(140);
+    }
+    if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
+    if (!microTargetVerified && !await requireTargetFocus("target-check")) return;
 
     const clickedSubmit = await submit();
     let confirmed = clickedSubmit
       && await waitForDraftReset(context, targetThreadId, tracker, options);
-    if (!confirmed && voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) {
+    const allowKeyboardFallback = options.allowKeyboardFallback ?? !microTargetVerified;
+    if (!confirmed
+        && allowKeyboardFallback
+        && voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) {
       // The explicit button is preferred, but Codex can rebuild the composer
       // between transcription and submission. Refocus the draft and retry with
       // Return, then verify the draft actually cleared before showing success.
       // Recheck immediately before that fallback so a task switch during the
       // first confirmation wait can never submit into the new task.
       if (!await requireTargetFocus("fallback-target-check")) return;
-      bridge("codex-focus-composer", null, { quiet: true });
+      if (!bridge("codex-focus-composer", null, { quiet: true })) {
+        failVoiceTranscription(context);
+        runtimeTrace("voice-submit", { phase: "fallback-focus", result: "failed" });
+        return;
+      }
       if (!bridge("send", context)) {
         failVoiceTranscription(context);
         return;
@@ -3409,6 +3540,12 @@ function beginCurrentVoicePress(context, options = {}) {
     ? candidateSideChatCreation
     : null;
   const beginVoice = options.beginVoice ?? beginVoiceHold;
+  const productionControl = !options.synchronizeCurrent
+    && !options.focusComposer
+    && !options.focusSideChatComposer
+    && !options.beginVoice;
+  const microStatus = options.microStatus
+    ?? (productionControl ? microControlThreadStatus : null);
   state.promise = (async () => {
     const pendingFastModeUpdate = options.fastModeUpdate ?? activeFastModeUpdate;
     if (pendingFastModeUpdate) await pendingFastModeUpdate.catch(() => false);
@@ -3477,19 +3614,41 @@ function beginCurrentVoicePress(context, options = {}) {
     if (!state.held
         || currentVoicePressByContext.get(context) !== state
         || contexts.get(context) !== ACTIONS.voice) return false;
-    if (!await focusComposer()) {
-      setVoiceVisualState(context, "error");
-      return false;
+    let microTargetVerified = false;
+    if (microStatus && currentThread?.id) {
+      try {
+        const status = await microStatus(currentThread, { useMicro: true });
+        if (!state.held || currentVoicePressByContext.get(context) !== state) return false;
+        if (status?.available) {
+          if (!status.matches) {
+            setVoiceVisualState(context, "error");
+            return false;
+          }
+          microTargetVerified = true;
+        }
+      } catch (error) {
+        runtimeTrace("micro-control-target", {
+          result: "unavailable",
+          reason: error?.code ?? "status-error"
+        });
+      }
     }
-    if (currentThread?.id
-        && !await currentControlThreadIsFocused(currentThread, { probe: options.focusProbe })) {
-      setVoiceVisualState(context, "error");
-      return false;
+    if (!microTargetVerified) {
+      if (!await focusComposer()) {
+        setVoiceVisualState(context, "error");
+        return false;
+      }
+      if (currentThread?.id
+          && !await currentControlThreadIsFocused(currentThread, { probe: options.focusProbe })) {
+        setVoiceVisualState(context, "error");
+        return false;
+      }
     }
     if (!state.held || currentVoicePressByContext.get(context) !== state) return false;
     const voiceStarted = await Promise.resolve(beginVoice(context, {
       targetThreadId: currentThread?.id ?? "",
-      composerAlreadyFocused: true
+      composerAlreadyFocused: true,
+      allowComposerRefocus: !microTargetVerified
     }));
     if (!state.held || currentVoicePressByContext.get(context) !== state) {
       if (voiceStarted) await Promise.resolve(endVoiceHold(context, false));
@@ -3562,6 +3721,7 @@ async function beginVoiceHold(context, options = {}) {
   let baseline = stateReader();
   if (!baseline
       && options.composerAlreadyFocused
+      && options.allowComposerRefocus !== false
       && !Number.isFinite(options.provisionalSideChatRequestedAtMs)) {
     await focusCurrentComposer(context);
     baseline = stateReader();
@@ -3872,6 +4032,7 @@ function releaseVoiceKeysSync(rawOptions = {}) {
   cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
   reasoningAvailableEffortsByThreadId.clear();
+  reasoningPowerSelectionsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningProgressTransitionByKey.clear();
   reasoningPendingCountByThreadId.clear();
@@ -4007,6 +4168,8 @@ function applyMicroReadOnlySnapshot(snapshot, options = {}) {
     refreshFastMode: false
   });
   const effort = normalizedReasoningEffort(snapshot.reasoningEffort);
+  const model = normalizedReasoningModel(snapshot.model);
+  rememberReasoningPowerSelections(current.id, snapshot.powerSelections);
   const fastEnabled = typeof snapshot.fastEnabled === "boolean"
     ? snapshot.fastEnabled
     : null;
@@ -4014,6 +4177,7 @@ function applyMicroReadOnlySnapshot(snapshot, options = {}) {
     fastModeState = {
       ...fastModeStateFromThread(current, fastModeState),
       threadId: current.id,
+      model: model ?? (fastModeState.threadId === current.id ? fastModeState.model : null),
       enabled: fastEnabled ?? fastModeState.enabled,
       available: fastEnabled === null ? fastModeState.available : true,
       reasoningEffort: effort ?? fastModeState.reasoningEffort,
@@ -4041,6 +4205,29 @@ function refreshMicroReadOnly(options = {}) {
   });
   activeMicroReadOnlyRefresh = refresh;
   return refresh;
+}
+
+async function microControlThreadStatus(thread, options = {}) {
+  if (!thread?.id || options.useMicro === false) {
+    return { available: false, matches: false, snapshot: null };
+  }
+  const refresh = options.refresh
+    ?? (() => codexControlPlane.refreshReadOnly({ force: true, quiet: true }));
+  const snapshot = await refresh();
+  if (!snapshot?.activeThreadKey) {
+    return { available: false, matches: false, snapshot: null };
+  }
+  if (options.apply !== false) {
+    applyMicroReadOnlySnapshot(snapshot, {
+      candidates: options.candidates,
+      promote: false
+    });
+  }
+  const matches = snapshot.activeThreadKey === thread.id;
+  runtimeTrace("micro-control-target", {
+    result: matches ? "confirmed" : "mismatch"
+  });
+  return { available: true, matches, snapshot };
 }
 
 async function synchronizeCurrentCodexThread(options = {}) {
@@ -4283,6 +4470,89 @@ function reasoningEffortOptionsForThread(threadId) {
     : [];
 }
 
+function normalizeReasoningPowerSelections(values) {
+  const seen = new Set();
+  const selections = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const model = normalizedReasoningModel(value?.model);
+    const reasoningEffort = normalizedReasoningEffort(value?.reasoningEffort);
+    if (!model || !reasoningEffort) continue;
+    const id = typeof value?.id === "string" && value.id.trim()
+      ? value.id.trim().toLowerCase()
+      : `${model}:${reasoningEffort}`;
+    if (seen.has(id)) continue;
+    seen.add(id);
+    selections.push({ id, model, effort: reasoningEffort, compact: true });
+  }
+  return selections;
+}
+
+function rememberReasoningPowerSelections(threadId, values) {
+  if (!threadId) return [];
+  const selections = normalizeReasoningPowerSelections(values);
+  if (selections.length >= 2) {
+    reasoningPowerSelectionsByThreadId.set(threadId, selections);
+    return selections;
+  }
+  reasoningPowerSelectionsByThreadId.delete(threadId);
+  return [];
+}
+
+function reasoningPowerSelectionsForThread(threadId) {
+  return threadId ? reasoningPowerSelectionsByThreadId.get(threadId) ?? [] : [];
+}
+
+function reasoningSelectionOptionsForThread(threadId) {
+  const compact = reasoningPowerSelectionsForThread(threadId);
+  if (compact.length < 2) return [];
+  const modelCounts = new Map();
+  for (const selection of compact) {
+    modelCounts.set(selection.model, (modelCounts.get(selection.model) ?? 0) + 1);
+  }
+  const configuredModel = normalizedReasoningModel(reasoningGlobalOptionCatalog.model);
+  const primaryModel = configuredModel && modelCounts.has(configuredModel)
+    ? configuredModel
+    : [...modelCounts].sort((left, right) => right[1] - left[1])[0]?.[0] ?? null;
+  if (!primaryModel) return compact;
+
+  const primaryEfforts = normalizeReasoningEffortOptions([
+    ...reasoningEffortOptionsForThread(threadId),
+    ...reasoningGlobalOptionCatalog.efforts,
+    ...compact.filter((selection) => selection.model === primaryModel)
+      .map((selection) => selection.effort)
+  ]);
+  const expanded = [];
+  let insertedPrimary = false;
+  for (const selection of compact) {
+    if (selection.model !== primaryModel) {
+      expanded.push(selection);
+      continue;
+    }
+    if (insertedPrimary) continue;
+    insertedPrimary = true;
+    for (const effort of primaryEfforts) {
+      const compactMatch = compact.find((candidate) => (
+        candidate.model === primaryModel && candidate.effort === effort
+      ));
+      expanded.push(compactMatch ?? {
+        id: `${primaryModel}:${effort}`,
+        model: primaryModel,
+        effort,
+        compact: false
+      });
+    }
+  }
+  return expanded;
+}
+
+function reasoningSelectionIndex(options, model, effort) {
+  const normalizedModel = normalizedReasoningModel(model);
+  const normalizedEffort = normalizedReasoningEffort(effort);
+  return options.findIndex((selection) => (
+    selection.model === normalizedModel && selection.effort === normalizedEffort
+  ));
+}
+
 function refreshReasoningOptionCatalog(options = {}) {
   if (activeReasoningOptionCatalogRefresh && options.force !== true) {
     return activeReasoningOptionCatalogRefresh;
@@ -4302,6 +4572,7 @@ function refreshReasoningOptionCatalog(options = {}) {
         // A Codex/model restart can change which levels are exposed. Exact
         // task scans from the old process are no longer authoritative.
         reasoningAvailableEffortsByThreadId.clear();
+        reasoningPowerSelectionsByThreadId.clear();
         reasoningDirectionByThreadId.clear();
       }
       return reasoningGlobalOptionCatalog;
@@ -4360,6 +4631,12 @@ function nextReasoningDirection(threadId, state = fastModeState) {
     ? normalizedReasoningEffort(state?.reasoningEffort)
     : null;
   const available = reasoningEffortOptionsForThread(threadId);
+  const selections = reasoningSelectionOptionsForThread(threadId);
+  const selectionIndex = state?.threadId === threadId
+    ? reasoningSelectionIndex(selections, state?.model, effort)
+    : -1;
+  if (selectionIndex === 0) return "up";
+  if (selectionIndex === selections.length - 1 && selectionIndex >= 0) return "down";
   if (available.length >= 2 && effort === available[0]) return "up";
   if (available.length >= 2 && effort === available.at(-1)) return "down";
   const cached = reasoningDirectionByThreadId.get(threadId);
@@ -4378,6 +4655,31 @@ function optimisticReasoningStep(
 ) {
   if (!threadId || state?.threadId !== threadId) return null;
   const current = normalizedReasoningEffort(state?.reasoningEffort);
+  const selections = reasoningSelectionOptionsForThread(threadId);
+  const selectionIndex = reasoningSelectionIndex(
+    selections,
+    state?.model,
+    current
+  );
+  if (selections.length >= 2 && selectionIndex >= 0) {
+    let nextDirection = direction === "down" ? "down" : "up";
+    if (nextDirection === "up" && selectionIndex === selections.length - 1) {
+      nextDirection = "down";
+    } else if (nextDirection === "down" && selectionIndex === 0) {
+      nextDirection = "up";
+    }
+    const nextIndex = selectionIndex + (nextDirection === "down" ? -1 : 1);
+    const next = selections[nextIndex];
+    return {
+      model: next.model,
+      effort: next.effort,
+      direction: nextIndex === selections.length - 1
+        ? "down"
+        : nextIndex === 0
+          ? "up"
+          : nextDirection
+    };
+  }
   const options = normalizeReasoningEffortOptions(availableEfforts);
   const index = options.indexOf(current);
   if (options.length < 2 || index < 0) return null;
@@ -4404,6 +4706,9 @@ function fastModeStateFromThread(thread, fallback = null) {
   const fallbackReasoning = fallback?.threadId === threadId
     ? normalizedReasoningEffort(fallback?.reasoningEffort)
     : null;
+  const fallbackModel = fallback?.threadId === threadId
+    ? normalizedReasoningModel(fallback?.model)
+    : null;
   const nextReasoning = normalizedReasoningEffort(thread?.nextReasoningEffort);
   const activeReasoning = normalizedReasoningEffort(thread?.reasoningEffort);
   const nextServiceTier = normalizedServiceTier(thread?.nextServiceTier);
@@ -4425,6 +4730,7 @@ function fastModeStateFromThread(thread, fallback = null) {
       : activeMetadataEnabled;
   return {
     threadId,
+    model: fallbackModel,
     enabled,
     available: typeof enabled === "boolean"
       ? typeof nextMetadataEnabled !== "boolean" && fallbackMatches
@@ -4440,16 +4746,22 @@ function fastModeStateFromThread(thread, fallback = null) {
 
 function mergeFastModeObservation(thread, observed, previous = fastModeState) {
   const threadId = thread?.id ?? previous?.threadId ?? null;
+  const previousModel = previous?.threadId === threadId
+    ? normalizedReasoningModel(previous?.model)
+    : null;
   if (typeof observed?.enabled === "boolean") {
     return {
       threadId,
       ...observed,
+      model: normalizedReasoningModel(observed?.model)
+        ?? previousModel,
       available: observed.available ?? true
     };
   }
   const fallback = fastModeStateFromThread(thread, previous);
   return {
     threadId,
+    model: normalizedReasoningModel(observed?.model) ?? fallback.model,
     enabled: fallback.enabled,
     available: typeof fallback.enabled === "boolean"
       ? fallback.available
@@ -4497,6 +4809,7 @@ function refreshFastMode(options = {}) {
     fastModeRevision += 1;
     fastModeState = {
       threadId: null,
+      model: null,
       enabled: null,
       available: null,
       failed: false
@@ -4527,6 +4840,7 @@ function refreshFastMode(options = {}) {
             && (typeof snapshot.fastEnabled === "boolean"
               || normalizedReasoningEffort(snapshot.reasoningEffort))) {
           microObserved = {
+            model: normalizedReasoningModel(snapshot.model),
             enabled: snapshot.fastEnabled,
             available: typeof snapshot.fastEnabled === "boolean" ? true : null,
             reasoningEffort: normalizedReasoningEffort(snapshot.reasoningEffort),
@@ -4565,6 +4879,7 @@ function refreshFastMode(options = {}) {
           && typeof fastModeState.enabled === "boolean") return false;
       fastModeState = {
         threadId,
+        model: null,
         enabled: null,
         available: null,
         failed: true
@@ -4679,6 +4994,8 @@ function toggleFastMode(context, options = {}) {
         fastModeState = {
           ...fastModeStateFromThread(thread, fastModeState),
           threadId,
+          model: normalizedReasoningModel(snapshot?.model)
+            ?? fastModeState.model,
           enabled,
           available: typeof enabled === "boolean" ? true : null,
           reasoningEffort: normalizedReasoningEffort(snapshot?.reasoningEffort)
@@ -4740,7 +5057,12 @@ function toggleFastMode(context, options = {}) {
             || typeof confirmed.enabled !== "boolean") {
           throw new Error("Codex fast mode toggle result was not confirmed");
         }
-        fastModeState = { threadId, ...confirmed, failed: false };
+        fastModeState = {
+          threadId,
+          model: fastModeState.threadId === threadId ? fastModeState.model : null,
+          ...confirmed,
+          failed: false
+        };
         applyFocusedComposerState(thread, confirmed);
         renderFastModeContexts();
         // New native helpers restore focus inside the same transaction. Keep
@@ -4825,7 +5147,12 @@ function toggleFastMode(context, options = {}) {
           || !confirmed.available) {
         throw new Error("Codex fast mode target was not confirmed");
       }
-      fastModeState = { threadId, ...confirmed, failed: false };
+      fastModeState = {
+        threadId,
+        model: fastModeState.threadId === threadId ? fastModeState.model : null,
+        ...confirmed,
+        failed: false
+      };
       applyFocusedComposerState(thread, confirmed);
       renderFastModeContexts();
       noteBridgeSuccess("fast-mode-set");
@@ -4896,16 +5223,137 @@ function performReasoningEffortChange(context, options = {}) {
       const expectedEffort = normalizedReasoningEffort(
         reasoningVisualOverrideByThreadId.get(threadId)?.effort
       );
-      const needsAdvancedFallback = reasoningEffortNeedsAdvancedFallback(expectedEffort);
+      const expectedModel = normalizedReasoningModel(
+        reasoningVisualOverrideByThreadId.get(threadId)?.model
+      );
+      const currentEffort = fastModeState.threadId === threadId
+        ? normalizedReasoningEffort(fastModeState.reasoningEffort)
+        : normalizedReasoningEffort(thread?.nextReasoningEffort)
+          ?? normalizedReasoningEffort(thread?.reasoningEffort);
+      const currentModel = fastModeState.threadId === threadId
+        ? normalizedReasoningModel(fastModeState.model)
+        : null;
+      const executionPlan = productionNativeAction
+        ? reasoningSelectionExecutionPlan(
+          currentModel,
+          currentEffort,
+          expectedModel,
+          expectedEffort,
+          threadId,
+          direction,
+          tapCount
+        )
+        : {
+          mode: "step",
+          direction,
+          count: tapCount,
+          targetEffort: expectedEffort
+        };
+      const plannedDirection = executionPlan.direction ?? direction;
+      const plannedTapCount = executionPlan.count ?? tapCount;
+      const needsAdvancedFallback = ["exact", "power-exact"].includes(
+        executionPlan.mode
+      );
+      if (productionNativeAction && executionPlan.mode === "unavailable") {
+        throw new Error("Requested Codex model and effort combination is unavailable");
+      }
+      if (productionNativeAction && executionPlan.mode === "none") {
+        applyFocusedComposerState(thread, fastModeState);
+        clearFeedback(context);
+        runtimeTrace("control-plane", {
+          strategy: "reasoning-noop",
+          result: "already-target"
+        });
+        return true;
+      }
       let microNeedsExactCorrection = false;
       if (productionNativeAction
           && options.useMicro !== false
-          && !needsAdvancedFallback) {
+          && ["power", "power-exact"].includes(executionPlan.mode)) {
+        const powerTarget = executionPlan.powerTarget;
+        const powerResult = await codexControlPlane.execute("reasoning-power-select", {
+          micro: async (bridge) => {
+            const ultraConfirmation = powerTarget.effort === "ultra"
+              ? bridge.confirmUltraFullAccess({ timeoutMs: 1800 })
+              : null;
+            await bridge.setPowerSelection(powerTarget.model, powerTarget.effort);
+            if (ultraConfirmation) await ultraConfirmation;
+            return verifyAfterMicroDelivery(async () => {
+              await sleepWithSignal(160);
+              const snapshot = await bridge.refreshReadOnly();
+              if (!isProvisionalSideChatThread(thread)
+                  && snapshot.activeThreadKey !== threadId) {
+                throw new Error("Power selection changed outside the verified current task");
+              }
+              if (normalizedReasoningModel(snapshot.model) !== powerTarget.model
+                  || normalizedReasoningEffort(snapshot.reasoningEffort)
+                    !== powerTarget.effort) {
+                throw new Error("Codex power selection did not reach its exact target");
+              }
+              return snapshot;
+            }, "Power selection verification");
+          }
+        }, { quiet: true });
+        if (powerResult.backend !== "micro" || !powerResult.ok) {
+          showFeedback(context, "error", "변경 확인", 1600);
+          return false;
+        }
+        const snapshot = powerResult.value;
+        applyMicroReadOnlySnapshot(snapshot, { promote: false });
+        if (executionPlan.mode === "power-exact") {
+          microNeedsExactCorrection = true;
+          runtimeTrace("control-plane", {
+            strategy: "micro+advanced",
+            result: "model-selected"
+          });
+        } else {
+          const confirmedModel = normalizedReasoningModel(snapshot.model);
+          const confirmedEffort = normalizedReasoningEffort(snapshot.reasoningEffort);
+          const selections = reasoningSelectionOptionsForThread(threadId);
+          const selectionIndex = reasoningSelectionIndex(
+            selections,
+            confirmedModel,
+            confirmedEffort
+          );
+          fastModeState = {
+            ...fastModeStateFromThread(thread, fastModeState),
+            threadId,
+            model: confirmedModel,
+            enabled: typeof snapshot.fastEnabled === "boolean"
+              ? snapshot.fastEnabled
+              : fastModeState.enabled,
+            available: typeof snapshot.fastEnabled === "boolean"
+              ? true
+              : fastModeState.available,
+            reasoningEffort: confirmedEffort,
+            composerFocused: true,
+            failed: false
+          };
+          reasoningDirectionByThreadId.set(
+            threadId,
+            selectionIndex === selections.length - 1
+              ? "down"
+              : selectionIndex === 0
+                ? "up"
+                : plannedDirection
+          );
+          applyFocusedComposerState(thread, fastModeState);
+          clearFeedback(context);
+          runtimeTrace("control-plane", {
+            strategy: "micro-power",
+            result: "success"
+          });
+          return true;
+        }
+      }
+      if (productionNativeAction
+          && options.useMicro !== false
+          && executionPlan.mode === "micro") {
         const microResult = await codexControlPlane.execute("reasoning-effort-step", {
           micro: async (bridge) => {
             await bridge.adjustReasoning(
-              direction === "down" ? "decrease" : "increase",
-              tapCount,
+              plannedDirection === "down" ? "decrease" : "increase",
+              plannedTapCount,
               { confirmUltra: false }
             );
             return verifyAfterMicroDelivery(async () => {
@@ -4954,6 +5402,8 @@ function performReasoningEffortChange(context, options = {}) {
             fastModeState = {
               ...fastModeStateFromThread(thread, fastModeState),
               threadId,
+              model: normalizedReasoningModel(snapshot?.model)
+                ?? fastModeState.model,
               enabled: typeof snapshot?.fastEnabled === "boolean"
                 ? snapshot.fastEnabled
                 : fastModeState.enabled,
@@ -4969,7 +5419,7 @@ function performReasoningEffortChange(context, options = {}) {
               ? "down"
               : effortIndex === 0
                 ? "up"
-                : direction;
+                : plannedDirection;
             reasoningDirectionByThreadId.set(threadId, nextDirection);
             if (snapshot) applyMicroReadOnlySnapshot(snapshot, { promote: false });
             applyFocusedComposerState(thread, fastModeState);
@@ -5015,10 +5465,62 @@ function performReasoningEffortChange(context, options = {}) {
       // verified encoder skip takes the exact Advanced route after the input
       // burst settles, scans this user's full list, and selects only the final
       // target once.
-      const result = exactTargetEffort
-        ? await setExactEffort(exactTargetEffort)
-        : await stepEffort(direction, tapCount);
-      const confirmed = parseReasoningStepState(result?.stdout ?? result ?? "");
+      const rendererUltraConfirmation = exactTargetEffort === "ultra"
+          && productionNativeAction
+        ? codexControlPlane.execute("reasoning-ultra-confirm", {
+          micro: (bridge) => bridge.confirmUltraFullAccess({ timeoutMs: 1600 })
+        }, { quiet: true }).catch(() => null)
+        : null;
+      let result = null;
+      let actionError = null;
+      try {
+        result = exactTargetEffort
+          ? await setExactEffort(exactTargetEffort)
+          : await stepEffort(plannedDirection, plannedTapCount);
+      } catch (error) {
+        actionError = error;
+      }
+      let confirmed = parseReasoningStepState(result?.stdout ?? result ?? "");
+      let rendererUltraSnapshot = null;
+      const rendererUltraResult = rendererUltraConfirmation
+        ? await rendererUltraConfirmation
+        : null;
+      const parsedConfirmedEffort = normalizedReasoningEffort(
+        confirmed?.reasoningEffort
+      );
+      const nativeConfirmed = !actionError
+        && confirmed?.verified === true
+        && parsedConfirmedEffort === exactTargetEffort;
+      if (rendererUltraResult && !nativeConfirmed) {
+        if (rendererUltraResult.backend === "micro"
+            && rendererUltraResult.ok
+            && rendererUltraResult.value?.confirmed === true) {
+          await sleepWithSignal(160);
+          rendererUltraSnapshot = await codexControlPlane.refreshReadOnly({
+            force: true,
+            quiet: true
+          });
+          if (rendererUltraSnapshot?.activeThreadKey === threadId
+              && normalizedReasoningEffort(rendererUltraSnapshot.reasoningEffort)
+                === "ultra") {
+            confirmed = {
+              reasoningEffort: "ultra",
+              availableEfforts: reasoningEffortOptionsForThread(threadId),
+              verified: true,
+              enabled: rendererUltraSnapshot.fastEnabled,
+              available: typeof rendererUltraSnapshot.fastEnabled === "boolean"
+                ? true
+                : null,
+              composerFocused: true,
+              atMinimum: false,
+              atMaximum: true,
+              direction: "down"
+            };
+            actionError = null;
+          }
+        }
+      }
+      if (actionError) throw actionError;
       const confirmedEffort = normalizedReasoningEffort(confirmed?.reasoningEffort);
       const availableEfforts = normalizeReasoningEffortOptions(
         confirmed?.availableEfforts
@@ -5037,6 +5539,7 @@ function performReasoningEffortChange(context, options = {}) {
       fastModeState = {
         threadId,
         ...merged,
+        model: expectedModel ?? merged.model ?? fastModeState.model,
         reasoningEffort: confirmedEffort,
         composerFocused: confirmed.composerFocused,
         failed: false
@@ -5045,7 +5548,7 @@ function performReasoningEffortChange(context, options = {}) {
         ? "down"
         : confirmed.atMinimum === true
           ? "up"
-          : confirmed.direction ?? direction;
+          : confirmed.direction ?? plannedDirection;
       reasoningDirectionByThreadId.set(threadId, nextDirection);
       applyFocusedComposerState(thread, fastModeState);
 
@@ -5096,9 +5599,127 @@ function reasoningEffortNeedsAdvancedFallback(value) {
   return ["max", "ultra"].includes(normalizedReasoningEffort(value));
 }
 
-function reasoningInputSettleMs(options = {}, targetEffort = null) {
+function reasoningEffortExecutionPlan(
+  currentValue,
+  targetValue,
+  availableEfforts,
+  fallbackDirection = "up",
+  fallbackCount = 1
+) {
+  const currentEffort = normalizedReasoningEffort(currentValue);
+  const targetEffort = normalizedReasoningEffort(targetValue);
+  const options = normalizeReasoningEffortOptions(availableEfforts);
+  const fallback = {
+    mode: targetEffort ? "exact" : "step",
+    direction: fallbackDirection === "down" ? "down" : "up",
+    count: Math.max(1, Math.min(64, Math.trunc(fallbackCount ?? 1))),
+    targetEffort
+  };
+  if (!currentEffort || !targetEffort || options.length < 2) return fallback;
+  if (currentEffort === targetEffort) {
+    return { mode: "none", direction: fallback.direction, count: 0, targetEffort };
+  }
+  const currentIndex = options.indexOf(currentEffort);
+  const targetIndex = options.indexOf(targetEffort);
+  if (currentIndex < 0 || targetIndex < 0) return fallback;
+  if (reasoningEffortNeedsAdvancedFallback(currentEffort)
+      || reasoningEffortNeedsAdvancedFallback(targetEffort)) {
+    return { ...fallback, mode: "exact" };
+  }
+  return {
+    mode: "micro",
+    direction: targetIndex < currentIndex ? "down" : "up",
+    count: Math.abs(targetIndex - currentIndex),
+    targetEffort
+  };
+}
+
+function reasoningSelectionExecutionPlan(
+  currentModelValue,
+  currentEffortValue,
+  targetModelValue,
+  targetEffortValue,
+  threadId,
+  fallbackDirection = "up",
+  fallbackCount = 1
+) {
+  const currentModel = normalizedReasoningModel(currentModelValue);
+  const targetModel = normalizedReasoningModel(targetModelValue);
+  const currentEffort = normalizedReasoningEffort(currentEffortValue);
+  const targetEffort = normalizedReasoningEffort(targetEffortValue);
+  if (!currentModel || !targetModel || currentModel === targetModel) {
+    return reasoningEffortExecutionPlan(
+      currentEffort,
+      targetEffort,
+      reasoningEffortOptionsForThread(threadId),
+      fallbackDirection,
+      fallbackCount
+    );
+  }
+  if (currentEffort === targetEffort && currentModel === targetModel) {
+    return {
+      mode: "none",
+      direction: fallbackDirection,
+      count: 0,
+      targetModel,
+      targetEffort
+    };
+  }
+  const selections = reasoningSelectionOptionsForThread(threadId);
+  const target = selections.find((selection) => (
+    selection.model === targetModel && selection.effort === targetEffort
+  ));
+  if (!target) {
+    return {
+      mode: "unavailable",
+      direction: fallbackDirection,
+      count: 0,
+      targetModel,
+      targetEffort
+    };
+  }
+  if (target.compact) {
+    return {
+      mode: "power",
+      direction: fallbackDirection,
+      count: 1,
+      targetModel,
+      targetEffort,
+      powerTarget: target
+    };
+  }
+  const targetRank = REASONING_EFFORT_ORDER.indexOf(targetEffort);
+  const compactTarget = selections
+    .filter((selection) => selection.model === targetModel && selection.compact)
+    .sort((left, right) => (
+      Math.abs(REASONING_EFFORT_ORDER.indexOf(left.effort) - targetRank)
+      - Math.abs(REASONING_EFFORT_ORDER.indexOf(right.effort) - targetRank)
+    ))[0] ?? null;
+  return compactTarget
+    ? {
+      mode: "power-exact",
+      direction: fallbackDirection,
+      count: 1,
+      targetModel,
+      targetEffort,
+      powerTarget: compactTarget
+    }
+    : {
+      mode: "unavailable",
+      direction: fallbackDirection,
+      count: 0,
+      targetModel,
+      targetEffort
+    };
+}
+
+function reasoningInputSettleMs(
+  options = {},
+  targetEffort = null,
+  advancedTouched = false
+) {
   if (Number.isFinite(options.settleMs)) return options.settleMs;
-  if (reasoningEffortNeedsAdvancedFallback(targetEffort)) {
+  if (advancedTouched || reasoningEffortNeedsAdvancedFallback(targetEffort)) {
     return REASONING_INPUT_SETTLE_MS;
   }
   return codexControlPlane.health().connected
@@ -5127,6 +5748,9 @@ function stepReasoningEffort(context, options = {}) {
   const direction = options.direction
     ?? visual?.direction
     ?? nextReasoningDirection(queuedThreadId);
+  let advancedTouched = reasoningEffortNeedsAdvancedFallback(
+    visual?.effort ?? fastModeState.reasoningEffort
+  );
   let optimistic = null;
   // Paint every tap immediately from the last requested position. The native
   // Codex picker is debounced separately, so a burst moves the hardware track
@@ -5135,12 +5759,14 @@ function stepReasoningEffort(context, options = {}) {
     const baseState = {
       ...fastModeState,
       threadId: queuedThreadId,
+      model: visual?.model ?? fastModeState.model,
       reasoningEffort: visual?.effort ?? fastModeState.reasoningEffort
     };
     optimistic = optimisticReasoningStep(queuedThreadId, direction, baseState);
     if (optimistic) {
       reasoningVisualOverrideByThreadId.set(queuedThreadId, optimistic);
       reasoningDirectionByThreadId.set(queuedThreadId, optimistic.direction);
+      advancedTouched ||= reasoningEffortNeedsAdvancedFallback(optimistic.effort);
     }
   }
   incrementReasoningPending(reasoningPendingCountByThreadId, queuedThreadId);
@@ -5154,11 +5780,13 @@ function stepReasoningEffort(context, options = {}) {
     existingBatch.tapCount += 1;
     existingBatch.contexts.add(context);
     existingBatch.options = { ...existingBatch.options, ...options };
+    existingBatch.advancedTouched ||= advancedTouched;
     resetReasoningInputSettleTimer(
       existingBatch,
       reasoningInputSettleMs(
         options,
-        optimistic?.effort ?? visual?.effort ?? fastModeState.reasoningEffort
+        optimistic?.effort ?? visual?.effort ?? fastModeState.reasoningEffort,
+        existingBatch.advancedTouched
       )
     );
     return existingBatch.promise;
@@ -5183,6 +5811,7 @@ function stepReasoningEffort(context, options = {}) {
     timer: null,
     cancelled: false,
     dispatched: false,
+    advancedTouched,
     release,
     promise: null
   };
@@ -5199,6 +5828,7 @@ function stepReasoningEffort(context, options = {}) {
           queuedThreadId: batch.queuedThreadId,
           direction: batch.startingDirection,
           tapCount: batch.tapCount,
+          advancedTouched: batch.advancedTouched,
           coalesced: true
         });
     })
@@ -5225,7 +5855,8 @@ function stepReasoningEffort(context, options = {}) {
     batch,
     reasoningInputSettleMs(
       options,
-      optimistic?.effort ?? visual?.effort ?? fastModeState.reasoningEffort
+      optimistic?.effort ?? visual?.effort ?? fastModeState.reasoningEffort,
+      batch.advancedTouched
     )
   );
   activeFastModeUpdate = update;
@@ -8474,6 +9105,7 @@ function resetDemoEffects() {
   cancelReasoningInputBatches();
   reasoningBusyContexts.clear();
   reasoningAvailableEffortsByThreadId.clear();
+  reasoningPowerSelectionsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningProgressTransitionByKey.clear();
   reasoningPendingCountByThreadId.clear();
@@ -8508,7 +9140,6 @@ function demoPreviewSvg(keySvgs) {
 }
 
 function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
-  resetDemoEffects();
   fixedRenderTimeMs = nowMs;
   const completionStartMs = DEMO_EPOCH_MS + 4_700;
   const hasCompleted = animated && elapsedMs >= 4_700;
@@ -8605,6 +9236,7 @@ function renderDemo(outputPath, mode = "dark") {
   THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
   const resolvedOutput = path.resolve(outputPath);
   fsSync.mkdirSync(path.dirname(resolvedOutput), { recursive: true });
+  resetDemoEffects();
   fsSync.writeFileSync(resolvedOutput, demoPreviewSvg(demoKeySvgs(DEMO_EPOCH_MS)));
   fixedRenderTimeMs = null;
   resetDemoEffects();
@@ -8642,13 +9274,17 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   appearanceMode = mode;
   THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
   const resolvedDirectory = path.resolve(outputDirectory);
-  const framesPerSecond = 12;
+  const framesPerSecond = 20;
   const durationMs = 6_000;
   const frameCount = durationMs / 1000 * framesPerSecond;
   fsSync.mkdirSync(resolvedDirectory, { recursive: true });
   for (const entry of fsSync.readdirSync(resolvedDirectory)) {
     if (/^frame-\d{3}\.svg$/.test(entry)) fsSync.unlinkSync(path.join(resolvedDirectory, entry));
   }
+  // Keep interpolation state across frames. Resetting it for every SVG made
+  // both Effort tracks jump directly between levels in the documentation GIF,
+  // even though physical keys use the eased runtime transition.
+  resetDemoEffects();
   for (let index = 0; index < frameCount; index += 1) {
     const elapsedMs = Math.round(index / framesPerSecond * 1000);
     const nowMs = DEMO_EPOCH_MS + elapsedMs;
@@ -10721,6 +11357,62 @@ async function verifyInteractionPolicy() {
     && voicePressStarted
     && voicePrepared
     && voiceControlTargetId === manuallyActiveThread.id;
+
+  const backgroundVoiceContext = "interaction-background-micro-voice";
+  contexts.set(backgroundVoiceContext, ACTIONS.voice);
+  contextImages.set(backgroundVoiceContext, voiceSvg("idle"));
+  let backgroundVoiceFocusCalls = 0;
+  let backgroundVoiceOptions = null;
+  const backgroundVoiceStarted = beginCurrentVoicePress(backgroundVoiceContext, {
+    synchronizeCurrent: async () => manuallyActiveThread,
+    microStatus: async () => ({ available: true, matches: true }),
+    focusComposer: async () => {
+      backgroundVoiceFocusCalls += 1;
+      return false;
+    },
+    beginVoice: (_context, voiceOptions) => {
+      backgroundVoiceOptions = voiceOptions;
+      return true;
+    }
+  });
+  const backgroundVoiceState = currentVoicePressByContext.get(backgroundVoiceContext);
+  const backgroundVoicePrepared = await backgroundVoiceState?.promise;
+  endCurrentVoicePress(backgroundVoiceContext, { resumeMedia: async () => true });
+  cancelVoiceTranscription(backgroundVoiceContext, true);
+  contexts.delete(backgroundVoiceContext);
+  contextImages.delete(backgroundVoiceContext);
+  const microVoiceDoesNotNeedForegroundFocus = backgroundVoiceStarted
+    && backgroundVoicePrepared
+    && backgroundVoiceFocusCalls === 0
+    && backgroundVoiceOptions?.targetThreadId === manuallyActiveThread.id
+    && backgroundVoiceOptions?.composerAlreadyFocused === true
+    && backgroundVoiceOptions?.allowComposerRefocus === false;
+
+  const mismatchedVoiceContext = "interaction-background-micro-mismatch";
+  contexts.set(mismatchedVoiceContext, ACTIONS.voice);
+  contextImages.set(mismatchedVoiceContext, voiceSvg("idle"));
+  let mismatchedVoiceFocusCalls = 0;
+  let mismatchedVoiceStarts = 0;
+  beginCurrentVoicePress(mismatchedVoiceContext, {
+    synchronizeCurrent: async () => manuallyActiveThread,
+    microStatus: async () => ({ available: true, matches: false }),
+    focusComposer: async () => {
+      mismatchedVoiceFocusCalls += 1;
+      return true;
+    },
+    beginVoice: () => {
+      mismatchedVoiceStarts += 1;
+      return true;
+    }
+  });
+  const mismatchedVoiceState = currentVoicePressByContext.get(mismatchedVoiceContext);
+  const mismatchedVoicePrepared = await mismatchedVoiceState?.promise;
+  cancelCurrentVoicePress(mismatchedVoiceContext, false);
+  contexts.delete(mismatchedVoiceContext);
+  contextImages.delete(mismatchedVoiceContext);
+  const microVoiceMismatchFailsClosed = !mismatchedVoicePrepared
+    && mismatchedVoiceFocusCalls === 0
+    && mismatchedVoiceStarts === 0;
   const focusedRemoteForComposer = {
     ...remoteThread,
     status: "working",
@@ -11047,6 +11739,23 @@ async function verifyInteractionPolicy() {
     && mediaResumes === 1;
   cancelThreadPress(pressContext, false);
 
+  const tapActivationContext = "interaction-thread-tap-activation";
+  contexts.set(tapActivationContext, ACTIONS.thread1);
+  let tapActivationCalls = 0;
+  beginThreadPress(tapActivationContext, 0, {
+    thread: remoteThread,
+    openThread: async () => true,
+    schedule: () => null,
+    activateApp: async () => { tapActivationCalls += 1; },
+    focusComposer: async () => true,
+    beginVoice: async () => true
+  });
+  endThreadPress(tapActivationContext);
+  await Promise.resolve();
+  await Promise.resolve();
+  contexts.delete(tapActivationContext);
+  const shortTaskTapBringsCodexForward = tapActivationCalls === 1;
+
   const baselineContext = "interaction-missing-composer";
   contexts.set(baselineContext, ACTIONS.voice);
   const baselineCommands = [];
@@ -11257,6 +11966,42 @@ async function verifyInteractionPolicy() {
   });
   const wrongTargetCannotSubmit = guardedCommands.length === 0
     && voiceStateByContext.get(guardContext) === "error";
+
+  const backgroundSubmitContext = "interaction-background-micro-submit";
+  const backgroundSubmitSessionId = ++nextVoiceSessionId;
+  contexts.set(backgroundSubmitContext, ACTIONS.thread1);
+  voiceStateByContext.set(backgroundSubmitContext, "submitting");
+  voiceTargetThreadByContext.set(backgroundSubmitContext, remoteThread.id);
+  voiceSessionIdByContext.set(backgroundSubmitContext, backgroundSubmitSessionId);
+  let backgroundSubmitOpenCalls = 0;
+  let backgroundSubmitFocusCalls = 0;
+  let backgroundSubmitCalls = 0;
+  await submitCompletedVoiceTranscription(backgroundSubmitContext, remoteThread.id, {
+    baseline: parseTextInputState("focused-text-state", "0\t0000000000000000"),
+    lastObserved: parseTextInputState("focused-text-state", "8\t2222222222222222"),
+    sessionId: backgroundSubmitSessionId
+  }, {
+    microStatus: async () => ({ available: true, matches: true }),
+    openApp: async () => { backgroundSubmitOpenCalls += 1; },
+    targetFocused: async () => {
+      backgroundSubmitFocusCalls += 1;
+      return true;
+    },
+    submit: async () => {
+      backgroundSubmitCalls += 1;
+      return true;
+    },
+    waitForDraftReset: async () => true,
+    scheduleRefresh: () => {}
+  });
+  const microSubmitDoesNotActivateCodex = backgroundSubmitOpenCalls === 0
+    && backgroundSubmitFocusCalls === 0
+    && backgroundSubmitCalls === 1
+    && voiceStateByContext.get(backgroundSubmitContext) === "sent";
+  contexts.delete(backgroundSubmitContext);
+  voiceStateByContext.delete(backgroundSubmitContext);
+  voiceTargetThreadByContext.delete(backgroundSubmitContext);
+  voiceSessionIdByContext.delete(backgroundSubmitContext);
 
   const offStateError = new Error("fast mode is off");
   offStateError.exitCode = 1;
@@ -11651,6 +12396,130 @@ async function verifyInteractionPolicy() {
         threadId: coldThread,
         reasoningEffort: "xhigh"
       });
+  })();
+  const terraLightPowerAxisIsConnected = (() => {
+    const previousCatalog = reasoningGlobalOptionCatalog;
+    const previousEfforts = reasoningAvailableEffortsByThreadId.get(localThreadB.id);
+    const previousPowerSelections = reasoningPowerSelectionsByThreadId.get(localThreadB.id);
+    reasoningGlobalOptionCatalog = {
+      model: "gpt-5.6-sol",
+      efforts: [...REASONING_EFFORT_ORDER],
+      source: "contract"
+    };
+    reasoningAvailableEffortsByThreadId.set(
+      localThreadB.id,
+      [...REASONING_EFFORT_ORDER]
+    );
+    rememberReasoningPowerSelections(localThreadB.id, [
+      { id: "gpt-5.6-terra:low", model: "gpt-5.6-terra", reasoningEffort: "low" },
+      { id: "gpt-5.6-sol:low", model: "gpt-5.6-sol", reasoningEffort: "low" },
+      { id: "gpt-5.6-sol:medium", model: "gpt-5.6-sol", reasoningEffort: "medium" },
+      { id: "gpt-5.6-sol:high", model: "gpt-5.6-sol", reasoningEffort: "high" },
+      { id: "gpt-5.6-sol:xhigh", model: "gpt-5.6-sol", reasoningEffort: "xhigh" },
+      { id: "gpt-5.6-sol:ultra", model: "gpt-5.6-sol", reasoningEffort: "ultra" }
+    ]);
+    const selections = reasoningSelectionOptionsForThread(localThreadB.id);
+    const downFromSolLight = optimisticReasoningStep(localThreadB.id, "down", {
+      threadId: localThreadB.id,
+      model: "gpt-5.6-sol",
+      reasoningEffort: "low"
+    });
+    const upFromTerraLight = optimisticReasoningStep(localThreadB.id, "up", {
+      threadId: localThreadB.id,
+      model: "gpt-5.6-terra",
+      reasoningEffort: "low"
+    });
+    const terraPlan = reasoningSelectionExecutionPlan(
+      "gpt-5.6-sol",
+      "low",
+      "gpt-5.6-terra",
+      "low",
+      localThreadB.id,
+      "down",
+      1
+    );
+    const maxPlan = reasoningSelectionExecutionPlan(
+      "gpt-5.6-terra",
+      "low",
+      "gpt-5.6-sol",
+      "max",
+      localThreadB.id,
+      "up",
+      5
+    );
+    reasoningProgressTransitionByKey.delete(`control:${localThreadB.id}`);
+    const terraVisual = reasoningControlSvg({
+      threadId: localThreadB.id,
+      model: "gpt-5.6-terra",
+      enabled: false,
+      available: true,
+      reasoningEffort: "low",
+      failed: false
+    }, localThreadB.id, "up");
+    reasoningGlobalOptionCatalog = previousCatalog;
+    if (previousEfforts) reasoningAvailableEffortsByThreadId.set(localThreadB.id, previousEfforts);
+    else reasoningAvailableEffortsByThreadId.delete(localThreadB.id);
+    if (previousPowerSelections) {
+      reasoningPowerSelectionsByThreadId.set(localThreadB.id, previousPowerSelections);
+    } else reasoningPowerSelectionsByThreadId.delete(localThreadB.id);
+    return selections.map((selection) => selection.id).join(",") === [
+      "gpt-5.6-terra:low",
+      "gpt-5.6-sol:low",
+      "gpt-5.6-sol:medium",
+      "gpt-5.6-sol:high",
+      "gpt-5.6-sol:xhigh",
+      "gpt-5.6-sol:max",
+      "gpt-5.6-sol:ultra"
+    ].join(",")
+      && downFromSolLight?.model === "gpt-5.6-terra"
+      && downFromSolLight.effort === "low"
+      && downFromSolLight.direction === "up"
+      && upFromTerraLight?.model === "gpt-5.6-sol"
+      && upFromTerraLight.effort === "low"
+      && terraPlan.mode === "power"
+      && terraPlan.powerTarget?.id === "gpt-5.6-terra:low"
+      && maxPlan.mode === "power-exact"
+      && maxPlan.powerTarget?.id === "gpt-5.6-sol:xhigh"
+      && terraVisual.includes(">TERRA LIGHT</text>")
+      && terraVisual.includes('data-reasoning-progress="0.000"');
+  })();
+  const reasoningFinalTargetPlanningIsSafe = (() => {
+    const options = [...REASONING_EFFORT_ORDER];
+    const lighter = reasoningEffortExecutionPlan(
+      "xhigh",
+      "low",
+      options,
+      "up",
+      7
+    );
+    const roundTrip = reasoningEffortExecutionPlan(
+      "xhigh",
+      "xhigh",
+      options,
+      "up",
+      4
+    );
+    const leavingAdvanced = reasoningEffortExecutionPlan(
+      "max",
+      "high",
+      options,
+      "down",
+      1
+    );
+    const enteringUltra = reasoningEffortExecutionPlan(
+      "xhigh",
+      "ultra",
+      options,
+      "up",
+      2
+    );
+    return lighter.mode === "micro"
+      && lighter.direction === "down"
+      && lighter.count === 3
+      && roundTrip.mode === "none"
+      && leavingAdvanced.mode === "exact"
+      && enteringUltra.mode === "exact"
+      && reasoningInputSettleMs({}, "high", true) === REASONING_INPUT_SETTLE_MS;
   })();
   reasoningAvailableEffortsByThreadId.set(
     localThreadB.id,
@@ -12479,6 +13348,8 @@ async function verifyInteractionPolicy() {
     && manualCodexSelectionOverridesStreamDeckHistory
     && sameTaskComposerStateRecoversWithoutIdentityChange
     && dashboardControlsUseCurrentTask
+    && microVoiceDoesNotNeedForegroundFocus
+    && microVoiceMismatchFailsClosed
     && composerChangesStayNextTurnOnly
     && fallbackSearchRunsOnce
     && activationWaitRunsOnceBeforeNavigation
@@ -12498,6 +13369,7 @@ async function verifyInteractionPolicy() {
     && freshSourceFlagsReplaceCachedFlags
     && cancelledSideChatIsQuiet
     && staleHoldCannotDeleteNextPress
+    && shortTaskTapBringsCodexForward
     && missingBaselineRejected
     && mediaPauseLeaseIsBalanced
     && alreadyPausedMediaIsNeverToggled
@@ -12506,6 +13378,7 @@ async function verifyInteractionPolicy() {
     && concurrentResumeBeforeDispatchIsCoalesced
     && postDispatchResumeRaceReassertsPause
     && wrongTargetCannotSubmit
+    && microSubmitDoesNotActivateCodex
     && offExitIsConfirmedState
     && passiveComposerReadDoesNotClaimSpeed
     && taskMetadataRestoresFastWithoutMenu
@@ -12522,6 +13395,8 @@ async function verifyInteractionPolicy() {
     && reasoningPingPongStateIsVerified
     && optimisticReasoningMovesBeforeNativeConfirmation
     && userSpecificReasoningOptionsAreRespected
+    && terraLightPowerAxisIsConnected
+    && reasoningFinalTargetPlanningIsSafe
     && rapidReasoningCoalescesToFinalTarget
     && reasoningInputDuringApplyStartsOneSuccessor
     && reasoningControlUsesCenteredAnimatedTrack
@@ -12561,6 +13436,8 @@ async function verifyInteractionPolicy() {
     manualCodexSelectionOverridesStreamDeckHistory,
     sameTaskComposerStateRecoversWithoutIdentityChange,
     dashboardControlsUseCurrentTask,
+    microVoiceDoesNotNeedForegroundFocus,
+    microVoiceMismatchFailsClosed,
     composerChangesStayNextTurnOnly,
     fallbackSearchRunsOnce,
     activationWaitRunsOnceBeforeNavigation,
@@ -12580,6 +13457,7 @@ async function verifyInteractionPolicy() {
     freshSourceFlagsReplaceCachedFlags,
     cancelledSideChatIsQuiet,
     staleHoldCannotDeleteNextPress,
+    shortTaskTapBringsCodexForward,
     missingBaselineRejected,
     mediaPauseLeaseIsBalanced,
     alreadyPausedMediaIsNeverToggled,
@@ -12588,6 +13466,7 @@ async function verifyInteractionPolicy() {
     concurrentResumeBeforeDispatchIsCoalesced,
     postDispatchResumeRaceReassertsPause,
     wrongTargetCannotSubmit,
+    microSubmitDoesNotActivateCodex,
     offExitIsConfirmedState,
     passiveComposerReadDoesNotClaimSpeed,
     taskMetadataRestoresFastWithoutMenu,
@@ -12604,6 +13483,8 @@ async function verifyInteractionPolicy() {
     reasoningPingPongStateIsVerified,
     optimisticReasoningMovesBeforeNativeConfirmation,
     userSpecificReasoningOptionsAreRespected,
+    terraLightPowerAxisIsConnected,
+    reasoningFinalTargetPlanningIsSafe,
     rapidReasoningCoalescesToFinalTarget,
     reasoningInputDuringApplyStartsOneSuccessor,
     reasoningControlUsesCenteredAnimatedTrack,
@@ -12653,6 +13534,7 @@ async function verifyInteractionPolicy() {
   reasoningBusyContexts.clear();
   reasoningDirectionByThreadId.clear();
   reasoningAvailableEffortsByThreadId.clear();
+  reasoningPowerSelectionsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningProgressTransitionByKey.clear();
   reasoningPendingCountByThreadId.clear();
