@@ -89,6 +89,8 @@ Codex 파일은 쓰기 모드로 열지 않습니다.
 
 Micro 동작 활성화는 지연 실행됩니다. HID/PTT가 필요한 첫 물리 입력에서만 현재 렌더러 메모리에 기능 게이트 override를 설치하고 Micro 연결 이벤트를 보냅니다. 공식 keycap 명령은 Fast·사이드챗·보내기·새 작업을, host PTT 이벤트는 마이크를 담당합니다. Effort는 Codex가 `ENC_CW`/`ENC_CC`와 `act: 2`에서 호출하는 것과 같은 내부 `composer.openModelPicker` power-selection 명령을 사용하고, `AG00`~`AG05`는 슬롯 전환을 담당합니다. override는 해당 렌더러 프로세스가 끝나면 사라집니다.
 
+`AG00`~`AG05` 전달 뒤에는 현재 작성창 ID 또는 정확히 `selected`로 표시된 Micro 슬롯에서 정규화한 대상 UUID를 확인합니다. 작성창 DOM이 한 프레임 늦을 때는 슬롯 선택 신호를 기준으로 삼되, 제한된 재시도 안에서도 확인되지 않으면 성공으로 간주하지 않습니다. 검증된 결과만 현재 작업을 갱신하고 저장된 미확인 완료를 해제합니다.
+
 `src/micro-bootstrap.js`는 ThreadDeck이 처음 관찰했을 때 이미 실행 중인 Codex 세대를 중단하지 않습니다. 사용자가 나중에 Codex를 정상 종료·실행한 뒤에도 연결이 없는 상태가 안정적으로 확인되면 임의 루프백 포트로 한 번만 보호된 재실행을 수행합니다. 시도는 프로세스 세대별로 한 번이고 10분 간격 제한이 있으며 `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1`로 자동 복구를 끌 수 있습니다. `~/Library/Application Support/ThreadDeck`에는 프로세스 세대·포트·상태·간격·숫자 시각만 저장합니다.
 
 ### Neo 프로필

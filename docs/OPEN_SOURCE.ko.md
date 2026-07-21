@@ -57,6 +57,12 @@ ThreadDeck은 이를 외부 의존성 없는 CommonJS로 다시 구성하고 첫
 않았습니다. 전체 원본 라이선스는 `reference/codex-deck/LICENSE.upstream`에 보존하고 모든
 플러그인 설치 파일 안에도 `licenses/codex-deck-MIT.txt`로 포함합니다.
 
+ThreadDeck의 작업 전환 확인은 위 출처를 밝힌 렌더러·슬롯 탐색 접근 위에 만든 프로젝트 자체
+로직입니다. 정확한 대상 UUID를 정규화하고 현재 작성창 ID 또는 한 프레임 먼저 바뀔 수 있는
+공식 Micro 슬롯의 `selected` 신호 중 하나로 확인합니다. 이번 보정을 위해 원본 런타임 코드를
+추가로 복사하지 않았으며, 별도의 `mpociot/codex-micro-stream-deck-emulator` 스냅샷은 계속
+프로토콜 연구 용도로만 사용합니다.
+
 ## 재현 가능한 검증
 
 호환되는 Mac에서 다음을 실행합니다.

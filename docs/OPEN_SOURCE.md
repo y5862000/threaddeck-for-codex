@@ -58,6 +58,12 @@ backend are not copied. The complete upstream license is preserved in
 `reference/codex-deck/LICENSE.upstream` and ships inside every plugin installer as
 `licenses/codex-deck-MIT.txt`.
 
+ThreadDeck's task-switch confirmation is project-owned logic built on that attributed renderer and
+slot-discovery approach. It normalizes the exact target UUID and accepts either the active composer
+identity or the official Micro slot's `selected` signal, which can arrive one renderer frame earlier.
+No additional upstream runtime code was copied for this correction. The separate
+`mpociot/codex-micro-stream-deck-emulator` snapshot remains protocol research only.
+
 ## Reproducible verification
 
 On a compatible Mac:

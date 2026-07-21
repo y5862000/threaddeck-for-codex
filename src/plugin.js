@@ -96,7 +96,7 @@ const {
 const { resolveProfilePageTarget } = require("./profile-navigation");
 const { CodexControlPlane, verifyAfterMicroDelivery } = require("./control-plane");
 const { CodexMicroBootstrap } = require("./micro-bootstrap");
-const { CodexMicroBridge } = require("./micro-cdp");
+const { CodexMicroBridge, confirmedMicroThreadSnapshot } = require("./micro-cdp");
 const {
   applySideChatLogLine,
   createSideChatDiscoveryState,
@@ -165,6 +165,7 @@ const CURRENT_THREAD_SYNC_CACHE_MS = 250;
 const REASONING_INPUT_SETTLE_MS = 1_100;
 const MICRO_REASONING_INPUT_SETTLE_MS = 90;
 const REASONING_PROGRESS_TRANSITION_MS = 320;
+const MICRO_TASK_SWITCH_VERIFY_DELAYS_MS = [45, 80, 140, 220, 320, 480];
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
 const CODEX_HOME = path.resolve(process.env.CODEX_HOME || path.join(USER_HOME, ".codex"));
@@ -7873,10 +7874,11 @@ async function openThread(context, slot, options = {}) {
           await bridge.openThread(thread.id, { snapshot: cachedSnapshot ?? undefined });
           return verifyAfterMicroDelivery(async () => {
             let snapshot = null;
-            for (const delayMs of [45, 80, 140, 220]) {
+            for (const delayMs of MICRO_TASK_SWITCH_VERIFY_DELAYS_MS) {
               await sleepWithSignal(delayMs);
               snapshot = await bridge.refreshReadOnly();
-              if (snapshot.activeThreadKey === thread.id) return snapshot;
+              const confirmed = confirmedMicroThreadSnapshot(snapshot, thread.id);
+              if (confirmed) return confirmed;
             }
             throw new Error("Codex Micro task switch was delivered but not confirmed");
           }, "task switch verification");

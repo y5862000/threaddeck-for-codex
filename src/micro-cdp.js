@@ -156,6 +156,22 @@ function normalizeMicroSnapshot(value) {
   };
 }
 
+function confirmedMicroThreadSnapshot(value, threadKey) {
+  const threadId = microThreadIdFromKey(threadKey);
+  if (!threadId) return null;
+  const snapshot = normalizeMicroSnapshot(value);
+  if (snapshot.activeThreadKey === threadId) return snapshot;
+  const selectedSlot = snapshot.slots.find((slot) => (
+    slot.threadId === threadId && slot.selected === true
+  ));
+  if (!selectedSlot) return null;
+  // Codex can update the official Micro slot selection one renderer frame
+  // before the focused composer exposes its new conversation id. Treat that
+  // selected slot as the authoritative result of the AG0x command so callers
+  // neither report a false failure nor re-promote the previous composer.
+  return { ...snapshot, activeThreadKey: threadId };
+}
+
 function retainEvaluationPromise(expression, id) {
   const key = `threaddeck-${id}`;
   return `(() => {
@@ -1048,6 +1064,7 @@ module.exports = {
   DEFAULT_STATE_PATH,
   MicroBridgeError,
   REASONING_ENCODER_KEYS,
+  confirmedMicroThreadSnapshot,
   isLoopbackWebSocketUrl,
   microThreadIdFromKey,
   normalizeMicroSnapshot,

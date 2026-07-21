@@ -8,6 +8,7 @@ const {
   READ_ONLY_SNAPSHOT_EXPRESSION,
   CodexMicroBridge,
   MicroBridgeError,
+  confirmedMicroThreadSnapshot,
   isLoopbackWebSocketUrl,
   microThreadIdFromKey,
   normalizeMicroSnapshot,
@@ -99,6 +100,25 @@ test("normalizes renderer-local Micro keys while preserving their HID identity",
   assert.equal(snapshot.slots[0].threadId, threadId);
   assert.equal(snapshot.slots[0].threadKey, `local:${threadId}`);
   assert.equal(microThreadIdFromKey(`remote:macbook:${threadId}`), threadId);
+});
+
+test("accepts the selected Micro slot while the composer identity is one frame behind", () => {
+  const previousId = "00000000-0000-4000-8000-000000000001";
+  const targetId = "00000000-0000-4000-8000-000000000002";
+  const confirmed = confirmedMicroThreadSnapshot({
+    connected: true,
+    activeThreadKey: `local:${previousId}`,
+    slots: [
+      { id: 0, threadKey: `local:${previousId}`, selected: false },
+      { id: 1, threadKey: `local:${targetId}`, selected: true }
+    ]
+  }, targetId);
+  assert.equal(confirmed.activeThreadKey, targetId);
+  assert.equal(confirmed.slots[1].selected, true);
+  assert.equal(confirmedMicroThreadSnapshot({
+    activeThreadKey: previousId,
+    slots: [{ id: 1, threadKey: targetId, selected: false }]
+  }, targetId), null);
 });
 
 test("keeps each awaited renderer evaluation reachable", () => {

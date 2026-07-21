@@ -4,6 +4,9 @@
 
 ## 미배포
 
+- Codex Micro 작업 버튼에서 실제 전환 뒤에도 `전환 확인`이 뜨던 오판을 수정했습니다. 이제 현재 작성창뿐 아니라 공식 Micro 슬롯의 선택 상태에서도 정확한 대상 UUID를 확인하고, 렌더러 프레임이 늦을 때는 최대 약 1.3초 동안 제한적으로 다시 읽습니다. 확인된 전환만 해당 작업의 미확인 완료 펄스를 해제하며 이전 작성창을 다시 현재 작업으로 올리지 않습니다.
+- 이번 보정은 MIT 라이선스 [Codex Deck](https://github.com/dazer1234/codex-stream-deck)의 렌더러 이벤트·슬롯 상태 접근을 적용·수정한 기존 어댑터 위에서 구현했습니다. MIT 라이선스 [Codex Micro Stream Deck Emulator](https://github.com/mpociot/codex-micro-stream-deck-emulator)는 프로토콜 연구 참고 자료로만 유지하며, 프로세스 주입·가상 HID·런타임 구현은 ThreadDeck에 포함하지 않습니다.
+
 ## 0.5.1-beta — 2026-07-21
 
 - Effort 전달 경로를 Codex Micro 노브가 사용하는 정확한 내부 작성창 명령으로 바꿨습니다. 일반 노출 단계는 90ms 동안 마지막 입력만 합쳐 한 번 적용하고, 물리 버튼 트랙은 누를 때마다 즉시 320ms 가감속 애니메이션을 시작합니다.

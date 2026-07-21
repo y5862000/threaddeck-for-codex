@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Fixed a false `Switch check` result on native Codex Micro task keys. ThreadDeck now confirms the canonical target UUID from either the active composer or the official Micro slot's selected state, then keeps a bounded 1.3-second retry window for a late renderer frame. A verified switch clears that task's persisted unread-completion pulse without promoting the previous composer again.
+- This correction builds on the renderer-event and slot-state approach adapted from the MIT-licensed [Codex Deck](https://github.com/dazer1234/codex-stream-deck). The MIT-licensed [Codex Micro Stream Deck Emulator](https://github.com/mpociot/codex-micro-stream-deck-emulator) remains a protocol research reference only; its injection, virtual-HID, and runtime implementations are not included in ThreadDeck.
+
 ## 0.5.1-beta — 2026-07-21
 
 - Replaced the Effort transport with the exact internal composer command used by the Codex Micro encoder. Ordinary visible levels now coalesce for only 90 ms and apply the final movement once, while the hardware track begins a 320 ms eased transition immediately on every tap.

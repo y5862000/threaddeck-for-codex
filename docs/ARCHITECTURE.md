@@ -89,6 +89,8 @@ The helper uses macOS system frameworks only. Stream Deck needs Accessibility pe
 
 Mutating Micro activation is lazy: only the first physical control that needs HID/PTT installs an in-memory renderer feature-gate override and announces a connected Micro device. Official keycap commands drive Fast, Side Chat, Send, and New Task; host PTT events drive microphone input; Effort invokes the same internal `composer.openModelPicker` power-selection command that Codex dispatches for `ENC_CW`/`ENC_CC` with `act: 2`; and `AG00`–`AG05` drive exact native slots. The override exists only in that renderer process.
 
+After an `AG00`–`AG05` delivery, ThreadDeck verifies the canonical destination UUID from either the active composer identity or the exact Micro slot marked `selected`. The selected-slot signal is authoritative when the composer DOM is one frame behind; a bounded retry window still rejects an unconfirmed delivery. Only that verified result updates Current Task and acknowledges a persisted unread completion.
+
 `src/micro-bootstrap.js` never interrupts the Codex generation that was already running when ThreadDeck first observes it. After the user later closes and normally reopens Codex, a stable unbridged generation may receive one guarded relaunch with a random loopback port. Attempts are generation-scoped and rate-limited for ten minutes; `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` disables recovery. Only process-generation, port, health, cooldown, and timestamp data are stored under `~/Library/Application Support/ThreadDeck`.
 
 ### Neo profile
