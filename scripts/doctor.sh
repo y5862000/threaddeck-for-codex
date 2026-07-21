@@ -31,6 +31,62 @@ fi
   && pass "Codex Desktop is installed" \
   || fail "Codex Desktop is not installed"
 
+codex_app_path="$(/usr/bin/mdfind 'kMDItemCFBundleIdentifier == "com.openai.codex"' 2>/dev/null \
+  | while IFS= read -r candidate; do
+      [[ "$candidate" == *.app ]] || continue
+      bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - \
+        "$candidate/Contents/Info.plist" 2>/dev/null)"
+      if [[ "$bundle_id" == "com.openai.codex" ]]; then
+        print -r -- "$candidate"
+        break
+      fi
+    done)"
+if [[ -z "$codex_app_path" ]]; then
+  for candidate in "/Applications/ChatGPT.app" "/Applications/Codex.app" \
+      "$USER_HOME/Applications/ChatGPT.app" "$USER_HOME/Applications/Codex.app"; do
+    bundle_id="$(/usr/bin/plutil -extract CFBundleIdentifier raw -o - \
+      "$candidate/Contents/Info.plist" 2>/dev/null)"
+    if [[ "$bundle_id" == "com.openai.codex" ]]; then
+      codex_app_path="$candidate"
+      break
+    fi
+  done
+fi
+codex_process_command=""
+if [[ -n "$codex_app_path" ]]; then
+  while read -r process_ppid process_command; do
+    if [[ "$process_ppid" == "1" && "$process_command" == "$codex_app_path/Contents/MacOS/"* ]]; then
+      codex_process_command="$process_command"
+      break
+    fi
+  done < <(/bin/ps -axo ppid=,command= 2>/dev/null)
+fi
+
+micro_bridge_state="$USER_HOME/Library/Application Support/ThreadDeck/codex-micro-bridge.json"
+micro_port=""
+if [[ -n "$codex_process_command"
+      && "$codex_process_command" == *"--remote-debugging-address=127.0.0.1"* ]]; then
+  micro_port="$(print -r -- "$codex_process_command" \
+    | /usr/bin/sed -E 's/.*--remote-debugging-port(=| )([0-9]+).*/\2/')"
+fi
+if [[ "$micro_port" == <-> ]]; then
+  version_ready="$(/usr/bin/curl --max-time 1 -fsS "http://127.0.0.1:$micro_port/json/version" 2>/dev/null)"
+  targets_ready="$(/usr/bin/curl --max-time 1 -fsS "http://127.0.0.1:$micro_port/json/list" 2>/dev/null)"
+  if [[ "$version_ready" == *"webSocketDebuggerUrl"*
+        && "$targets_ready" == *'"url": "app://'* ]]; then
+    pass "Codex Micro bridge is connected on loopback"
+  else
+    warn "Codex has loopback flags, but the Micro bridge is not ready yet"
+  fi
+elif [[ -n "$codex_process_command" ]]; then
+  warn "Codex Micro bridge is not attached; quit and reopen Codex once after installing ThreadDeck"
+else
+  warn "Codex is not running; ThreadDeck will prepare the Micro bridge on the next launch"
+fi
+if [[ -f "$micro_bridge_state" && "$micro_port" != <-> ]]; then
+  warn "A stale Micro bridge state file exists; ThreadDeck will replace it automatically"
+fi
+
 if [[ -d "$INSTALLED_PLUGIN" ]]; then
   pass "ThreadDeck is installed in Stream Deck"
 else

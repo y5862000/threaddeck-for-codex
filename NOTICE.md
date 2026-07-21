@@ -18,6 +18,11 @@ Copyright (c) 2026 Marcel Pociot, under the MIT License reproduced in
 `reference/codex-micro-protocol/LICENSE.upstream`. It is not part of the runtime plugin or release
 artifact.
 
+The runtime Codex Micro renderer bridge adapts portions of
+[Codex Deck](https://github.com/dazer1234/codex-stream-deck), Copyright (c) 2026 Dazer,
+under the MIT License reproduced in `reference/codex-deck/LICENSE.upstream` and in the packaged
+plugin as `licenses/codex-deck-MIT.txt`. No Codex Deck UI, media, or hardware artwork is redistributed.
+
 The goal-status glyph is adapted from the Lucide **Goal** icon under the ISC License:
 
 Copyright (c) 2026 Lucide Icons and Contributors

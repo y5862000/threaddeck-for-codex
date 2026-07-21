@@ -43,6 +43,21 @@ This reference is not imported by `src/`, built into the plugin, or included in 
 The process-injection shim, virtual-HID helper, hardware backend, renderer, and upstream media assets
 were deliberately not copied.
 
+## Runtime renderer-bridge attribution
+
+`src/micro-cdp.js` and `src/micro-bootstrap.js` adapt the loopback CDP target-selection,
+Codex Micro renderer-event, and feature-activation approach from
+[`dazer1234/codex-stream-deck`](https://github.com/dazer1234/codex-stream-deck), especially
+`src/codex-micro-renderer-bridge.ts` and `launcher/runtime-override.ts`.
+Copyright (c) 2026 Dazer; used under the MIT License.
+
+ThreadDeck rewrites that architecture as dependency-free CommonJS, adds its own first-session
+preservation, generation-scoped recovery, privacy-bounded read-only snapshot, six-plus-eight task
+hybrid, and no-replay fallback contract. Codex Deck's UI, media, session-ownership layer, and hardware
+backend are not copied. The complete upstream license is preserved in
+`reference/codex-deck/LICENSE.upstream` and ships inside every plugin installer as
+`licenses/codex-deck-MIT.txt`.
+
 ## Reproducible verification
 
 On a compatible Mac:

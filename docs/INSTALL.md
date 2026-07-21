@@ -20,7 +20,8 @@ Apple silicon and Intel Macs use the same download. Each release also publishes
 2. Double-click the file and approve installation in Stream Deck.
 3. In Stream Deck, select the **ThreadDeck for Codex** profile. It is installed without replacing your current profile.
 4. Open **System Settings → Privacy & Security → Accessibility**, allow **Stream Deck**, then quit and reopen Stream Deck completely.
-5. In **Codex → Settings → Keyboard Shortcuts**, set or confirm:
+5. Quit Codex and launch it normally once. ThreadDeck deliberately preserves a Codex process that was already open when the plugin started. After this later user-initiated launch, Codex may relaunch one additional time so ThreadDeck can attach its random loopback Micro bridge.
+6. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings:
 
 | Codex function | Shortcut |
 |---|---:|
@@ -28,7 +29,9 @@ Apple silicon and Intel Macs use the same download. Each release also publishes
 | New task outside a project | `Option+Command+O` (`⌥⌘O`) |
 | Open Side Chat | `Option+Command+S` (`⌥⌘S`) |
 
-6. Hold the microphone key, speak, and release. Codex may request microphone permission on first use.
+7. Hold the microphone key, speak, and release. Codex may request microphone permission on first use.
+
+When the Micro bridge is connected, Effort, Fast mode, Side Chat, normal Send, New Task, push-to-talk, and six native task slots use Codex's own internal events. The shortcuts above remain important as a compatibility fallback. ThreadDeck's eight-card monitor, queues, goals, remote tasks, and non-Micro-slot navigation continue to use its existing read-only state and verified macOS adapter.
 
 ThreadDeck does not need Screen Recording or Full Disk Access. The optional quota key needs [CodexBar](https://github.com/steipete/CodexBar); every other key works without it.
 
@@ -36,7 +39,9 @@ ThreadDeck does not need Screen Recording or Full Disk Access. The optional quot
 
 ThreadDeck checks Accessibility and keyboard-event access at startup and every 30 seconds. It requests missing macOS permission and keeps a short warning on the keys until the permission is healthy again.
 
-From a source checkout, `pnpm run doctor` prints a read-only installation report. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
+The Effort/Fast key can also show **Restart Codex**. This is not an Accessibility failure: the current Codex generation simply predates the local renderer bridge. Quit and reopen Codex once. If the new normal launch still lacks the bridge, ThreadDeck performs at most one guarded relaunch for that process generation and then waits ten minutes before another recovery attempt. Set `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` before Stream Deck starts to disable that automatic recovery; legacy controls remain available.
+
+From a source checkout, `pnpm run doctor` prints a read-only installation report, including whether the Codex Micro bridge is connected, needs a Codex restart, or is stopped. The doctor never starts, closes, or modifies either application. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
 
 ## Update or remove
 

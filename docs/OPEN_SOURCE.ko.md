@@ -43,6 +43,20 @@ MIT 라이선스를 따르며, 바로 옆 `LICENSE.upstream`에 원문을 포함
 프로세스 주입 shim, 가상 HID helper, 별도 하드웨어 백엔드, 렌더러, 원본 미디어 자산은
 의도적으로 가져오지 않았습니다.
 
+## 런타임 렌더러 연결 출처
+
+`src/micro-cdp.js`와 `src/micro-bootstrap.js`는
+[`dazer1234/codex-stream-deck`](https://github.com/dazer1234/codex-stream-deck)의
+`src/codex-micro-renderer-bridge.ts`, `launcher/runtime-override.ts`를 중심으로 루프백 CDP 대상
+선택, Codex Micro 렌더러 이벤트, 기능 활성화 방식을 적용·수정했습니다.
+Copyright (c) 2026 Dazer, MIT 라이선스입니다.
+
+ThreadDeck은 이를 외부 의존성 없는 CommonJS로 다시 구성하고 첫 세션 보존, 프로세스 세대별
+복구, 개인정보 제한 읽기 전용 스냅샷, Micro 6개와 ThreadDeck 8개 작업 결합, 중복 실행을 막는
+폴백 계약을 추가했습니다. Codex Deck의 UI·미디어·세션 소유권 계층·하드웨어 백엔드는 복사하지
+않았습니다. 전체 원본 라이선스는 `reference/codex-deck/LICENSE.upstream`에 보존하고 모든
+플러그인 설치 파일 안에도 `licenses/codex-deck-MIT.txt`로 포함합니다.
+
 ## 재현 가능한 검증
 
 호환되는 Mac에서 다음을 실행합니다.

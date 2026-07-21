@@ -3,14 +3,18 @@
 > [Korean architecture guide](ARCHITECTURE.ko.md)
 
 ```text
-Codex local state (~/.codex) ─┐
-Codex Accessibility metadata ─┼─ src/plugin.js ── localhost WebSocket ── Stream Deck
-CodexBar CLI (usage only) ────┘          │
-                                         ├─ src/*.js domain modules
-                                         └─ keybridge ── macOS input/audio/AX APIs
+Codex local state (~/.codex) ───────────────┐
+Codex renderer (random 127.0.0.1 CDP) ──────┼─ src/plugin.js ── localhost WebSocket ── Stream Deck
+Codex Accessibility metadata ───────────────┤          │
+CodexBar CLI (usage only) ──────────────────┘          ├─ control-plane.js
+                                                       ├─ micro-cdp.js (preferred)
+                                                       ├─ src/*.js domain modules
+                                                       └─ keybridge (legacy + macOS audio/AX)
 ```
 
-ThreadDeck keeps its runtime dependency-free. A Node.js process composes small CommonJS domain modules, visual rendering, and Stream Deck events; one universal native helper handles the macOS input and audio operations Node cannot provide reliably.
+ThreadDeck keeps its runtime dependency-free. A Node.js process composes small CommonJS domain modules, visual rendering, Stream Deck events, and an optional Codex Micro renderer adapter; one universal native helper retains the macOS input, audio, Accessibility, and compatibility operations Node cannot provide reliably.
+
+The control plane is Micro-first but not Micro-only. It may fall back to the legacy adapter only after a definite pre-dispatch `unavailable` result. A timeout, disconnect, or verification failure after possible delivery is ambiguous and is never replayed through Accessibility, preventing double Fast toggles, duplicate submissions, or two task switches.
 
 ## Runtime components
 
@@ -34,6 +38,8 @@ It:
 - lets a held task key open that task, dictate a follow-up, detect transcription completion using text fingerprints, and submit it on release;
 - gives each recording attempt a monotonically increasing session token, makes a new hold on any task key supersede the previous global composer session, and requires asynchronous transcription and submission callbacks to match that token before they can update the current session;
 - routes remote opens through a target-scoped single flight: repeated presses for one task coalesce, a newer different target cancels stale work, accessible controls prefer exact UUID identity, unified search opens at most once, and a lightweight focused-header probe verifies that Codex activated the right task and host.
+- routes user controls through `control-plane.js`, using Codex Micro first and the existing native adapter only when no Micro event could have been delivered;
+- preserves the separate eight-task monitor while mapping exact identities found in Codex's six native Micro slots to direct `AG00`–`AG05` switching.
 
 No Codex file is opened for writing.
 
@@ -46,6 +52,9 @@ The I/O-free modules under `src/` keep private Codex formats and deterministic p
 | `config.js` | Action UUIDs, timing constants, action maps, and stable fallback view state |
 | `i18n.js` | English/Korean runtime copy, stable activity codes, and legacy-label migration |
 | `runtime-info.js` | Stream Deck registration parsing, language selection, and platform capability boundary |
+| `control-plane.js` | Micro-first command routing, read-only health caching, and no-replay fallback semantics |
+| `micro-cdp.js` | Loopback renderer discovery, privacy-bounded read-only snapshots, native Micro commands, PTT, Effort encoder events, and six-slot switching |
+| `micro-bootstrap.js` | First-session preservation, one guarded recovery relaunch, random loopback-port state, and opt-out handling |
 | `reasoning-options.js` | Read-only Codex desktop configuration/model-cache parsing and the globally visible Effort catalog |
 | `text.js` | Title normalization, NFC/NFD fingerprints, ambient-title filtering, and grapheme-aware layout helpers |
 | `time.js` | UUIDv7 timestamps, recency normalization, duration formatting, and timing labels |
@@ -72,7 +81,15 @@ It:
 - pauses those controls directly, uses the normal macOS media command only as a fallback, and records only bundle identifiers in a ten-minute local lease so release resumes the exact apps without retaining PIDs or media text;
 - traverses the visible Codex accessibility tree once for the target UUID and normalized title fingerprints, activates only identity-safe pressable results, rejects title-only ambiguity in strict mode, verifies both the safety-critical frontmost task and the passive current task from the active Codex window header, and counts localized queue-action buttons without returning message text.
 
-The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input.
+The helper uses macOS system frameworks only. Stream Deck needs Accessibility permission for synthesized input. Micro-native Effort, Fast, Side Chat, normal Send, New Task, PTT, and six-slot switching do not require synthesized shortcuts once the renderer bridge is connected; the helper remains authoritative for media handling, composer verification, queues, remote/non-slot navigation, long Send, and compatibility fallback.
+
+### Codex Micro renderer adapter
+
+`src/micro-cdp.js` accepts only a debugger endpoint explicitly bound to `127.0.0.1`, validates both `/json/version` and the main `app://` renderer target, then communicates over the loopback CDP WebSocket. Its periodic snapshot is mutation-free and returns only the active task identity, next-run Effort, Fast state, theme, six privacy-bounded slot rows, and capability booleans. It does not return prompt, response, queued-message, or transcript text.
+
+Mutating Micro activation is lazy: only the first physical control that needs HID/PTT installs an in-memory renderer feature-gate override and announces a connected Micro device. Official keycap commands drive Fast, Side Chat, Send, and New Task; host PTT events drive microphone input; `ENC_CW`/`ENC_CC` with `act: 2` drive Effort; and `AG00`–`AG05` drive exact native slots. The override exists only in that renderer process.
+
+`src/micro-bootstrap.js` never interrupts the Codex generation that was already running when ThreadDeck first observes it. After the user later closes and normally reopens Codex, a stable unbridged generation may receive one guarded relaunch with a random loopback port. Attempts are generation-scoped and rate-limited for ten minutes; `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` disables recovery. Only process-generation, port, health, cooldown, and timestamp data are stored under `~/Library/Application Support/ThreadDeck`.
 
 ### Neo profile
 
@@ -94,8 +111,8 @@ The manifest deliberately declares only macOS today. `src/runtime-info.js` expos
 - SQLite rows, remote summaries, and Side Chats pass through one privacy boundary before selection. Subagent provenance is rejected structurally before any sidebar title override; exact guardian and ambient prompt signatures remain a fallback for older metadata. A separate persistent-ID read prevents a hidden subagent from being reclassified through prompt history as a Side Chat.
 - Each task refresh creates one read of the Codex global-state file and shares that same promise with the pinned-ID, remote-summary, and Side Chat prompt-history parsers. All three therefore observe the same file generation; if that read fails, each consumer applies its existing safe fallback instead of mixing fields from separate reads. Side Chat discovery supplements prompt history with an incremental reduction of successful desktop-log `thread/fork` → `thread/inject_items` pairs, preserving the exact parent and every distinct ephemeral UUID even when prompt history omits a sibling. An exact `thread/unsubscribe` closes only its matching UUID. The discovery state and byte cursors reset at the app-server session boundary, while a transient state-file rewrite retains the last verified rows.
 - Pinned local tasks and explicitly pinned remote summaries are placed first; only local tasks and Side Chats fill the remaining recent slots. A local record wins if the same conversation ID appears in both sources.
-- While the Dashboard is visible, a lightweight 750 ms active-window observer runs alongside the full state refresh so an in-app manual switch reaches the Current Task key in under a second. Send, the dedicated microphone, reasoning effort, Fast mode, and Side Chat force the same identity check immediately before acting; Send and microphone focus that composer, while Side Chat records the verified current task as its parent. Before a new Side Chat UUID exists, a separate provisional lease may focus only a geometrically verified right-side composer for the dedicated microphone; its request timestamp is replaced by the real UUID on discovery. The full refresh associates each queued-message control with its enclosing row and nearest task-pane header, so cached counts follow the owning main task or Side Chat key and decrement independently when that queued turn starts.
-- At plugin startup and after a detected Codex App Server restart, ThreadDeck reads `config.toml` and `models_cache.json` to prime the globally visible, selected-model-supported Effort catalog. This makes the first hardware tap deterministic and immediately paintable without assuming optional endpoints. After rapid input settles for 1.1 seconds, the one native transaction still opens Codex's composer menu through Accessibility, enters the `Effort` submenu, rescans the exact live options, reconciles the requested endpoint, verifies the result, and restores composer focus without mouse coordinates. Direction is retained per task and reverses at the first or last visible option. Fast mode uses the same composer-state lease but requires a 600 ms hold before it can change speed, keeping the two controls physically distinct.
+- While the Dashboard is visible, a lightweight 750 ms observer combines the read-only Micro active identity with the existing Accessibility window probe, so a manual in-app switch reaches Current Task and every dependent control in under a second. Send, microphone, Effort, Fast, and Side Chat re-confirm the same identity before acting. Before a new Side Chat UUID exists, the existing provisional lease may focus only a geometrically verified right-side composer; it is replaced by the real UUID on discovery. Queue controls remain associated with their enclosing task pane so main-task and Side Chat counts decrement independently.
+- At plugin startup and after a Codex App Server or renderer generation change, ThreadDeck reads `config.toml` and `models_cache.json` to prime the visible Effort catalog, then reconciles it with the read-only Micro composer value. Rapid input paints every step immediately. With Micro connected it settles for 180 ms and sends only the final encoder traversal; the compatibility picker path retains the 1.1-second settle, exact live option scan, verified `Advanced` transition, and focus restoration. Direction reverses at either endpoint. A 600 ms hold fires Fast immediately through the native command and cannot dispatch again on release.
 - Remote Desktop logs are tailed with a per-file byte offset and bounded raw-byte carry. Only complete UTF-8 lines are reduced, so a long reasoning-summary line or a multibyte character split across two polls is completed on the next poll. File identity and a boundary fingerprint detect rotation, truncation, and rapid same-path replacement before the cursor is reused.
 - Active task timers and animation frames render at device-appropriate intervals.
 - Weekly usage refreshes every 60 seconds while a ThreadDeck-owned action is visible, keeping the quota value warm before its page appears.
@@ -124,4 +141,4 @@ The Stream Deck plugin protocol and profile manifest are public APIs. Codex file
 - show a safe fallback instead of mutating state;
 - isolate the private format boundary inside the task-reading functions.
 
-Codex App Server now has an experimental per-thread Effort update method, but Codex Desktop owns a private stdio child process with no supported external attachment transport. A separately started server can update its own resumed thread state but cannot synchronize the thread already loaded in Desktop. ThreadDeck therefore does not run a shadow server or write Codex session files; a future supported shared transport could replace the UI transaction without changing the Stream Deck action and rendering layers.
+Codex App Server now has an experimental per-thread Effort update method, but Codex Desktop owns a private stdio child process with no supported external attachment transport. A separately started server can update its own resumed thread state but cannot synchronize the task already loaded in Desktop. ThreadDeck therefore does not run a shadow server or write Codex session files. The current renderer bridge is explicitly an undocumented compatibility layer: capability discovery, one-shot fallback, and the stable `control-plane.js` interface allow a future supported transport—or a Windows adapter—to replace it without changing the Stream Deck renderer or task reducers.

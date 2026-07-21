@@ -22,14 +22,14 @@
 
 <p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
 
-ThreadDeck turns Elgato Stream Deck Neo into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator), while remaining an independent implementation with its own renderer, verified macOS automation, and no Codex Micro runtime dependency. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source alternative to a Codex Micro-style controller, this is the project.
+ThreadDeck turns Elgato Stream Deck Neo into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 
 The overview and gesture demos are generated from the plugin's real SVG key renderer with sanitized example tasks. English is the default documentation and release language; the same plugin automatically switches its action names and key UI to Korean when Stream Deck uses Korean. No separate language build is required.
 
 ![ThreadDeck workflow showing reasoning effort steps, Fast mode, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-overview.gif)
 
 > [!IMPORTANT]
-> ThreadDeck is an independent beta that reads undocumented local Codex metadata. A Codex update can temporarily break task detection. It never writes to Codex database or session files.
+> ThreadDeck is an independent beta that reads undocumented local Codex metadata and an undocumented local renderer API. A Codex update can temporarily break either path. It never writes to Codex database or session files.
 
 ## What it puts on your desk
 
@@ -38,6 +38,7 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 - **Hardware dictation** — hold a task key to speak and auto-submit a follow-up, or use the dedicated microphone to leave a draft for review.
 - **Completion feedback** — after a fresh final-turn end is confirmed with no queued continuation, every visible ThreadDeck-owned key acknowledges the first completion frame. The matching task then keeps a slower green pulse until that exact task is successfully opened or viewed frontmost in Codex. Queue edits and dequeue-to-execution transitions never count as completion.
 - **Workflow controls** — change the current model's reasoning effort, toggle Codex Fast mode, create a task or Side Chat, send, switch apps, change pages, control media, and optionally show a weekly quota ring.
+- **Micro-first reliability** — Effort, Fast, Side Chat, push-to-talk, Send, New Task, and the six native Micro task slots use Codex's own internal commands first. Accessibility and shortcuts remain a verified fallback for the eight-task dashboard and unsupported builds.
 
 ## Install in 60 seconds
 
@@ -56,17 +57,18 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 
 1. Download `com.yechan.threaddeck.streamDeckPlugin` from [Releases](https://github.com/y5862000/threaddeck-for-codex/releases) and double-click it.
 2. Select the installed **ThreadDeck for Codex** profile, allow **Stream Deck** in **System Settings → Privacy & Security → Accessibility**, then reopen Stream Deck.
-3. Confirm the three Codex shortcuts below and test the microphone key.
+3. Quit and reopen Codex once. ThreadDeck preserves the Codex session that was already open during installation; after your next normal launch it may relaunch Codex one time to attach a random `127.0.0.1` renderer bridge.
+4. Confirm the three Codex shortcuts below so the legacy fallback remains available, then test the microphone key.
 
 The package contains the editable Neo profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
 
-| Codex function | Keys sent by ThreadDeck | Used by |
+| Codex function | Legacy fallback shortcut | Used by |
 |---|---:|---|
 | Start dictation | `⌃⇧D` | Dedicated microphone and task-key hold |
 | Open a new task outside the project | `⌥⌘O` | New task key |
 | Open Side Chat | `⌥⌘S` | Side Chat key |
 
-ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or another non-Latin input source is active. On release it activates Codex's visible stop-dictation control because the current app shortcut does not act like a physical push-to-talk key.
+With the Micro bridge connected, these actions use Codex's native internal commands and the shortcuts are not sent. On the fallback path ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or another non-Latin input source is active. On release it activates Codex's visible stop-dictation control because the current app shortcut does not act like a physical push-to-talk key.
 
 ## How to press each key
 
@@ -84,13 +86,13 @@ ThreadDeck sends an explicit Latin `D`, so dictation also starts while Korean or
 | Send | Verifies the current composer; release before 0.6 s to send Return | Waits for an in-progress task or Side Chat switch; at **0.6 s** the key turns blue, then release to send Command+Return |
 | App launcher | Tap to open or bring the configured app forward | Long-press to quit that app; the threshold and native artwork are managed by Stream Deck |
 | Weekly quota | — | Release to refresh CodexBar immediately |
-| New task / Side Chat | — | Release to run `⌥⌘O` / `⌥⌘S`; Side Chat keeps a protected identity lease, with a provisional composer bridge only for the dedicated microphone |
-| Reasoning + Fast | Release before 0.6 s to move the next-run level (`LIGHT`–`ULTRA`); the track moves immediately from the first tap | At startup ThreadDeck primes the visible levels from Codex's read-only desktop settings and selected-model cache, without assuming optional `Max` or `Ultra` levels. Rapid taps keep moving that track immediately, then a 1.1-second settle window sends only the final ping-pong position in one verified native transaction. The live picker is rescanned at apply time and remains the final authority, so a changed model/account menu is reconciled safely. Direct changes in Codex are mirrored on this key. When Codex initially shows its compact slider, ThreadDeck presses the exact `Advanced` action first and selects from the resulting Effort list; it never guesses slider notches. When Full access makes Codex show its exact Ultra warning, ThreadDeck verifies that dialog and chooses `Use Full access`—never the generic `Continue` path that changes permissions. At **0.6 s**, the key starts toggling next-run Fast mode immediately without waiting for release. The small bolt mirrors verified speed |
-| Dedicated Fast mode | Release to toggle Fast mode in the verified current composer | A filled green bolt means Fast and an outlined neutral bolt means standard; a pending task or Side Chat switch is resolved first |
+| New task / Side Chat | — | Release to run Codex's native `NEW` / `PARTY` command; if Micro is unavailable, use `⌥⌘O` / `⌥⌘S`. Side Chat keeps a protected identity lease, with a provisional composer bridge only for the dedicated microphone |
+| Reasoning + Fast | Release before 0.6 s to move the next-run level (`LIGHT`–`ULTRA`); the track moves immediately from the first tap | Rapid taps are folded into the last ping-pong position. A connected Micro bridge settles for only 180 ms and sends the matching encoder steps; the legacy picker path waits 1.1 seconds, opens an exact `Advanced` action when needed, and selects only from the live account/model list. Direct Codex changes are mirrored. An exact Ultra warning selects only `Use Full access`, never `Continue`. At **0.6 s**, the key toggles next-run Fast mode immediately through Codex's native command. The small bolt mirrors verified speed |
+| Dedicated Fast mode | Release to toggle Fast mode in the verified current composer | Uses Codex's native `FAST` command first. A filled green bolt means Fast and an outlined neutral bolt means standard; a pending task or Side Chat switch is resolved first |
 | App switcher / media | Runs immediately on press | No alternate hold action |
 | Previous / next page | — | Release to cycle through the three ThreadDeck pages |
 
-The Dashboard's Current Task key follows the task selected in Codex's active window, including a task you select directly in the app. A lightweight active-window observer updates the key in under a second, and Send, the dedicated microphone, reasoning effort, Fast mode, and Side Chat re-confirm that same current task immediately before acting. Send and microphone focus the verified task's composer first; a newly opened Side Chat remembers that task as its parent and retains a navigation lease until Codex exposes and focuses its new task identity. During the short UUID gap, only the dedicated microphone may attach to a provisional target: ThreadDeck must verify the right-side Side Chat composer from its Accessibility controls and window geometry, then hands the recording to the real UUID when it appears. Other controls continue to wait instead of falling through to the parent task. Pressing a ThreadDeck task key naturally updates the current task after Codex confirms the destination. A transient or ambiguous Accessibility read keeps the last verified current identity instead of guessing. **Top Task 1** is a separate selectable action, so custom profiles can place both keys side by side; the bundled Tasks page starts with Top Task 1 while the Dashboard keeps Current Task.
+The Dashboard's Current Task key follows the task selected in Codex's active window, including a task you select directly in the app. The read-only Micro snapshot is the first source for active task, next-run Effort, Fast state, theme, and six native slot identities; the existing local state and Accessibility observer extend this to eight task cards, remote tasks, queues, goals, and Side Chats. Send, microphone, Effort, Fast, and Side Chat re-confirm that same current task immediately before acting. A newly opened Side Chat retains a navigation lease until Codex exposes its real identity, so a following control cannot fall through to the parent task. A transient or ambiguous read keeps the last verified identity instead of guessing. **Top Task 1** remains independent from Current Task for custom profiles.
 
 Reasoning and speed have two deliberate timelines. A working task card keeps the exact Effort and Fast/standard setting captured when that turn started; changing the Codex composer or ThreadDeck's combined control does not rewrite an answer already in progress. The combined control instead shows the live setting for the **next run**, including a setting changed directly in Codex. Codex's current queue stores the follow-up content and starts it later through the live composer, so a queued follow-up uses the setting present when it actually begins. Once dequeued, its new turn metadata becomes the task-card header. The amber `+N` remains a queue count rather than pretending every queued item has its own frozen setting.
 
@@ -183,6 +185,8 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 | `~/Library/Application Support/ThreadDeck/remote-goals-v1.json` | Local read/write | Last observed remote goal status and numeric time for at most seven days; no objective, title, or conversation text |
 | `~/Library/Application Support/ThreadDeck/unread-completions-v1.json` | Local read/write | Task UUID and numeric completion/notice timestamps for unviewed completion cues; no title or conversation text |
 | `~/Library/Application Support/ThreadDeck/media-pause-lease-v1.plist` | Temporary local read/write | Bundle identifiers of media apps paused by the current voice hold; expires after ten minutes and contains no title, URL, PID, or media text |
+| Codex renderer bridge on random `127.0.0.1` port | Local read/control | Reads active task, next-run Effort/Fast, theme, and up to six Micro slots; dispatches a Codex Micro event only after a physical ThreadDeck action |
+| `codex-micro-bootstrap-v1.json` and `codex-micro-bridge.json` | Local read/write | Process generation, loopback port, health, cooldown, and numeric timestamps only; no title, prompt, transcript, or credential |
 | CodexBar CLI | Optional child process | Weekly remaining quota only; CodexBar has its own provider behavior |
 | Stream Deck plugin socket | Localhost | Receive key events and send rendered key images |
 | macOS Accessibility and Core Audio | Local system APIs | Keyboard/media actions, focused-composer checks, fixed goal status/time labels, queue counts, remote selection, and push-to-talk audio handling |
@@ -194,6 +198,7 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 | Symptom | First check |
 |---|---|
 | No key actions work | Follow the key warning: `Allow access` means Accessibility, `Input access` means event posting, `Check Codex` means confirmed Codex-operation failures, and `Check media` means active playback could not be safely controlled. ThreadDeck rechecks permissions every 30 seconds and clears operation warnings after a verified recovery. |
+| Effort/Fast shows `Restart Codex` | Quit and reopen Codex once. ThreadDeck will preserve the current installation-time session, then attach the loopback Micro bridge after a later normal launch. Legacy controls remain available meanwhile. |
 | Music or browser audio keeps playing during dictation | Update to the latest build. ThreadDeck now resolves any active Core Audio process to its GUI owner and uses verified semantic controls; Apple Music plus Chrome and Safari YouTube were physically tested. |
 | Korean input source blocks dictation | Confirm Codex Start dictation is `⌃⇧D`; ThreadDeck sends a Latin `D` independently of the active layout |
 | Microphone release does not send | This is expected for the dedicated microphone; it leaves a draft. Use a task-key hold for auto-submit or press Send afterward |
@@ -230,8 +235,10 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 
 ## Current limits
 
-- The first public beta targets macOS and Stream Deck Neo only; the button language is Korean-first.
+- The public beta targets macOS and Stream Deck Neo only; English and Korean are selected automatically from Stream Deck.
 - Task and Side Chat detection depend on private Codex file and log formats and can lag behind a Codex release.
+- Native controls depend on an undocumented Codex Micro renderer API. The bridge is bound only to a random loopback port, and ThreadDeck falls back only when it can prove no Micro action was delivered.
+- Codex exposes six native Micro task slots; ThreadDeck keeps its separate eight-card monitor and uses the legacy verified switch path for the remaining two or for tasks not assigned to a Micro slot.
 - Queue counts are observed from the currently open task; Korean and English accessibility labels are recognized.
 - Shortcut actions currently assume the Codex bindings listed above.
 - Active media is discovered from Core Audio rather than an app allowlist. ThreadDeck uses a verified semantic pause/play control when available, falls back to the normal macOS media command conservatively, and resumes only apps it paused after the final voice key is released. A browser session can still represent more than one tab.

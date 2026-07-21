@@ -7,8 +7,9 @@
 1. Update Codex Desktop, Stream Deck, and ThreadDeck to the latest versions you intend to test.
 2. In **System Settings → Privacy & Security → Accessibility**, enable **Stream Deck**.
 3. Quit Stream Deck completely and reopen it after changing Accessibility permission.
-4. Confirm Codex has microphone permission and **Start dictation** is `Control+Shift+D`.
-5. Keep Codex open with a composer visible while testing voice actions.
+4. After installing ThreadDeck, quit and reopen Codex once so the Micro renderer bridge can attach.
+5. Confirm Codex has microphone permission and **Start dictation** is `Control+Shift+D` for the fallback path.
+6. Keep Codex open with a composer visible while testing voice actions.
 
 ThreadDeck does not require Screen Recording or Full Disk Access.
 
@@ -16,9 +17,17 @@ ThreadDeck does not require Screen Recording or Full Disk Access.
 
 The Neo profile is installed with the plugin but is not forced over your current profile. Choose **ThreadDeck for Codex** from the profile selector at the top of the Stream Deck app. If it is missing, reinstall the latest `.streamDeckPlugin` package and restart Stream Deck.
 
+## Effort/Fast shows `Restart Codex` or `Check Micro`
+
+ThreadDeck does not interrupt the Codex process that was already open when a new plugin build first starts. Quit and reopen Codex once. If that normal launch lacks the required flags, ThreadDeck waits for a stable process and performs one guarded relaunch on a random `127.0.0.1` port. It does not bind the debugger to the LAN, and it does not repeat an attempted recovery for the same process generation.
+
+Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means the renderer endpoint and main `app://` target both responded; `restart Codex` means the current process predates the bridge; `stopped` means Codex is closed. The doctor never launches or closes Codex. Set `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` before Stream Deck starts to disable automatic recovery.
+
+While the bridge is unavailable, ThreadDeck keeps the verified Accessibility/shortcut adapter. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed through the fallback path because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and the exact key used.
+
 ## No shortcut, media, or remote-switch action works
 
-ThreadDeck checks three layers independently at startup and every 30 seconds:
+ThreadDeck checks its permission and legacy-control layers independently at startup and every 30 seconds:
 
 - **`Allow access`** — Stream Deck lacks macOS Accessibility authorization;
 - **`Input access`** — macOS is discarding synthesized key events even if Accessibility appears enabled;
