@@ -25,6 +25,9 @@ pnpm exec streamdeck pack "$STAGING_DIR/$PLUGIN_NAME" \
 # release proves that the Node entry point repairs keybridge before first use.
 ARTIFACT="$ROOT_DIR/release/com.yechan.threaddeck.streamDeckPlugin"
 CHECKSUM="$ARTIFACT.sha256"
+PROFILE_SOURCE="$PLUGIN_DIR/profiles/threaddeck-neo.streamDeckProfile"
+PROFILE_ARTIFACT="$ROOT_DIR/release/threaddeck-for-codex-neo.streamDeckProfile"
+PROFILE_CHECKSUM="$PROFILE_ARTIFACT.sha256"
 EXTRACTED_DIR="$STAGING_DIR/extracted"
 mkdir -p "$EXTRACTED_DIR"
 /usr/bin/unzip -q "$ARTIFACT" -d "$EXTRACTED_DIR"
@@ -37,4 +40,15 @@ node "$EXTRACTED_PLUGIN/bin/plugin.js" --verify-keybridge-permission >/dev/null
 }
 echo "Packaged keybridge permission repair passed."
 (cd "$ROOT_DIR/release" && shasum -a 256 "${ARTIFACT##*/}") > "$CHECKSUM"
+
+[[ -f "$PROFILE_SOURCE" ]] || {
+  echo "Built recommended Neo profile is missing" >&2
+  exit 1
+}
+cp -f "$PROFILE_SOURCE" "$PROFILE_ARTIFACT"
+/usr/bin/unzip -tq "$PROFILE_ARTIFACT" >/dev/null
+(cd "$ROOT_DIR/release" && shasum -a 256 "${PROFILE_ARTIFACT##*/}") > "$PROFILE_CHECKSUM"
+
 echo "Wrote ${CHECKSUM#$ROOT_DIR/}"
+echo "Wrote ${PROFILE_ARTIFACT#$ROOT_DIR/}"
+echo "Wrote ${PROFILE_CHECKSUM#$ROOT_DIR/}"

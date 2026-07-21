@@ -20,7 +20,7 @@
   <img alt="Stream Deck Neo" src="https://img.shields.io/badge/device-Stream%20Deck%20Neo-111111?style=flat-square">
 </p>
 
-<p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
+<p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="docs/INSTALL.md">Install</a> · <a href="docs/PROFILE.md">Neo profile</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">Download</a></p>
 
 ThreadDeck turns Elgato Stream Deck Neo into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 
@@ -61,6 +61,12 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 4. Confirm the three Codex shortcuts below so the legacy fallback remains available, then test the microphone key.
 
 The package contains the editable Neo profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
+
+### Recommended Stream Deck Neo profile
+
+<p align="center"><img src="docs/media/neo-preview.png" width="680" alt="Recommended ThreadDeck for Codex profile on Stream Deck Neo"></p>
+
+The plugin automatically installs the maintained three-page **ThreadDeck for Codex** profile. Releases also provide `threaddeck-for-codex-neo.streamDeckProfile` as a separate recovery or manual-import download. If the maintained profile already appears in Stream Deck, importing the standalone file will intentionally create another copy. See the exact Dashboard, Tasks, and Media arrangement in the [recommended Neo profile guide](docs/PROFILE.md).
 
 | Codex function | Legacy fallback shortcut | Used by |
 |---|---:|---|
@@ -156,7 +162,7 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 ## Included Neo profile
 
-The bundled profile has three pages and can be rearranged in Stream Deck:
+The bundled recommended profile has three pages and can be rearranged in Stream Deck. A standalone copy is attached to every GitHub release; see the [visual layout and import guidance](docs/PROFILE.md).
 
 1. **Dashboard** — quota, New Task, Side Chat, and Send on the top row; Current Task, combined reasoning/Fast, microphone, and back navigation on the bottom row. The combined control occupies `1,1`, and Current Task remains at `0,1`. The dedicated Fast action remains available for custom layouts.
 2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current Task action are available in the action list for custom layouts.

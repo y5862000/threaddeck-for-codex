@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.5.4-beta — 2026-07-21
+
+- Published the maintained three-page Stream Deck Neo layout as the standalone `threaddeck-for-codex-neo.streamDeckProfile` release asset, alongside the automatically installed copy in the plugin. Added a bilingual visual profile guide, exact Dashboard/Tasks/Media tables, duplicate-import guidance, checksums, and a release audit that verifies every recommended key coordinate.
+- Version-stamped every ThreadDeck action inside the generated profile from the current plugin manifest so manual imports never advertise an obsolete plugin generation.
+- Replaced the hard cut when a viewed completion is acknowledged with a 720 ms quintic fade. The unread marker still clears immediately, while the task key preserves its exact current green-pulse brightness and eases smoothly back to rest.
+
 ## 0.5.3-beta — 2026-07-21
 
 - Moved the verified Fast bolt on the combined Reasoning control from the upper-right corner to immediately left of the current Effort label. The level name itself remains fixed at the exact key center; the larger bolt now uses measured bold-system-font advances for every visible label plus a safe raster gap, instead of the generic title-width estimate that could overlap `MAX`.

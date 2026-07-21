@@ -135,6 +135,7 @@ const {
   THREAD_VOICE_LONG_PRESS_MS,
   UNREAD_COMPLETION_FRAME_INTERVAL_MS,
   UNREAD_COMPLETION_GROUP_COUNT,
+  UNREAD_COMPLETION_DISMISS_FADE_MS,
   UNREAD_COMPLETION_PULSE_PERIOD_MS,
   VOICE_AUTO_SUBMIT_STABLE_MS,
   VOICE_COMPLETE_DISPLAY_MS,
@@ -359,6 +360,7 @@ const operationFailureByCapability = new Map();
 const statusCache = new Map();
 const completionPulseStartedAt = new Map();
 const unreadCompletionByThreadId = new Map();
+const completionDismissFadeByThreadId = new Map();
 const observedCompletionEndMs = new Map();
 const completionQueueBarrierMsByThreadId = new Map();
 const pendingCompletionByThreadId = new Map();
@@ -1090,10 +1092,28 @@ function unreadCompletionPulseState(threadId, nowMs = renderTimeMs()) {
   };
 }
 
+function completionDismissFadeState(threadId, nowMs = renderTimeMs()) {
+  const fade = completionDismissFadeByThreadId.get(threadId);
+  if (!fade) return null;
+  const elapsedMs = Math.max(0, nowMs - fade.startedAtMs);
+  if (elapsedMs >= UNREAD_COMPLETION_DISMISS_FADE_MS) return null;
+  const progress = elapsedMs / UNREAD_COMPLETION_DISMISS_FADE_MS;
+  // Preserve the exact brightness visible when the completion is acknowledged,
+  // then ease both opacity and stroke width to rest without a one-frame cut.
+  const release = 1 - smootherStep01(progress);
+  return {
+    elapsedMs,
+    progress,
+    strength: fade.initialStrength * release,
+    dismissal: true
+  };
+}
+
 function visibleCompletionPulseState(thread, nowMs = renderTimeMs()) {
   if (!thread?.id || thread.status !== "completed") return null;
   return completionPulseState(thread.id, nowMs)
-    ?? unreadCompletionPulseState(thread.id, nowMs);
+    ?? unreadCompletionPulseState(thread.id, nowMs)
+    ?? completionDismissFadeState(thread.id, nowMs);
 }
 
 function globalCompletionPulseState(nowMs = renderTimeMs()) {
@@ -6789,10 +6809,21 @@ function clearUnreadCompletion(threadId, options = {}) {
 }
 
 function acknowledgeCompletion(threadId, options = {}) {
+  const nowMs = Number.isFinite(options.nowMs) ? options.nowMs : renderTimeMs();
+  const visibleEffect = completionPulseState(threadId, nowMs)
+    ?? unreadCompletionPulseState(threadId, nowMs);
   const hadTransientEffect = completionPulseStartedAt.has(threadId)
     || globalCompletionThreadId === threadId;
   const clearedUnread = clearUnreadCompletion(threadId, options);
   if (!clearedUnread && !hadTransientEffect) return false;
+  if (options.fade !== false && visibleEffect?.strength >= 0.002) {
+    completionDismissFadeByThreadId.set(threadId, {
+      startedAtMs: nowMs,
+      initialStrength: visibleEffect.strength
+    });
+  } else {
+    completionDismissFadeByThreadId.delete(threadId);
+  }
   cancelCompletionEffects(threadId);
   if (options.render !== false) renderThreadContexts();
   return true;
@@ -7747,6 +7778,7 @@ function renderStaticContexts() {
 }
 
 function startCompletionEffects(threadId, nowMs = Date.now(), endedAtMs = nowMs) {
+  completionDismissFadeByThreadId.delete(threadId);
   markUnreadCompletion(threadId, endedAtMs, nowMs);
   completionPulseStartedAt.set(threadId, nowMs);
   globalCompletionStartedAtMs = nowMs;
@@ -7893,15 +7925,22 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
   const unreadRenderGroup = unreadCompletionRenderGroup;
   let hasVisibleUnreadCompletion = false;
   let threadContextIndex = 0;
+  const visibleThreadIds = new Set();
+  const expiredDismissFadeThreadIds = new Set();
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
     const thread = slot === undefined ? null : threadForSlot(slot);
     if (slot === undefined) continue;
+    if (thread?.id) visibleThreadIds.add(thread.id);
     const completionStartedAtMs = thread?.id ? completionPulseStartedAt.get(thread.id) : null;
     const completionAnimating = Number.isFinite(completionStartedAtMs)
       && nowMs - completionStartedAtMs < THREAD_COMPLETION_PULSE_DURATION_MS;
     const unreadAnimating = thread?.status === "completed"
       && unreadCompletionByThreadId.has(thread.id);
+    const dismissFade = thread?.id ? completionDismissFadeByThreadId.get(thread.id) : null;
+    const dismissAnimating = thread?.status === "completed"
+      && Number.isFinite(dismissFade?.startedAtMs)
+      && nowMs - dismissFade.startedAtMs < UNREAD_COMPLETION_DISMISS_FADE_MS;
     if (unreadAnimating) hasVisibleUnreadCompletion = true;
     const renderUnreadFrame = unreadAnimating
       && unreadFrameDue
@@ -7909,8 +7948,12 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
     if (
       threadReasoningTrackShouldAnimate(thread)
       || completionAnimating
+      || dismissAnimating
       || renderUnreadFrame
     ) {
+      setImage(context, threadSvg(thread, slot));
+    } else if (dismissFade) {
+      expiredDismissFadeThreadIds.add(thread.id);
       setImage(context, threadSvg(thread, slot));
     } else if (Number.isFinite(completionStartedAtMs)) {
       clearCompletionEffect(thread.id);
@@ -7922,6 +7965,15 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
     lastUnreadCompletionFrameAtMs = nowMs;
     unreadCompletionRenderGroup = (unreadCompletionRenderGroup + 1)
       % UNREAD_COMPLETION_GROUP_COUNT;
+  }
+  for (const threadId of expiredDismissFadeThreadIds) {
+    completionDismissFadeByThreadId.delete(threadId);
+  }
+  for (const [threadId, fade] of completionDismissFadeByThreadId) {
+    if (visibleThreadIds.has(threadId)) continue;
+    if (nowMs - fade.startedAtMs >= UNREAD_COMPLETION_DISMISS_FADE_MS) {
+      completionDismissFadeByThreadId.delete(threadId);
+    }
   }
 }
 
@@ -9118,6 +9170,7 @@ const DEMO_COMPLETED_ID = "00000000-0000-4000-8000-000000000002";
 function resetDemoEffects() {
   completionPulseStartedAt.clear();
   unreadCompletionByThreadId.clear();
+  completionDismissFadeByThreadId.clear();
   completionQueueBarrierMsByThreadId.clear();
   pendingCompletionByThreadId.clear();
   voiceHeldContexts.clear();
@@ -9625,6 +9678,7 @@ function verifyCompletionTransitionPolicy(nowMs) {
   };
   const noCompletionEffect = () => !completionPulseStartedAt.has(threadId)
     && !unreadCompletionByThreadId.has(threadId)
+    && !completionDismissFadeByThreadId.has(threadId)
     && globalCompletionStartedAtMs === null
     && globalCompletionThreadId === null;
 
@@ -9794,12 +9848,29 @@ function verifyCompletionTransitionPolicy(nowMs) {
   const unreadCompletionPersistsAfterInitialPulse = persistentEffect?.persistent === true
     && persistentEffect?.unread === true
     && persistentEffect.strength >= 0.3;
-  acknowledgeCompletion(threadId, { persist: false, render: false });
-  const acknowledgementClearsUnreadCompletion = !unreadCompletionByThreadId.has(threadId)
-    && visibleCompletionPulseState(
-      finalTerminal,
-      firstPulseStartedAtMs + THREAD_COMPLETION_PULSE_DURATION_MS + 700
-    ) === null;
+  const acknowledgementAtMs = firstPulseStartedAtMs
+    + THREAD_COMPLETION_PULSE_DURATION_MS + 700;
+  acknowledgeCompletion(threadId, {
+    persist: false,
+    render: false,
+    nowMs: acknowledgementAtMs
+  });
+  const dismissalStartEffect = visibleCompletionPulseState(finalTerminal, acknowledgementAtMs);
+  const dismissalMidEffect = visibleCompletionPulseState(
+    finalTerminal,
+    acknowledgementAtMs + UNREAD_COMPLETION_DISMISS_FADE_MS / 2
+  );
+  const dismissalEndEffect = visibleCompletionPulseState(
+    finalTerminal,
+    acknowledgementAtMs + UNREAD_COMPLETION_DISMISS_FADE_MS
+  );
+  const acknowledgementClearsUnreadCompletion = !unreadCompletionByThreadId.has(threadId);
+  const acknowledgementFadesUnreadCompletion = dismissalStartEffect?.dismissal === true
+    && Math.abs(dismissalStartEffect.strength - persistentEffect.strength) < 0.001
+    && dismissalMidEffect?.dismissal === true
+    && dismissalMidEffect.strength > 0
+    && dismissalMidEffect.strength < dismissalStartEffect.strength
+    && dismissalEndEffect === null;
 
   const passed = queueEditIgnored
     && remoteQueueHandoffIgnored
@@ -9813,7 +9884,8 @@ function verifyCompletionTransitionPolicy(nowMs) {
     && confirmedFinalCompletionUnread
     && identicalTerminalDidNotRetrigger
     && unreadCompletionPersistsAfterInitialPulse
-    && acknowledgementClearsUnreadCompletion;
+    && acknowledgementClearsUnreadCompletion
+    && acknowledgementFadesUnreadCompletion;
   resetTracker(false);
   return {
     passed,
@@ -9835,7 +9907,8 @@ function verifyCompletionTransitionPolicy(nowMs) {
     confirmedFinalCompletionUnread,
     identicalTerminalDidNotRetrigger,
     unreadCompletionPersistsAfterInitialPulse,
-    acknowledgementClearsUnreadCompletion
+    acknowledgementClearsUnreadCompletion,
+    acknowledgementFadesUnreadCompletion
   };
 }
 

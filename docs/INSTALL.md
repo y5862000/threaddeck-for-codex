@@ -14,6 +14,8 @@ ThreadDeck ships as one bilingual Stream Deck plugin. The same download uses Eng
 Apple silicon and Intel Macs use the same download. Each release also publishes
 `com.yechan.threaddeck.streamDeckPlugin.sha256` if you want to verify the file before opening it.
 
+The plugin automatically installs the recommended **ThreadDeck for Codex** Neo profile. A separate `threaddeck-for-codex-neo.streamDeckProfile` release asset is provided only for manual import, recovery, or creating an editable second copy; see the [profile guide](PROFILE.md).
+
 ## Install
 
 1. Download `com.yechan.threaddeck.streamDeckPlugin` from [GitHub Releases](https://github.com/y5862000/threaddeck-for-codex/releases).
@@ -30,6 +32,8 @@ Apple silicon and Intel Macs use the same download. Each release also publishes
 | Open Side Chat | `Option+Command+S` (`⌥⌘S`) |
 
 7. Hold the microphone key, speak, and release. Codex may request microphone permission on first use.
+
+If **ThreadDeck for Codex** already appears in the profile menu, do not import the standalone profile unless you want a duplicate. An older profile named **Codex Neo** is a separate experimental copy and can be removed after you confirm the maintained profile works.
 
 When the Micro bridge is connected, Effort, Fast mode, Side Chat, normal Send, New Task, push-to-talk, and six native task slots use Codex's own internal events. The shortcuts above remain important as a compatibility fallback. ThreadDeck's eight-card monitor, queues, goals, remote tasks, and non-Micro-slot navigation continue to use its existing read-only state and verified macOS adapter.
 
