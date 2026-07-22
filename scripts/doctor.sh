@@ -95,6 +95,7 @@ fi
 
 manifest="$PLUGIN_DIR/manifest.json"
 bridge="$PLUGIN_DIR/bin/keybridge"
+executable_bridge=""
 if [[ -f "$manifest" ]]; then
   version="$(/usr/bin/plutil -extract Version raw -o - "$manifest" 2>/dev/null)"
   [[ -n "$version" ]] && pass "ThreadDeck $version manifest is readable" || fail "ThreadDeck manifest is invalid"
@@ -103,16 +104,30 @@ else
 fi
 
 if [[ -x "$bridge" ]]; then
+  executable_bridge="$bridge"
   pass "Native helper is executable"
-  health="$($bridge permission-health 2>/dev/null)"
+elif [[ -f "$bridge" ]]; then
+  bridge_digest="$(/usr/bin/shasum -a 256 "$bridge" 2>/dev/null | /usr/bin/awk '{print $1}')"
+  runtime_bridge="$USER_HOME/Library/Application Support/ThreadDeck/bin/keybridge-$bridge_digest"
+  if [[ -n "$bridge_digest" && -x "$runtime_bridge" ]] \
+      && /usr/bin/cmp -s "$bridge" "$runtime_bridge"; then
+    executable_bridge="$runtime_bridge"
+    pass "Native helper runtime copy matches the immutable bundle"
+  else
+    fail "Native helper runtime copy is missing or does not match; reopen Stream Deck once"
+  fi
+else
+  fail "Native helper is missing"
+fi
+
+if [[ -n "$executable_bridge" ]]; then
+  health="$($executable_bridge permission-health 2>/dev/null)"
   [[ "$health" == *"accessibility=1"* ]] \
     && pass "Accessibility is allowed" \
     || fail "Allow Stream Deck in System Settings → Privacy & Security → Accessibility"
   [[ "$health" == *"post_event=1"* ]] \
     && pass "Keyboard event posting is allowed" \
     || fail "Keyboard event posting is not allowed; toggle Stream Deck Accessibility off/on and reopen Stream Deck"
-else
-  fail "Native helper is missing or not executable"
 fi
 
 if command -v codexbar >/dev/null 2>&1; then

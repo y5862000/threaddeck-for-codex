@@ -20,6 +20,11 @@ Apple Silicon과 Intel Mac이 같은 설치 파일을 사용합니다. 다운로
 2. 파일을 두 번 클릭하고 Stream Deck에서 설치를 승인합니다.
 3. Stream Deck의 프로필 선택기에서 **ThreadDeck for Codex**를 선택합니다. 현재 프로필을 덮어쓰지 않고 별도로 설치됩니다.
 4. **시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용**에서 **Stream Deck**을 허용한 뒤 Stream Deck을 완전히 종료하고 다시 엽니다.
+
+   ![macOS 손쉬운 사용 설정에서 Elgato Stream Deck을 허용한 화면](media/macos-accessibility-stream-deck.png)
+
+   최근 macOS에서는 **Elgato Stream Deck.app**으로 표시됩니다. 화면 기록·입력 모니터링·전체 디스크 접근 권한은 필요하지 않습니다. 스위치가 이미 켜져 있는데도 버튼에 권한 경고가 남아 있다면 한 번 껐다 켜고, 메뉴 바 아이콘에서 Stream Deck을 완전히 종료한 뒤 다시 여세요.
+
 5. Codex를 종료한 뒤 평소처럼 한 번 실행합니다. ThreadDeck은 플러그인을 시작할 때 이미 열려 있던 Codex 프로세스를 의도적으로 건드리지 않습니다. 사용자가 나중에 정상 실행한 뒤 임의 루프백 Micro 연결을 붙이기 위해 Codex가 한 번 더 자동 재실행될 수 있습니다.
 6. **Codex → 설정 → 키보드 단축키**에서 다음 폴백 값을 지정하거나 확인합니다.
 

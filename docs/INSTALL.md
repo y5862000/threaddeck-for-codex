@@ -20,6 +20,11 @@ Apple silicon and Intel Macs use the same download. Each release also publishes
 2. Double-click the file and approve installation in Stream Deck.
 3. In Stream Deck, select the **ThreadDeck for Codex** profile. It is installed without replacing your current profile.
 4. Open **System Settings → Privacy & Security → Accessibility**, allow **Stream Deck**, then quit and reopen Stream Deck completely.
+
+   ![Elgato Stream Deck enabled in macOS Accessibility settings](media/macos-accessibility-stream-deck.png)
+
+   The switch is listed as **Elgato Stream Deck.app** on current macOS releases. ThreadDeck does not need Screen Recording, Input Monitoring, or Full Disk Access. If the switch was already on but a key still shows an access warning, turn it off and on once, then quit Stream Deck from its menu-bar icon and reopen it.
+
 5. Quit Codex and launch it normally once. ThreadDeck deliberately preserves a Codex process that was already open when the plugin started. After this later user-initiated launch, Codex may relaunch one additional time so ThreadDeck can attach its random loopback Micro bridge.
 6. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings:
 
