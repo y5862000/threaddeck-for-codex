@@ -1,6 +1,6 @@
 # 보안과 개인정보 보호
 
-> [English](SECURITY.md)
+> [English](../.github/SECURITY.md)
 
 ThreadDeck은 로컬에서만 작동합니다. 텔레메트리, 분석 도구, 업데이트 서버, 원격 API, Codex 작업 메타데이터를 업로드하는 코드는 없습니다.
 

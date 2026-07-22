@@ -131,4 +131,4 @@ Set `CODEX_HOME`, or override individual paths with `THREADDECK_STATE_DB`, `THRE
 
 ## Reporting a problem safely
 
-Include macOS, Codex Desktop, Stream Deck, ThreadDeck, and device model versions plus the exact key and gesture used. The privacy-safe ThreadDeck trace is `~/Library/Logs/ThreadDeck/runtime.jsonl`; it contains no task titles or IDs and is capped at 256 KiB. Do not attach raw Codex Desktop logs, session files, database files, real task titles, remote host names, or device identifiers. See [Security and privacy](../SECURITY.md).
+Include macOS, Codex Desktop, Stream Deck, ThreadDeck, and device model versions plus the exact key and gesture used. The privacy-safe ThreadDeck trace is `~/Library/Logs/ThreadDeck/runtime.jsonl`; it contains no task titles or IDs and is capped at 256 KiB. Do not attach raw Codex Desktop logs, session files, database files, real task titles, remote host names, or device identifiers. See [Security and privacy](../.github/SECURITY.md).

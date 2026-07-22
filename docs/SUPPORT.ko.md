@@ -1,13 +1,13 @@
 # 지원 안내
 
-> [English](SUPPORT.md)
+> [English](../.github/SUPPORT.md)
 
 ThreadDeck은 여가 시간에 관리하는 커뮤니티 베타 프로젝트입니다.
 
 ## 이슈를 열기 전에
 
 1. ThreadDeck, Codex Desktop, Stream Deck 소프트웨어를 최신 버전으로 업데이트합니다.
-2. [문제 해결](docs/TROUBLESHOOTING.ko.md)을 읽습니다.
+2. [문제 해결](TROUBLESHOOTING.ko.md)을 읽습니다.
 3. Stream Deck에 macOS 손쉬운 사용 권한이 있는지 확인합니다.
 4. 한도 버튼만 실패하면 터미널에서 `codexbar usage --format json`을 실행합니다.
 5. 같은 Codex·Stream Deck 버전에서 발생한 기존 이슈를 검색합니다.

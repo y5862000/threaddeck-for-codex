@@ -20,7 +20,7 @@
   <img alt="Stream Deck" src="https://img.shields.io/badge/device-Stream%20Deck-111111?style=flat-square">
 </p>
 
-<p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
+<p align="center"><strong>English (default)</strong> · <a href="docs/README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
 
 ThreadDeck turns a Stream Deck into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 
@@ -191,7 +191,7 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 | Stream Deck plugin socket | Localhost | Receive key events and send rendered key images |
 | macOS Accessibility and Core Audio | Local system APIs | Keyboard/media actions, focused-composer checks, fixed goal status/time labels, queue counts, remote selection, and push-to-talk audio handling |
 
-ThreadDeck never writes to Codex database or session files, but a physical key press can intentionally open Codex UI or submit the message you dictated. Remote titles are passed to the native helper through stdin rather than command-line arguments. Queued message text and arbitrary accessibility text are never returned, logged, or stored. Anyone who can see the physical device can see the task titles displayed on it; review [Security and privacy](SECURITY.md) before sharing logs or screenshots.
+ThreadDeck never writes to Codex database or session files, but a physical key press can intentionally open Codex UI or submit the message you dictated. Remote titles are passed to the native helper through stdin rather than command-line arguments. Queued message text and arbitrary accessibility text are never returned, logged, or stored. Anyone who can see the physical device can see the task titles displayed on it; review [Security and privacy](.github/SECURITY.md) before sharing logs or screenshots.
 
 ## Quick troubleshooting
 
@@ -248,15 +248,15 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 
 - [Troubleshooting](docs/TROUBLESHOOTING.md) · [Korean](docs/TROUBLESHOOTING.ko.md)
 - [Install on another Mac](docs/INSTALL.md) · [Korean](docs/INSTALL.ko.md)
-- [Security and privacy](SECURITY.md) · [Korean](SECURITY.ko.md)
+- [Security and privacy](.github/SECURITY.md) · [Korean](docs/SECURITY.ko.md)
 - [Architecture](docs/ARCHITECTURE.md) · [Korean](docs/ARCHITECTURE.ko.md)
 - [Platform porting](docs/PORTING.md) · [Korean](docs/PORTING.ko.md)
 - [Open-source inventory](docs/OPEN_SOURCE.md) · [Korean](docs/OPEN_SOURCE.ko.md)
 - [Brand guide](docs/BRAND.md) · [Korean](docs/BRAND.ko.md)
 - [Related projects](docs/ALTERNATIVES.md) · [Korean](docs/ALTERNATIVES.ko.md)
-- [Contributing](CONTRIBUTING.md) · [Korean](CONTRIBUTING.ko.md)
-- [Support](SUPPORT.md) · [Korean](SUPPORT.ko.md)
-- [Changelog](CHANGELOG.md) · [Korean](CHANGELOG.ko.md)
+- [Contributing](.github/CONTRIBUTING.md) · [Korean](docs/CONTRIBUTING.ko.md)
+- [Support](.github/SUPPORT.md) · [Korean](docs/SUPPORT.ko.md)
+- [Changelog](CHANGELOG.md) · [Korean](docs/CHANGELOG.ko.md)
 
 ## License and trademarks
 

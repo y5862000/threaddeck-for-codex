@@ -1,6 +1,6 @@
 # Changelog
 
-> [Korean changelog](CHANGELOG.ko.md)
+> [Korean changelog](docs/CHANGELOG.ko.md)
 
 ## Unreleased
 

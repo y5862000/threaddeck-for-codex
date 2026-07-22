@@ -4,5 +4,5 @@ contact_links:
     url: https://github.com/y5862000/threaddeck-for-codex/security/advisories/new
     about: Report security problems privately.
   - name: Support guide
-    url: https://github.com/y5862000/threaddeck-for-codex/blob/main/SUPPORT.md
+    url: https://github.com/y5862000/threaddeck-for-codex/blob/main/.github/SUPPORT.md
     about: Check troubleshooting and support guidance first.

@@ -1,6 +1,6 @@
 # 고지
 
-> [English](NOTICE.md)
+> [English](../NOTICE.md)
 
 ThreadDeck for Codex는 독립적인 비공식 프로젝트이며 OpenAI 또는 Elgato와 제휴·보증·후원 관계가 없습니다.
 
@@ -36,4 +36,4 @@ Fast 모드 번개 표시는 Apache License 2.0으로 제공되는 Google Materi
 **Bolt** 아이콘을 사용합니다. Copyright Google LLC. 라이선스 전문은
 `com.yechan.threaddeck.sdPlugin/licenses/material-symbols-Apache-2.0.txt`에 포함했습니다.
 
-법적 효력이 있는 라이선스 본문은 번역하지 않은 [LICENSE](LICENSE)를 기준으로 합니다.
+법적 효력이 있는 라이선스 본문은 번역하지 않은 [LICENSE](../LICENSE)를 기준으로 합니다.

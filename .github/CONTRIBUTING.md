@@ -1,6 +1,6 @@
 # Contributing
 
-> [Korean contribution guide](CONTRIBUTING.ko.md)
+> [Korean contribution guide](../docs/CONTRIBUTING.ko.md)
 
 Thanks for helping improve ThreadDeck. Small, focused pull requests are easiest to review and safest for a hardware workflow.
 
@@ -9,7 +9,7 @@ Thanks for helping improve ThreadDeck. Small, focused pull requests are easiest 
 - Search existing issues and pull requests.
 - For a user-facing behavior change, open a feature request first and describe the Stream Deck model, page, and expected interaction.
 - Never attach a real `~/.codex` database, session file, access token, device serial, or screenshot containing private task titles.
-- Do not add OpenAI or Elgato logos, proprietary fonts, or copied product assets. Follow [docs/BRAND.md](docs/BRAND.md).
+- Do not add OpenAI or Elgato logos, proprietary fonts, or copied product assets. Follow the [brand guide](../docs/BRAND.md).
 
 ## Development setup
 
@@ -59,4 +59,4 @@ Both commands use the same Sharp-based SVG rasterizer as the asset build; Sharp 
 - Update English and Korean README content together when public behavior changes.
 - Add a changelog entry for user-visible fixes or features.
 
-By submitting a contribution, you agree that it may be distributed under the repository's [MIT License](LICENSE).
+By submitting a contribution, you agree that it may be distributed under the repository's [MIT License](../LICENSE).

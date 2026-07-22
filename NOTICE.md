@@ -1,6 +1,6 @@
 # Notices
 
-> [Korean notice](NOTICE.ko.md)
+> [Korean notice](docs/NOTICE.ko.md)
 
 ThreadDeck for Codex is an independent, unofficial project. It is not affiliated with, endorsed by, or sponsored by OpenAI or Elgato.
 

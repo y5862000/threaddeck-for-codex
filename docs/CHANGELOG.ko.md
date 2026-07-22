@@ -1,6 +1,6 @@
 # 변경 기록
 
-> [English](CHANGELOG.md)
+> [English](../CHANGELOG.md)
 
 ## 미배포
 

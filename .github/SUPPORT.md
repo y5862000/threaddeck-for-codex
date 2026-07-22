@@ -1,13 +1,13 @@
 # Support
 
-> [Korean support guide](SUPPORT.ko.md)
+> [Korean support guide](../docs/SUPPORT.ko.md)
 
 ThreadDeck is a community beta maintained in spare time.
 
 ## Before opening an issue
 
 1. Update to the latest ThreadDeck release, Codex Desktop, and Stream Deck software.
-2. Read [Troubleshooting](docs/TROUBLESHOOTING.md).
+2. Read [Troubleshooting](../docs/TROUBLESHOOTING.md).
 3. Confirm Stream Deck has macOS Accessibility permission.
 4. If only the quota key is failing, run `codexbar usage --format json` in Terminal.
 5. Search existing issues for the same Codex or Stream Deck version.
