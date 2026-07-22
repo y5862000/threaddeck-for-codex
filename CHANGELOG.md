@@ -5,6 +5,7 @@
 ## Unreleased
 
 - Added per-device animated-image lanes using Stream Deck's registered device type and key geometry. The physically measured Neo policy retains a 90 fps aggregate ceiling; unmeasured physical, Mobile, Virtual, and future device types start from conservative model/size budgets. Each lane coalesces stale frames, automatically slows when the plugin WebSocket backs up, recovers gradually after three quiet seconds, and cannot throttle another connected deck. Physical Neo stress tests remained connected through a 120 fps diagnostic run, while the production Neo policy keeps practical CPU headroom at 90 fps.
+- Kept the elapsed-time label optically centered when an active goal icon and queue badge share its capsule. Compact labels now derive their baseline from their actual font size instead of inheriting the larger standalone timer baseline; the completion overlay uses the identical corrected position.
 
 ## 0.5.4-beta — 2026-07-22
 
