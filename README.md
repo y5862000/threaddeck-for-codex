@@ -235,14 +235,14 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 
 ## Current limits
 
-- The public beta targets macOS and Stream Deck Neo only; English and Korean are selected automatically from Stream Deck.
+- The bundled profile and physical QA target macOS and Stream Deck Neo; English and Korean are selected automatically from Stream Deck. Actions placed manually on another model use its official device type and key geometry for an independent conservative frame budget, but those layouts are not yet published as supported profiles.
 - Task and Side Chat detection depend on private Codex file and log formats and can lag behind a Codex release.
 - Native controls depend on an undocumented Codex Micro renderer API. The bridge is bound only to a random loopback port, and ThreadDeck falls back only when it can prove no Micro action was delivered.
 - Codex exposes six native Micro task slots; ThreadDeck keeps its separate eight-card monitor and uses the legacy verified switch path for the remaining two or for tasks not assigned to a Micro slot.
 - Queue counts are observed from the currently open task; Korean and English accessibility labels are recognized.
 - Shortcut actions currently assume the Codex bindings listed above.
 - Active media is discovered from Core Audio rather than an app allowlist. ThreadDeck uses a verified semantic pause/play control when available, falls back to the normal macOS media command conservatively, and resumes only apps it paused after the final voice key is released. A browser session can still represent more than one tab.
-- Configurable shortcuts and additional Stream Deck models are planned for later betas.
+- Configurable shortcuts and ready-made profiles for additional Stream Deck models are planned for later betas.
 
 ## Project documents
 
