@@ -264,3 +264,5 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 ## License and trademarks
 
 ThreadDeck is MIT-licensed, independent, and unofficial. It is not affiliated with, endorsed by, or sponsored by OpenAI or Elgato. See [NOTICE.md](NOTICE.md) for trademark and asset notices.
+
+Contact: [y5862000@gmail.com](mailto:y5862000@gmail.com)

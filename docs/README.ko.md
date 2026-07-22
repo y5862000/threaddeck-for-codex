@@ -264,3 +264,5 @@ GIF 파이프라인은 Node.js와 빌드 전용 Sharp 의존성으로 SVG를 래
 ## 라이선스와 상표
 
 ThreadDeck은 MIT 라이선스로 제공되는 독립 비공식 프로젝트이며 OpenAI 또는 Elgato와 관련·제휴·후원 관계가 없습니다. 상표와 자산 고지는 [한국어 고지](NOTICE.ko.md)를 참고하세요.
+
+연락처: [y5862000@gmail.com](mailto:y5862000@gmail.com)
