@@ -29,6 +29,8 @@ for (const file of markdownFiles) {
 }
 
 const requiredImages = [
+  "docs/media/neo-preview.svg",
+  "docs/media/neo-preview-light.svg",
   "docs/media/neo-preview.png",
   "docs/media/neo-preview-light.png",
   "docs/media/threaddeck-overview.gif",
@@ -44,6 +46,15 @@ const requiredImages = [
 for (const image of requiredImages) {
   const target = path.join(root, image);
   if (!fs.existsSync(target) || fs.statSync(target).size === 0) failures.push(`${image}: missing or empty`);
+}
+
+for (const image of ["docs/media/neo-preview.svg", "docs/media/neo-preview-light.svg"]) {
+  const contents = fs.readFileSync(path.join(root, image), "utf8");
+  const roundedClips = contents.match(/<clipPath id="demoKeyClip\d+">/g) ?? [];
+  const clippedKeys = contents.match(/clip-path="url\(#demoKeyClip\d+\)"/g) ?? [];
+  if (roundedClips.length !== 8 || clippedKeys.length !== 8) {
+    failures.push(`${image}: expected eight rounded documentation key masks`);
+  }
 }
 
 function gifMetadata(buffer) {
