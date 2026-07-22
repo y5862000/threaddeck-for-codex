@@ -5,7 +5,7 @@
   "description": "A bilingual Codex Stream Deck plugin for monitoring, switching, and dictating into Codex Desktop tasks on Stream Deck Neo.",
   "license": "MIT",
   "author": "ThreadDeck contributors",
-  "homepage": "https://threaddeck.dev/",
+  "homepage": "https://github.com/y5862000/threaddeck-for-codex#readme",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/y5862000/threaddeck-for-codex.git"
