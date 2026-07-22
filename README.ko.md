@@ -57,12 +57,13 @@ ThreadDeck은 Stream Deck을 Codex의 물리 작업 모니터이자 컨트롤러
 
 1. [릴리스 페이지](https://github.com/y5862000/threaddeck-for-codex/releases)에서 `com.yechan.threaddeck.streamDeckPlugin`을 받아 두 번 클릭합니다.
 2. 설치된 **ThreadDeck for Codex** 프로필을 선택하고 **시스템 설정 → 개인정보 보호 및 보안 → 손쉬운 사용**에서 **Stream Deck**을 허용한 뒤 Stream Deck을 다시 엽니다.
+
+   <img src="docs/media/macos-accessibility-stream-deck.png" alt="macOS 손쉬운 사용 설정에서 Elgato Stream Deck을 허용한 화면" width="420">
+
+   최근 macOS에서는 **Elgato Stream Deck.app**으로 표시됩니다. 화면 기록·입력 모니터링·전체 디스크 접근 권한은 필요하지 않습니다.
+
 3. Codex를 한 번 종료하고 다시 엽니다. 설치할 때 이미 열려 있던 Codex는 ThreadDeck이 건드리지 않으며, 다음 정상 실행 뒤 임의의 `127.0.0.1` 렌더러 연결을 붙이기 위해 Codex가 한 번만 자동 재실행될 수 있습니다.
 4. 기존 방식 폴백을 위해 아래 Codex 단축키 3개를 확인하고 마이크 버튼을 시험합니다.
-
-![macOS 손쉬운 사용 설정에서 Elgato Stream Deck을 허용한 화면](docs/media/macos-accessibility-stream-deck.png)
-
-최근 macOS에서는 **Elgato Stream Deck.app**으로 표시됩니다. 화면 기록·입력 모니터링·전체 디스크 접근 권한은 필요하지 않습니다.
 
 설치 파일 하나에 바로 쓸 수 있는 편집 가능 프로필, Apple Silicon/Intel 공용 헬퍼, 영어/한국어 현지화가 모두 들어갑니다. 화면별 설치 방법과 업데이트·삭제·읽기 전용 진단 명령은 [다른 Mac에 설치하기](docs/INSTALL.ko.md)를 확인하세요.
 
