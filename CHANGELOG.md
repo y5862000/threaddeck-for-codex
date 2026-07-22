@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+## 0.5.5 — 2026-07-23
+
+- Graduated the automated GitHub workflow from `-beta` prereleases to stable version tags and titles. The published release now includes the plugin, its SHA-256, the standalone recommended Neo profile, and that profile's SHA-256.
 - Fixed interaction-contract verification cleanup so completed release checks terminate instead of being kept alive by simulated hold timers.
 - Integrated the maintained three-page Stream Deck Neo layout into the current release pipeline as a standalone `threaddeck-for-codex-neo.streamDeckProfile` artifact with its own SHA-256 file. Added bilingual visual profile guides, duplicate-import guidance, current plugin-version stamping, and release auditing for every recommended key coordinate.
 - Prepared the Stream Deck package for Marketplace DRM with SDK 3, organization-aligned author metadata, current 256/512 px plugin icons, and an immutable bundle. A content-addressed KeyBridge copy is now verified and executed from local Application Support instead of changing the distributed native helper in place.

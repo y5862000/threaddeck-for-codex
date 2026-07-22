@@ -12,7 +12,7 @@ body:
     attributes:
       label: Versions
       description: ThreadDeck, macOS, Codex Desktop, Stream Deck software, and Stream Deck hardware.
-      placeholder: ThreadDeck 0.1.0-beta; macOS 26.5; Codex …; Stream Deck 7.4; Neo
+      placeholder: ThreadDeck 0.5.5; macOS 26.5; Codex …; Stream Deck 7.4; Neo
     validations:
       required: true
   - type: dropdown

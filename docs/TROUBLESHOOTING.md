@@ -97,7 +97,7 @@ ThreadDeck does not treat cached summary timestamps as completion events. If it 
 
 ## `Could not read status` flashes or replaces the list
 
-Update to the latest beta. ThreadDeck retries short transient reads and keeps the last good task list. A startup error is shown only after three consecutive failures before any valid list has loaded. If the message persists, restart Codex and Stream Deck and report their versions without real task titles.
+Update to the latest release. ThreadDeck retries short transient reads and keeps the last good task list. A startup error is shown only after three consecutive failures before any valid list has loaded. If the message persists, restart Codex and Stream Deck and report their versions without real task titles.
 
 ## Only the completed task key pulses
 
@@ -109,7 +109,7 @@ Open the task in Codex so its queued actions are visible and confirm Accessibili
 
 ## A closed Side Chat reappears
 
-Update to the latest beta. Temporary Side Chats are scoped to the current Codex App Server session, and close events survive transient state-file rewrites. Persistent task IDs, including archived IDs, are blocked from re-entering through prompt history as Side Chats.
+Update to the latest release. Temporary Side Chats are scoped to the current Codex App Server session, and close events survive transient state-file rewrites. Persistent task IDs, including archived IDs, are blocked from re-entering through prompt history as Side Chats.
 
 ## The quota key has no number
 

@@ -15,7 +15,7 @@
   <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest"><img alt="최신 릴리스" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
   <a href="https://github.com/y5862000/threaddeck-for-codex/actions/workflows/ci.yml"><img alt="CI 상태" src="https://img.shields.io/github/actions/workflow/status/y5862000/threaddeck-for-codex/ci.yml?style=flat-square&label=build"></a>
   <a href="../LICENSE"><img alt="MIT 라이선스" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
-  <img alt="베타" src="https://img.shields.io/badge/status-beta-F5A524?style=flat-square">
+  <img alt="정식" src="https://img.shields.io/badge/status-stable-22C55E?style=flat-square">
   <img alt="macOS 13 이상" src="https://img.shields.io/badge/macOS-13%2B-111111?style=flat-square">
   <img alt="Stream Deck" src="https://img.shields.io/badge/device-Stream%20Deck-111111?style=flat-square">
 </p>
@@ -31,7 +31,7 @@ ThreadDeck은 Stream Deck을 Codex의 물리 작업 모니터이자 컨트롤러
 ![추론 강도 단계, Fast mode, 작업 버튼 음성 입력, 대기열 진행, 전체 완료 펄스를 보여주는 ThreadDeck 흐름](media/threaddeck-overview.gif)
 
 > [!IMPORTANT]
-> ThreadDeck은 Codex의 공개되지 않은 로컬 메타데이터와 로컬 렌더러 API를 읽는 독립 베타입니다. Codex 업데이트 뒤 어느 경로든 일시적으로 깨질 수 있습니다. Codex 데이터베이스와 세션 파일에는 절대 쓰지 않습니다.
+> ThreadDeck은 Codex의 공개되지 않은 로컬 메타데이터와 로컬 렌더러 API를 읽는 독립 연동 프로젝트입니다. Codex 업데이트 뒤 어느 경로든 일시적으로 깨질 수 있습니다. Codex 데이터베이스와 세션 파일에는 절대 쓰지 않습니다.
 
 ## 책상 위에 놓이는 기능
 
@@ -212,7 +212,7 @@ ThreadDeck은 Codex DB와 세션 파일에는 쓰지 않지만, 사용자가 물
 | 미디어 페이지에서 앱이 종료됨 | 기본 Elgato 앱 실행 버튼은 길게 누르면 종료합니다. 열거나 앞으로 가져오기만 하려면 짧게 누르기 |
 | 원격 작업이 목록에 없음 | Codex에서 해당 컴퓨터를 한 번 열고 표시할 작업을 직접 고정 |
 | 원격 작업에 `제목 중복` 표시 | 작업 제목을 서로 다르게 만들거나 하나만 고정 |
-| `상태를 읽지 못함` 표시 | 최신 베타로 업데이트하고 Codex와 Stream Deck 재시작; 일시적인 읽기 실패는 정상 목록을 유지하며 자동 재시도 |
+| `상태를 읽지 못함` 표시 | 최신 릴리스로 업데이트하고 Codex와 Stream Deck 재시작; 일시적인 읽기 실패는 정상 목록을 유지하며 자동 재시도 |
 | 주간 한도를 읽지 못함 | `codexbar usage --format json` 실행과 CodexBar의 Codex 제공자 활성화 확인 |
 
 첫 확인으로 해결되지 않으면 전체 [문제 해결 가이드](TROUBLESHOOTING.ko.md)를 확인하세요.
@@ -247,7 +247,7 @@ GIF 파이프라인은 Node.js와 빌드 전용 Sharp 의존성으로 SVG를 래
 - 대기 개수는 현재 열린 작업에서 관찰하며 한국어·영어 손쉬운 사용 라벨을 인식합니다.
 - 단축키 액션은 현재 위에 적은 Codex 키 지정을 전제로 합니다.
 - 활성 미디어는 앱 허용 목록이 아니라 Core Audio 출력에서 찾습니다. 의미가 확인된 일시정지·재생 컨트롤을 우선하고 필요할 때만 macOS 정상 미디어 명령으로 보수적으로 폴백하며, 마지막 음성 버튼을 놓은 뒤 자신이 멈춘 앱만 재개합니다. 브라우저 세션은 여러 탭을 대표할 수 있습니다.
-- 사용자 설정 단축키와 다른 Stream Deck 모델용 완성 프로필은 이후 베타에서 계획하고 있습니다.
+- 사용자 설정 단축키와 다른 Stream Deck 모델용 완성 프로필은 이후 릴리스에서 계획하고 있습니다.
 
 ## 프로젝트 문서
 

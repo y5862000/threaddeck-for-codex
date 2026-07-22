@@ -15,7 +15,7 @@
   <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest"><img alt="Latest release" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
   <a href="https://github.com/y5862000/threaddeck-for-codex/actions/workflows/ci.yml"><img alt="CI status" src="https://img.shields.io/github/actions/workflow/status/y5862000/threaddeck-for-codex/ci.yml?style=flat-square&label=build"></a>
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
-  <img alt="Beta" src="https://img.shields.io/badge/status-beta-F5A524?style=flat-square">
+  <img alt="Stable" src="https://img.shields.io/badge/status-stable-22C55E?style=flat-square">
   <img alt="macOS 13 or later" src="https://img.shields.io/badge/macOS-13%2B-111111?style=flat-square">
   <img alt="Stream Deck" src="https://img.shields.io/badge/device-Stream%20Deck-111111?style=flat-square">
 </p>
@@ -31,7 +31,7 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 ![ThreadDeck workflow showing reasoning effort steps, Fast mode, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-overview.gif)
 
 > [!IMPORTANT]
-> ThreadDeck is an independent beta that reads undocumented local Codex metadata and an undocumented local renderer API. A Codex update can temporarily break either path. It never writes to Codex database or session files.
+> ThreadDeck is an independent integration that reads undocumented local Codex metadata and an undocumented local renderer API. A Codex update can temporarily break either path. It never writes to Codex database or session files.
 
 ## What it puts on your desk
 
@@ -212,7 +212,7 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 | An app closes from the Media page | The bundled Elgato app launchers use long-press to quit; tap briefly when you only want to open or focus |
 | Remote task is missing | Open that computer once in Codex, then explicitly pin the task |
 | Remote task reports a duplicate | Give the tasks distinct titles or leave only one pinned |
-| `State unavailable` appears | Update to the latest beta and restart Codex and Stream Deck; transient reads keep the last good list and retry automatically |
+| `State unavailable` appears | Update to the latest release and restart Codex and Stream Deck; transient reads keep the last good list and retry automatically |
 | Weekly quota is unavailable | Run `codexbar usage --format json` and enable Codex in CodexBar |
 
 See the full [Troubleshooting guide](docs/TROUBLESHOOTING.md) if the first check does not solve it.
@@ -247,7 +247,7 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 - Queue counts are observed from the currently open task; Korean and English accessibility labels are recognized.
 - Shortcut actions currently assume the Codex bindings listed above.
 - Active media is discovered from Core Audio rather than an app allowlist. ThreadDeck uses a verified semantic pause/play control when available, falls back to the normal macOS media command conservatively, and resumes only apps it paused after the final voice key is released. A browser session can still represent more than one tab.
-- Configurable shortcuts and ready-made profiles for additional Stream Deck models are planned for later betas.
+- Configurable shortcuts and ready-made profiles for additional Stream Deck models are planned for future releases.
 
 ## Project documents
 

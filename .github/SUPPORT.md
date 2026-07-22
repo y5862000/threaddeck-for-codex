@@ -2,7 +2,7 @@
 
 > [Korean support guide](../docs/SUPPORT.ko.md)
 
-ThreadDeck is a community beta maintained in spare time.
+ThreadDeck is a community project maintained in spare time.
 
 ## Before opening an issue
 

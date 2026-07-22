@@ -2,7 +2,7 @@
 
 > [English](../.github/SUPPORT.md)
 
-ThreadDeck은 여가 시간에 관리하는 커뮤니티 베타 프로젝트입니다.
+ThreadDeck은 여가 시간에 관리하는 커뮤니티 프로젝트입니다.
 
 ## 이슈를 열기 전에
 

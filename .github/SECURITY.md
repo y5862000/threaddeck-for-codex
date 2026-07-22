@@ -29,7 +29,7 @@ Because the plugin displays task titles, anyone who can see your Stream Deck may
 
 ## Supported versions
 
-Security fixes target the latest published beta. Please reproduce issues with the latest release before reporting them.
+Security fixes target the latest published release. Please reproduce issues with the latest release before reporting them.
 
 ## Report a vulnerability privately
 

@@ -1,4 +1,4 @@
-name: Publish beta release
+name: Publish release
 
 on:
   push:
@@ -12,7 +12,7 @@ permissions:
   contents: write
 
 concurrency:
-  group: threaddeck-beta-release
+  group: threaddeck-release
   cancel-in-progress: false
 
 jobs:
@@ -26,7 +26,7 @@ jobs:
         run: |
           version="$(node -p "require('./package.json').version")"
           echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${version}-beta" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}" >> "$GITHUB_OUTPUT"
       - name: Refuse an existing release version
         env:
           GH_TOKEN: ${{ github.token }}
@@ -35,7 +35,7 @@ jobs:
         run: |
           if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1 \
             || gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "::error::${RELEASE_TAG} already exists. Bump package.json before publishing another beta."
+            echo "::error::${RELEASE_TAG} already exists. Bump package.json before publishing another release."
             exit 1
           fi
       - uses: pnpm/action-setup@v6
@@ -52,7 +52,7 @@ jobs:
           pnpm run audit
           pnpm run check
           pnpm run pack:artifact
-      - name: Publish Stream Deck beta as the latest release
+      - name: Publish Stream Deck as the latest release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
@@ -67,9 +67,9 @@ jobs:
           profile_checksum="$(awk '{print $1}' "$profile_checksum_file")"
           notes_file="$RUNNER_TEMP/threaddeck-release-notes.md"
           {
-            echo "ThreadDeck ${RELEASE_VERSION} beta"
+            echo "ThreadDeck for Codex v${RELEASE_VERSION}"
             echo
-            awk -v version="${RELEASE_VERSION}-beta" '
+            awk -v version="${RELEASE_VERSION}" '
               index($0, "## " version " — ") == 1 { found = 1; next }
               found && /^## / { exit }
               found { print }
@@ -82,6 +82,6 @@ jobs:
           gh release create "$RELEASE_TAG" \
             "$artifact" "$checksum_file" "$profile" "$profile_checksum_file" \
             --target "$GITHUB_SHA" \
-            --title "ThreadDeck ${RELEASE_VERSION} beta" \
+            --title "ThreadDeck for Codex v${RELEASE_VERSION}" \
             --notes-file "$notes_file" \
             --latest
