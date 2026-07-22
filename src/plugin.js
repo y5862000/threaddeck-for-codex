@@ -477,11 +477,10 @@ let lastOpenedThreadId = null;
 let lastOpenedThreadAtMs = null;
 let knownSideChatIds = new Set();
 let pendingSideChatTarget = null;
-// A newly created Side Chat has a visible right-hand composer before Codex
-// publishes its conversation UUID. Keep that composer as the Current Task
-// until the user deliberately opens another task key. This lease is separate
-// from discovery (`pendingSideChatTarget`), which is intentionally short-lived.
-let activeSideChatFocusLease = null;
+// Blank New Task and Side Chat composers exist before Codex publishes a
+// durable conversation UUID. Keep the visible composer as Current Task until
+// Codex assigns that UUID or the user explicitly opens another task.
+let activeComposerFocusLease = null;
 let nextVoiceSessionId = 0;
 let voiceMediaPaused = false;
 let voiceMediaTransitionTail = Promise.resolve();
@@ -504,16 +503,25 @@ let currentThreadIdentityCandidates = [];
 let lastCurrentThreadSyncAtMs = 0;
 let fastModeRevision = 0;
 
-function provisionalSideChatId(requestedAtMs) {
-  return `side-chat-pending:${Math.max(0, Math.trunc(requestedAtMs))}`;
+function provisionalComposerId(kind, requestedAtMs) {
+  const prefix = kind === "new-thread" ? "new-thread-pending" : "side-chat-pending";
+  return `${prefix}:${Math.max(0, Math.trunc(requestedAtMs))}`;
 }
 
 function isProvisionalSideChatThread(thread) {
   return Boolean(thread?.provisionalSideChat);
 }
 
-function activeSideChatFocusThread(candidates = []) {
-  const lease = activeSideChatFocusLease;
+function isProvisionalNewThread(thread) {
+  return Boolean(thread?.provisionalNewThread);
+}
+
+function isProvisionalComposerThread(thread) {
+  return isProvisionalSideChatThread(thread) || isProvisionalNewThread(thread);
+}
+
+function activeComposerFocusThread(candidates = []) {
+  const lease = activeComposerFocusLease;
   if (!lease) return null;
   if (lease.targetThreadId) {
     const fresh = candidates.find((thread) => thread?.id === lease.targetThreadId);
@@ -523,8 +531,9 @@ function activeSideChatFocusThread(candidates = []) {
       id: lease.targetThreadId,
       parentId: fresh?.parentId ?? lease.thread?.parentId ?? lease.parentId ?? null,
       remote: false,
-      ephemeral: true,
+      ephemeral: lease.kind === "side-chat",
       provisionalSideChat: false,
+      provisionalNewThread: false,
       requiresStrictIdentity: Boolean(
         fresh?.requiresStrictIdentity ?? lease.thread?.requiresStrictIdentity
       )
@@ -533,8 +542,40 @@ function activeSideChatFocusThread(candidates = []) {
   return lease.thread ?? null;
 }
 
+function activeSideChatFocusThread(candidates = []) {
+  return activeComposerFocusLease?.kind === "side-chat"
+    ? activeComposerFocusThread(candidates)
+    : null;
+}
+
+function activeNewThreadFocusThread(candidates = []) {
+  return activeComposerFocusLease?.kind === "new-thread"
+    ? activeComposerFocusThread(candidates)
+    : null;
+}
+
 function currentControlThreadId() {
-  return activeSideChatFocusThread()?.id ?? primaryThreadId;
+  return activeComposerFocusThread()?.id ?? primaryThreadId;
+}
+
+function storeComposerFocusLease(lease, options = {}) {
+  const previousControlId = currentControlThreadId();
+  activeComposerFocusLease = lease;
+  const thread = activeComposerFocusThread();
+  const nextControlId = thread?.id ?? null;
+  if (nextControlId !== previousControlId || fastModeState.threadId !== nextControlId) {
+    fastModeRevision += 1;
+    fastModeState = {
+      ...fastModeStateFromThread(thread, fastModeState),
+      threadId: nextControlId,
+      failed: false
+    };
+  }
+  if (options.render !== false) {
+    renderThreadContexts();
+    renderStaticContexts();
+  }
+  return thread;
 }
 
 function activateSideChatFocusLease(options = {}) {
@@ -542,7 +583,6 @@ function activateSideChatFocusLease(options = {}) {
     ? options.requestedAtMs
     : Date.now();
   const targetThreadId = options.thread?.id ?? options.targetThreadId ?? null;
-  const previousControlId = currentControlThreadId();
   const parent = options.parentThread
     ?? currentThreadIdentityCandidates.find((thread) => thread?.id === options.parentId)
     ?? (primaryThreadRow?.id === options.parentId ? primaryThreadRow : null)
@@ -550,7 +590,7 @@ function activateSideChatFocusLease(options = {}) {
     ?? null;
   const provisional = {
     ...(parent ?? {}),
-    id: provisionalSideChatId(requestedAtMs),
+    id: provisionalComposerId("side-chat", requestedAtMs),
     title: t("activity.sideChat"),
     parentId: options.parentId ?? parent?.id ?? null,
     remote: false,
@@ -571,33 +611,66 @@ function activateSideChatFocusLease(options = {}) {
       provisionalSideChat: false
     }
     : provisional;
-  activeSideChatFocusLease = {
+  return storeComposerFocusLease({
+    kind: "side-chat",
     requestedAtMs,
     parentId: thread.parentId ?? options.parentId ?? null,
     targetThreadId,
     thread
+  }, options);
+}
+
+function activateNewThreadFocusLease(options = {}) {
+  const requestedAtMs = Number.isFinite(options.requestedAtMs)
+    ? options.requestedAtMs
+    : Date.now();
+  const targetThreadId = options.thread?.id ?? options.targetThreadId ?? null;
+  const source = options.sourceThread
+    ?? currentThreadIdentityCandidates.find((thread) => thread?.id === options.sourceThreadId)
+    ?? (primaryThreadRow?.id === options.sourceThreadId ? primaryThreadRow : null)
+    ?? primaryThreadRow
+    ?? null;
+  const provisional = {
+    ...(source ?? {}),
+    id: provisionalComposerId("new-thread", requestedAtMs),
+    title: t("activity.newTask"),
+    parentId: null,
+    remote: false,
+    ephemeral: false,
+    provisionalSideChat: false,
+    provisionalNewThread: true,
+    requiresStrictIdentity: true,
+    pinned: false,
+    status: "idle",
+    activity: { kind: "command", label: t("activity.newTask") },
+    startedAtMs: requestedAtMs,
+    endedAtMs: null,
+    cwd: options.projectContext?.cwd ?? source?.cwd ?? ""
   };
-  const nextControlId = thread.id;
-  if (nextControlId !== previousControlId || fastModeState.threadId !== nextControlId) {
-    fastModeRevision += 1;
-    fastModeState = {
-      ...fastModeStateFromThread(thread, fastModeState),
-      threadId: nextControlId,
-      failed: false
-    };
-  }
-  if (options.render !== false) {
-    renderThreadContexts();
-    renderStaticContexts();
-  }
-  return thread;
+  const thread = targetThreadId
+    ? {
+      ...provisional,
+      ...(options.thread ?? {}),
+      id: targetThreadId,
+      provisionalNewThread: false
+    }
+    : provisional;
+  return storeComposerFocusLease({
+    kind: "new-thread",
+    requestedAtMs,
+    sourceThreadId: options.sourceThreadId ?? source?.id ?? null,
+    projectContext: options.projectContext ?? null,
+    knownIds: options.knownIds instanceof Set ? new Set(options.knownIds) : new Set(),
+    targetThreadId,
+    thread
+  }, options);
 }
 
 function promoteSideChatFocusLease(thread, options = {}) {
-  if (!thread?.id || !activeSideChatFocusLease) return false;
-  const requestedAtMs = activeSideChatFocusLease.requestedAtMs;
+  if (!thread?.id || activeComposerFocusLease?.kind !== "side-chat") return false;
+  const requestedAtMs = activeComposerFocusLease.requestedAtMs;
   const parentId = thread.parentId
-    ?? activeSideChatFocusLease.parentId
+    ?? activeComposerFocusLease.parentId
     ?? sideChatParentById.get(thread.id)
     ?? null;
   activateSideChatFocusLease({
@@ -610,10 +683,26 @@ function promoteSideChatFocusLease(thread, options = {}) {
   return true;
 }
 
-function clearSideChatFocusLease(options = {}) {
-  const previous = activeSideChatFocusLease;
+function promoteNewThreadFocusLease(thread, options = {}) {
+  const lease = activeComposerFocusLease;
+  if (!thread?.id || lease?.kind !== "new-thread") return false;
+  activateNewThreadFocusLease({
+    requestedAtMs: lease.requestedAtMs,
+    sourceThreadId: lease.sourceThreadId,
+    sourceThread: lease.thread,
+    projectContext: lease.projectContext,
+    knownIds: lease.knownIds,
+    targetThreadId: thread.id,
+    thread,
+    render: options.render
+  });
+  return true;
+}
+
+function clearComposerFocusLease(options = {}) {
+  const previous = activeComposerFocusLease;
   if (!previous) return false;
-  activeSideChatFocusLease = null;
+  activeComposerFocusLease = null;
   const previousControlId = previous.targetThreadId ?? previous.thread?.id ?? null;
   if (fastModeState.threadId === previousControlId) {
     fastModeRevision += 1;
@@ -626,26 +715,29 @@ function clearSideChatFocusLease(options = {}) {
   return true;
 }
 
-function revokeSideChatFocusForRendererCurrent(currentId, options = {}) {
-  const lease = activeSideChatFocusLease;
+function revokeComposerFocusForRendererCurrent(currentId, options = {}) {
+  const lease = activeComposerFocusLease;
   if (!lease || !currentId) return false;
-  const expectedId = lease.targetThreadId ?? lease.parentId ?? null;
-  // Before Codex assigns the new Side Chat UUID, its parent composer remains
-  // the only stable renderer identity. Preserve that short provisional phase,
-  // but once a target exists any different renderer task is an explicit user
-  // selection and must win immediately.
+  const expectedId = lease.targetThreadId
+    ?? (lease.kind === "side-chat" ? lease.parentId : lease.sourceThreadId)
+    ?? null;
+  // Before Codex assigns the new composer UUID, its source task remains the
+  // only stable renderer identity. Preserve that short provisional phase, but
+  // once a target exists any different renderer task is an explicit selection
+  // and must win immediately.
   if (currentId === expectedId) return false;
-  pendingSideChatTarget = null;
-  if (activeComposerCreation?.kind === "side-chat") {
+  if (lease.kind === "side-chat") pendingSideChatTarget = null;
+  if (activeComposerCreation?.kind === lease.kind) {
     activeComposerCreation.markComposerReady?.(null);
     activeComposerCreation.controller?.abort();
   }
-  clearSideChatFocusLease({ render: false });
+  clearComposerFocusLease({ render: false });
   if (options.render !== false) {
     renderThreadContexts();
     renderStaticContexts();
   }
-  runtimeTrace("side-chat-focus", {
+  runtimeTrace("composer-focus", {
+    kind: lease.kind,
     result: "manual-override",
     provisional: !lease.targetThreadId
   });
@@ -653,12 +745,12 @@ function revokeSideChatFocusForRendererCurrent(currentId, options = {}) {
 }
 
 function currentThreadForDisplay(rankedThreads = threadSlots, currentRow = primaryThreadRow) {
-  const leasedSideChat = activeSideChatFocusThread([
+  const leasedComposer = activeComposerFocusThread([
     ...rankedThreads,
     currentRow,
     ...currentThreadIdentityCandidates
   ].filter(Boolean));
-  if (leasedSideChat) return leasedSideChat;
+  if (leasedComposer) return leasedComposer;
   if (primaryThreadId) {
     const fresh = rankedThreads.find((thread) => thread?.id === primaryThreadId);
     if (fresh) return fresh;
@@ -2826,9 +2918,9 @@ async function waitForPendingSideChatFocus(requestedAtMs, options = {}) {
 }
 
 function resolveVoiceTargetThreadId(nowMs = Date.now()) {
-  const leasedSideChat = activeSideChatFocusThread(currentThreadIdentityCandidates);
-  if (leasedSideChat) {
-    return isProvisionalSideChatThread(leasedSideChat) ? null : leasedSideChat.id;
+  const leasedComposer = activeComposerFocusThread(currentThreadIdentityCandidates);
+  if (leasedComposer) {
+    return isProvisionalComposerThread(leasedComposer) ? null : leasedComposer.id;
   }
   if (pendingSideChatTarget) {
     if (nowMs - pendingSideChatTarget.requestedAtMs < SIDE_CHAT_TARGET_DISCOVERY_TIMEOUT_MS) return null;
@@ -3733,8 +3825,10 @@ function beginCurrentVoicePress(context, options = {}) {
     if (!state.held
         || currentVoicePressByContext.get(context) !== state
         || contexts.get(context) !== ACTIONS.voice) return false;
+    const provisionalCurrent = isProvisionalComposerThread(currentThread)
+      && threadBelongsToActiveComposerFocus(currentThread);
     let microTargetVerified = false;
-    if (microStatus && currentThread?.id) {
+    if (microStatus && currentThread?.id && !provisionalCurrent) {
       try {
         const status = await microStatus(currentThread, { useMicro: true });
         if (!state.held || currentVoicePressByContext.get(context) !== state) return false;
@@ -3765,7 +3859,7 @@ function beginCurrentVoicePress(context, options = {}) {
     }
     if (!state.held || currentVoicePressByContext.get(context) !== state) return false;
     const voiceStarted = await Promise.resolve(beginVoice(context, {
-      targetThreadId: currentThread?.id ?? "",
+      targetThreadId: provisionalCurrent ? "" : currentThread?.id ?? "",
       composerAlreadyFocused: true,
       allowComposerRefocus: !microTargetVerified
     }));
@@ -3914,7 +4008,7 @@ function beginVoiceHoldSync(context, options = {}) {
   const pauseMedia = options.pauseMedia ?? pauseMediaForVoice;
   const resumeMedia = options.resumeMedia ?? resumeMediaAfterVoice;
   const composerFocusCommand = options.composerFocusCommand
-    ?? (activeSideChatFocusLease
+    ?? (activeComposerFocusLease?.kind === "side-chat"
       ? "codex-focus-side-chat-composer"
       : "codex-focus-composer");
   if (!supersedeHeldVoiceSync(context, { ...options, resumeMedia })) {
@@ -4259,15 +4353,17 @@ function applyMicroReadOnlySnapshot(snapshot, options = {}) {
     ?? null;
   if (!current?.id) return null;
 
-  const leasedSideChat = activeSideChatFocusThread(candidates);
-  if (leasedSideChat && leasedSideChat.id !== current.id) {
+  const leasedComposer = activeComposerFocusThread(candidates);
+  if (leasedComposer && leasedComposer.id !== current.id) {
     // The renderer reports the composer that actually owns keyboard input.
     // A manual in-app task change therefore revokes an older provisional or
     // discovered Side Chat lease without waiting for an Accessibility poll.
-    revokeSideChatFocusForRendererCurrent(current.id, { render: false });
+    revokeComposerFocusForRendererCurrent(current.id, { render: false });
   }
   if (current.ephemeral) {
-    if (activeSideChatFocusLease) promoteSideChatFocusLease(current, { render: false });
+    if (activeComposerFocusLease?.kind === "side-chat") {
+      promoteSideChatFocusLease(current, { render: false });
+    }
     else {
       activateSideChatFocusLease({
         requestedAtMs: current.createdAtMs ?? Date.now(),
@@ -4360,19 +4456,19 @@ async function synchronizeCurrentCodexThread(options = {}) {
   // The renderer Micro snapshot is different: it identifies the composer
   // that actually owns input, and therefore outranks an older lease after a
   // direct in-app task click.
-  const leasedSideChat = activeSideChatFocusThread(currentThreadCandidatesForSync());
-  if (leasedSideChat && !shouldUseMicro) {
+  const leasedComposer = activeComposerFocusThread(currentThreadCandidatesForSync());
+  if (leasedComposer && !shouldUseMicro) {
     lastCurrentThreadSyncAtMs = nowMs;
-    if (!isProvisionalSideChatThread(leasedSideChat)
-        && primaryThreadId !== leasedSideChat.id) {
-      rememberVerifiedThread(leasedSideChat, {
+    if (!isProvisionalComposerThread(leasedComposer)
+        && primaryThreadId !== leasedComposer.id) {
+      rememberVerifiedThread(leasedComposer, {
         nowMs,
         promote: options.promote !== false,
         recordOpenedHint: false,
         refreshFastMode: false
       });
     }
-    return leasedSideChat;
+    return leasedComposer;
   }
   if (!options.force
       && nowMs - lastCurrentThreadSyncAtMs < CURRENT_THREAD_SYNC_CACHE_MS) {
@@ -4395,13 +4491,17 @@ async function synchronizeCurrentCodexThread(options = {}) {
         });
         if (microCurrent?.id) {
           lastCurrentThreadSyncAtMs = Date.now();
+          const retainedLease = activeComposerFocusThread(candidates);
+          if (retainedLease && isProvisionalComposerThread(retainedLease)) {
+            return retainedLease;
+          }
           return microCurrent;
         }
       }
-      const fallbackLease = activeSideChatFocusThread(candidates);
+      const fallbackLease = activeComposerFocusThread(candidates);
       if (fallbackLease) {
         lastCurrentThreadSyncAtMs = Date.now();
-        if (!isProvisionalSideChatThread(fallbackLease)
+        if (!isProvisionalComposerThread(fallbackLease)
             && primaryThreadId !== fallbackLease.id) {
           rememberVerifiedThread(fallbackLease, {
             nowMs,
@@ -4473,13 +4573,18 @@ async function threadIsCurrentInCodex(thread, options = {}) {
 }
 
 function threadBelongsToActiveSideChatFocus(thread) {
-  if (!activeSideChatFocusLease || !thread?.id) return false;
+  if (activeComposerFocusLease?.kind !== "side-chat" || !thread?.id) return false;
   const active = activeSideChatFocusThread([thread]);
   return active?.id === thread.id;
 }
 
+function threadBelongsToActiveComposerFocus(thread) {
+  if (!activeComposerFocusLease || !thread?.id) return false;
+  return activeComposerFocusThread([thread])?.id === thread.id;
+}
+
 async function focusCurrentComposer(context = null, options = {}) {
-  const command = activeSideChatFocusLease
+  const command = activeComposerFocusLease?.kind === "side-chat"
     ? "codex-focus-side-chat-composer"
     : options.restore
       ? "codex-restore-composer"
@@ -4490,8 +4595,8 @@ async function focusCurrentComposer(context = null, options = {}) {
 }
 
 async function currentControlThreadIsFocused(thread, options = {}) {
-  if (isProvisionalSideChatThread(thread)
-      && threadBelongsToActiveSideChatFocus(thread)) return true;
+  if (isProvisionalComposerThread(thread)
+      && threadBelongsToActiveComposerFocus(thread)) return true;
   return threadIsFocused(thread, options);
 }
 
@@ -4954,8 +5059,8 @@ function refreshFastMode(options = {}) {
       let microObserved = null;
       if (!options.stateProbe && options.useMicro !== false) {
         const snapshot = await codexControlPlane.refreshReadOnly({ quiet: true });
-        const provisionalCurrent = isProvisionalSideChatThread(thread)
-          && threadBelongsToActiveSideChatFocus(thread);
+        const provisionalCurrent = isProvisionalComposerThread(thread)
+          && threadBelongsToActiveComposerFocus(thread);
         if (snapshot
             && (snapshot.activeThreadKey === threadId || provisionalCurrent)
             && (typeof snapshot.fastEnabled === "boolean"
@@ -4975,8 +5080,8 @@ function refreshFastMode(options = {}) {
       // Current Task. Contract tests inject a state probe and exercise
       // the cache logic independently of the native identity guard.
       if (!options.stateProbe && !microObserved) {
-        if (activeSideChatFocusLease && !await focusCurrentComposer(null)) {
-          throw new Error("Codex Side Chat composer was not focused");
+        if (activeComposerFocusLease && !await focusCurrentComposer(null)) {
+          throw new Error("Codex composer was not focused");
         }
         if (!thread || !await currentControlThreadIsFocused(thread)) {
           throw new Error("Codex current task was not focused");
@@ -5101,7 +5206,7 @@ function toggleFastMode(context, options = {}) {
           return verifyAfterMicroDelivery(async () => {
             await sleepWithSignal(120);
             const snapshot = await bridge.refreshReadOnly();
-            if (!isProvisionalSideChatThread(thread)
+            if (!isProvisionalComposerThread(thread)
                 && snapshot.activeThreadKey !== threadId) {
               throw new Error("Fast mode changed outside the verified current task");
             }
@@ -5153,7 +5258,7 @@ function toggleFastMode(context, options = {}) {
     const focusTargetComposer = options.focusTargetComposer
       ?? (() => focusCurrentComposer(context));
     if (productionNativeAction
-        && activeSideChatFocusLease
+        && activeComposerFocusLease
         && !await focusTargetComposer()) {
       feedback(context, "error", "입력창 확인", 1600);
       return false;
@@ -5412,7 +5517,7 @@ function performReasoningEffortChange(context, options = {}) {
             return verifyAfterMicroDelivery(async () => {
               await sleepWithSignal(160);
               const snapshot = await bridge.refreshReadOnly();
-              if (!isProvisionalSideChatThread(thread)
+              if (!isProvisionalComposerThread(thread)
                   && snapshot.activeThreadKey !== threadId) {
                 throw new Error("Power selection changed outside the verified current task");
               }
@@ -5490,7 +5595,7 @@ function performReasoningEffortChange(context, options = {}) {
             return verifyAfterMicroDelivery(async () => {
               await sleepWithSignal(140);
               const snapshot = await bridge.refreshReadOnly();
-              if (!isProvisionalSideChatThread(thread)
+              if (!isProvisionalComposerThread(thread)
                   && snapshot.activeThreadKey !== threadId) {
                 throw new Error("Effort changed outside the verified current task");
               }
@@ -6246,6 +6351,141 @@ async function readUsage() {
 
 async function readGlobalStateSnapshot() {
   return JSON.parse(await fs.readFile(GLOBAL_STATE, "utf8"));
+}
+
+function localProjectsFromState(state) {
+  const projects = state?.["local-projects"];
+  return projects && typeof projects === "object" && !Array.isArray(projects)
+    ? projects
+    : {};
+}
+
+function threadProjectAssignmentFromState(state, threadId) {
+  const assignments = state?.["thread-project-assignments"];
+  const assignment = threadId && assignments && typeof assignments === "object"
+    ? assignments[threadId]
+    : null;
+  return assignment && typeof assignment === "object" ? assignment : null;
+}
+
+function pathBelongsToRoot(candidatePath, rootPath) {
+  if (!candidatePath || !rootPath) return false;
+  const relative = path.relative(path.resolve(rootPath), path.resolve(candidatePath));
+  return relative === "" || (!relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function projectForCwd(state, cwd) {
+  if (!cwd) return null;
+  for (const [projectId, project] of Object.entries(localProjectsFromState(state))) {
+    const roots = Array.isArray(project?.rootPaths) ? project.rootPaths : [];
+    if (roots.some((root) => pathBelongsToRoot(cwd, root))) {
+      return { projectId, project, roots };
+    }
+  }
+  return null;
+}
+
+function threadProjectContextFromState(thread, state) {
+  const leasedNewThread = activeNewThreadFocusThread();
+  if (isProvisionalNewThread(thread) && leasedNewThread) {
+    return activeComposerFocusLease?.projectContext ?? {
+      inProject: null,
+      projectId: null,
+      projectKind: null,
+      cwd: thread?.cwd ?? "",
+      rootPaths: []
+    };
+  }
+  const anchorId = thread?.ephemeral
+    ? thread.parentId ?? sideChatParentById.get(thread.id) ?? null
+    : thread?.id ?? null;
+  const assignment = threadProjectAssignmentFromState(state, anchorId);
+  if (assignment?.projectId) {
+    const project = localProjectsFromState(state)[assignment.projectId] ?? null;
+    return {
+      inProject: true,
+      projectId: assignment.projectId,
+      projectKind: assignment.projectKind ?? "local",
+      cwd: assignment.cwd ?? thread?.cwd ?? project?.rootPaths?.[0] ?? "",
+      rootPaths: Array.isArray(project?.rootPaths) ? [...project.rootPaths] : []
+    };
+  }
+  const projectlessIds = Array.isArray(state?.["projectless-thread-ids"])
+    ? state["projectless-thread-ids"]
+    : [];
+  if (anchorId && projectlessIds.includes(anchorId)) {
+    return {
+      inProject: false,
+      projectId: null,
+      projectKind: "projectless",
+      cwd: thread?.cwd ?? "",
+      rootPaths: []
+    };
+  }
+  const cwdProject = projectForCwd(state, thread?.cwd);
+  if (cwdProject) {
+    return {
+      inProject: true,
+      projectId: cwdProject.projectId,
+      projectKind: "local",
+      cwd: thread.cwd,
+      rootPaths: [...cwdProject.roots]
+    };
+  }
+  return {
+    inProject: null,
+    projectId: null,
+    projectKind: null,
+    cwd: thread?.cwd ?? "",
+    rootPaths: []
+  };
+}
+
+function threadMatchesProjectContext(thread, state, projectContext) {
+  if (!projectContext || projectContext.inProject === null) return true;
+  const assignment = threadProjectAssignmentFromState(state, thread?.id);
+  if (projectContext.inProject) {
+    if (assignment?.projectId) return assignment.projectId === projectContext.projectId;
+    return projectContext.rootPaths.some((root) => pathBelongsToRoot(thread?.cwd, root));
+  }
+  if (assignment?.projectId) return false;
+  const projectlessIds = Array.isArray(state?.["projectless-thread-ids"])
+    ? state["projectless-thread-ids"]
+    : [];
+  if (projectlessIds.includes(thread?.id)) return true;
+  // An empty cwd while Codex is still writing global state is ambiguous. Keep
+  // the placeholder instead of attaching it to a concurrently created project
+  // task; the next refresh can promote it once either source becomes explicit.
+  return Boolean(thread?.cwd) && !projectForCwd(state, thread.cwd);
+}
+
+async function resolvePendingNewThreadTarget(localRows, globalStatePromise) {
+  const lease = activeComposerFocusLease;
+  if (lease?.kind !== "new-thread" || lease.targetThreadId) return null;
+  let state = null;
+  try {
+    state = await globalStatePromise;
+  } catch {
+    return null;
+  }
+  const minimumCreatedAtMs = lease.requestedAtMs - 5000;
+  const candidates = localRows
+    .filter((thread) => !lease.knownIds?.has(thread.id))
+    .filter((thread) => {
+      const createdAtMs = uuidV7TimestampMs(thread.id);
+      return Number.isFinite(createdAtMs) && createdAtMs >= minimumCreatedAtMs;
+    })
+    .filter((thread) => threadMatchesProjectContext(thread, state, lease.projectContext))
+    .sort((left, right) => uuidV7TimestampMs(right.id) - uuidV7TimestampMs(left.id));
+  const thread = candidates[0] ?? null;
+  if (!thread) return null;
+  promoteNewThreadFocusLease(thread, { render: false });
+  bindPendingVoiceContextsToThread(thread.id);
+  runtimeTrace("new-thread-focus", {
+    result: "promoted",
+    scope: lease.projectContext?.inProject === true ? "project" : "standalone"
+  });
+  return thread;
 }
 
 async function readPinnedIds(globalStatePromise = readGlobalStateSnapshot()) {
@@ -7589,17 +7829,20 @@ function primaryFirstThreadRows(rows, candidates = rows, limit = THREAD_COUNT) {
 
 function rememberVerifiedThread(thread, options = {}) {
   if (!thread?.id) return false;
-  if (activeSideChatFocusLease?.targetThreadId === thread.id) {
-    activeSideChatFocusLease = {
-      ...activeSideChatFocusLease,
-      parentId: thread.parentId
-        ?? activeSideChatFocusLease.parentId
-        ?? sideChatParentById.get(thread.id)
-        ?? null,
+  if (activeComposerFocusLease?.targetThreadId === thread.id) {
+    activeComposerFocusLease = {
+      ...activeComposerFocusLease,
+      parentId: activeComposerFocusLease.kind === "side-chat"
+        ? thread.parentId
+          ?? activeComposerFocusLease.parentId
+          ?? sideChatParentById.get(thread.id)
+          ?? null
+        : null,
       thread: {
-        ...(activeSideChatFocusLease.thread ?? {}),
+        ...(activeComposerFocusLease.thread ?? {}),
         ...thread,
-        provisionalSideChat: false
+        provisionalSideChat: false,
+        provisionalNewThread: false
       }
     };
   }
@@ -7672,6 +7915,7 @@ async function readTopThreads() {
       ephemeral: false
     }))
     .filter((row) => !isInternalThreadRecord(row));
+  await resolvePendingNewThreadTarget(localRows, globalStatePromise);
   const sideChats = await readEphemeralSideChats(
     persistentIds,
     primaryThreadId ?? localRows[0]?.id ?? null,
@@ -7692,8 +7936,9 @@ async function readTopThreads() {
   for (const thread of sideChats) {
     if (sideChatLifecycles.get(thread.id)?.status !== "closed") continue;
     sideChatParentById.delete(thread.id);
-    if (activeSideChatFocusLease?.targetThreadId === thread.id) {
-      clearSideChatFocusLease({ render: false });
+    if (activeComposerFocusLease?.kind === "side-chat"
+        && activeComposerFocusLease.targetThreadId === thread.id) {
+      clearComposerFocusLease({ render: false });
     }
   }
   const selection = selectTopThreadRows(localRows, normalizedRemoteRows, openSideChats, pinnedIds);
@@ -7724,11 +7969,11 @@ async function readTopThreads() {
   );
   currentThreadIdentityCandidates = currentCandidates;
   const detectedCurrentThread = await verifiedCurrentCodexThread(queueWindows, currentCandidates);
-  const leasedCurrentThread = activeSideChatFocusThread(currentCandidates);
+  const leasedCurrentThread = activeComposerFocusThread(currentCandidates);
   const currentThread = leasedCurrentThread ?? detectedCurrentThread;
   lastCurrentThreadSyncAtMs = Date.now();
   if (currentThread
-      && !isProvisionalSideChatThread(currentThread)
+      && !isProvisionalComposerThread(currentThread)
       && unreadCompletionByThreadId.has(currentThread.id)) {
     // `codex-current-thread` can describe Codex's internal selection while the
     // app is behind another window. Only a strict frontmost match proves the
@@ -7737,7 +7982,7 @@ async function readTopThreads() {
     if (completionWasViewed) acknowledgeCompletion(currentThread.id, { render: false });
   }
   if (currentThread
-      && !isProvisionalSideChatThread(currentThread)
+      && !isProvisionalComposerThread(currentThread)
       && currentThread.id !== primaryThreadId) {
     rememberVerifiedThread(currentThread, {
       promote: false,
@@ -7816,7 +8061,7 @@ async function readTopThreads() {
   // while returning the ranked list without promotion.
   primaryFirstThreadRows(goalThreads, goalThreads, THREAD_COUNT + 1);
   const goalById = new Map(goalThreads.map((thread) => [thread.id, thread]));
-  const leasedHydratedThread = activeSideChatFocusThread(goalThreads);
+  const leasedHydratedThread = activeComposerFocusThread(goalThreads);
   return {
     threads: rankedThreadIds.map((id) => goalById.get(id)).filter(Boolean),
     currentThread: leasedHydratedThread
@@ -8229,7 +8474,7 @@ async function refreshThreads(feedbackContext, options = {}) {
         );
         if (!Array.isArray(snapshot)
             && snapshot?.currentThread?.id
-            && !isProvisionalSideChatThread(snapshot.currentThread)) {
+            && !isProvisionalComposerThread(snapshot.currentThread)) {
           // The returned current row is authoritative and fully hydrated. Do
           // not rely on a reader's incidental global mutation: custom readers,
           // a cold plugin process, and a fast willAppear sequence all need the
@@ -8274,7 +8519,7 @@ async function refreshThreads(feedbackContext, options = {}) {
           renderStaticContexts();
         }
         if (composerInputIsIdle
-            && !isProvisionalSideChatThread(composerThread)
+            && !isProvisionalComposerThread(composerThread)
             && composerStateNeedsRefreshForThread(controlThreadId, fastModeState)) {
           void refreshFastMode({ quiet: true, preserveConfirmedOnUnavailable: true });
         }
@@ -8708,7 +8953,7 @@ async function openThread(context, slot, options = {}) {
           return false;
         }
         acknowledge(thread.id, { render: false });
-        clearSideChatFocusLease({ render: false });
+        clearComposerFocusLease({ render: false });
         remember(thread, { refreshFastMode: false });
         applyMicroReadOnlySnapshot(microResult.value, { promote: true });
         feedback(context, "success", thread.remote ? "원격 전환" : "전환 완료");
@@ -8731,7 +8976,7 @@ async function openThread(context, slot, options = {}) {
     if (thread.remote) {
       await remoteNavigation(thread, slot);
       acknowledge(thread.id, { render: false });
-      clearSideChatFocusLease({ render: false });
+      clearComposerFocusLease({ render: false });
       remember(thread);
       if (!await focusThreadComposer()) {
         throw new Error("Codex thread composer was not focused");
@@ -8743,7 +8988,7 @@ async function openThread(context, slot, options = {}) {
     }
     await deepLinkNavigation(thread, slot);
     acknowledge(thread.id, { render: false });
-    clearSideChatFocusLease({ render: false });
+    clearComposerFocusLease({ render: false });
     remember(thread);
     if (!await focusThreadComposer()) {
       throw new Error("Codex thread composer was not focused");
@@ -8874,31 +9119,90 @@ async function openNewThread(context, options = {}) {
     }));
   const sleep = options.sleep ?? sleepWithSignal;
   const bridge = options.bridge ?? ((command, bridgeContext) => runKeyBridgeSync(command, bridgeContext));
+  const synchronizeCurrent = options.synchronizeCurrent ?? synchronizeCurrentCodexThread;
+  const readGlobalState = options.readGlobalState ?? readGlobalStateSnapshot;
+  const readKnownThreadIds = options.readKnownThreadIds ?? readPersistentThreadIds;
+  const scheduleRefreshes = options.scheduleRefreshes
+    ?? ((requestedAtMs) => {
+      for (const delayMs of SIDE_CHAT_TARGET_REFRESH_DELAYS_MS) {
+        setTimeout(() => {
+          if (activeComposerFocusLease?.kind !== "new-thread"
+              || activeComposerFocusLease.requestedAtMs !== requestedAtMs
+              || activeComposerFocusLease.targetThreadId) return;
+          void refreshThreads();
+        }, delayMs);
+      }
+    });
   const createNewTask = options.createNewTask
-    ?? (options.bridge
-      ? async () => bridge("new-thread", context)
-      : async () => {
-        const result = await codexControlPlane.execute("new-task", {
-          micro: (micro) => micro.newTask(),
-          legacy: () => bridge("new-thread", context)
-        }, { quiet: true });
-        runtimeTrace("control-plane", {
-          strategy: result.backend,
-          result: result.ok ? "success" : "failed"
-        });
-        return result.ok;
+    ?? (async (projectContext) => {
+      const fallbackCommand = projectContext?.inProject === false
+        ? "new-thread"
+        : "new-project-thread";
+      if (options.bridge || projectContext?.inProject === false) {
+        return bridge(fallbackCommand, context);
+      }
+      const result = await codexControlPlane.execute("new-task", {
+        micro: (micro) => micro.newTask(),
+        legacy: () => bridge(fallbackCommand, context)
+      }, { quiet: true });
+      runtimeTrace("control-plane", {
+        strategy: result.backend,
+        result: result.ok ? "success" : "failed"
       });
-  return beginComposerCreation("new-thread", async (signal) => {
+      return result.ok;
+    });
+  return beginComposerCreation("new-thread", async (signal, creation) => {
     try {
       pendingSideChatTarget = null;
+      const requestedAtMs = options.nowMs ?? Date.now();
+      creation.requestedAtMs = requestedAtMs;
+      const currentThread = await synchronizeCurrent({
+        force: true,
+        quiet: true,
+        signal,
+        refreshFastMode: false
+      });
+      throwIfAborted(signal);
+      let globalState = {};
+      try {
+        globalState = await readGlobalState();
+      } catch {
+        // The state file is atomically rewritten by Codex. An unknown scope
+        // still uses the native context-aware New Chat command below.
+      }
+      const projectContext = options.projectContext
+        ?? threadProjectContextFromState(currentThread, globalState);
+      let knownIds = new Set();
+      try {
+        knownIds = await readKnownThreadIds();
+      } catch {
+        knownIds = new Set(currentThreadIdentityCandidates.map((thread) => thread?.id).filter(Boolean));
+      }
       lastOpenedThreadId = null;
       lastOpenedThreadAtMs = null;
       await openApp(signal);
       throwIfAborted(signal);
       await sleep(350, signal);
       throwIfAborted(signal);
-      if (!await createNewTask()) return false;
-      clearSideChatFocusLease();
+      if (!await createNewTask(projectContext)) return false;
+      clearComposerFocusLease({ render: false });
+      activateNewThreadFocusLease({
+        requestedAtMs,
+        sourceThreadId: currentThread?.id ?? primaryThreadId ?? null,
+        sourceThread: currentThread,
+        projectContext,
+        knownIds
+      });
+      creation.markComposerReady({ requestedAtMs });
+      scheduleRefreshes(requestedAtMs);
+      runtimeTrace("new-thread-focus", {
+        result: "provisional",
+        scope: projectContext?.inProject === true
+          ? "project"
+          : projectContext?.inProject === false
+            ? "standalone"
+            : "native-context"
+      });
       return true;
     } catch (error) {
       if (isAbortError(error)) {
@@ -8968,7 +9272,11 @@ async function openSideChat(context, options = {}) {
       throwIfAborted(signal);
       if (!await createSideChat()) return false;
       const parentId = currentThread?.ephemeral
-        ? currentThread.parentId ?? activeSideChatFocusLease?.parentId ?? null
+        ? currentThread.parentId
+          ?? (activeComposerFocusLease?.kind === "side-chat"
+            ? activeComposerFocusLease.parentId
+            : null)
+          ?? null
         : currentThread?.id ?? primaryThreadId ?? null;
       pendingSideChatTarget = {
         requestedAtMs,
@@ -11300,7 +11608,7 @@ async function verifyVoiceSubmissionPolicy() {
 }
 
 async function verifyInteractionPolicy() {
-  activeSideChatFocusLease = null;
+  activeComposerFocusLease = null;
   const fastStatuses = ["working", "stopped", "idle", "error"];
   const activity = { kind: "think", label: "생각 중" };
   const fastBadgeNonCompletedStates = fastStatuses.every((status) => threadHeader(
@@ -13198,6 +13506,10 @@ async function verifyInteractionPolicy() {
   activeFastModeUpdate = null;
   resolveNewThreadLease(true);
   const newThreadOpened = await deferredNewThread;
+  // This scenario only verifies creation actions waiting behind Fast mode.
+  // Do not let its intentionally provisional New Task composer become the
+  // parent of the independent Side Chat scenario below.
+  clearComposerFocusLease({ render: false });
 
   let resolveSideChatLease;
   const sideChatLease = new Promise((resolve) => { resolveSideChatLease = resolve; });
@@ -13232,6 +13544,101 @@ async function verifyInteractionPolicy() {
     && sideChatOpened
     && sideChatMutations === 4;
   pendingSideChatTarget = null;
+
+  clearComposerFocusLease({ render: false });
+  const projectRoot = "/tmp/threaddeck-project";
+  const promotedProjectThreadId = "00000000-0898-7000-8000-000000000043";
+  const projectState = {
+    "local-projects": {
+      "threaddeck-project": {
+        id: "threaddeck-project",
+        rootPaths: [projectRoot]
+      }
+    },
+    "thread-project-assignments": {
+      [localThreadA.id]: {
+        projectKind: "local",
+        projectId: "threaddeck-project",
+        cwd: projectRoot
+      },
+      [promotedProjectThreadId]: {
+        projectKind: "local",
+        projectId: "threaddeck-project",
+        cwd: projectRoot
+      }
+    },
+    "projectless-thread-ids": [localThreadB.id]
+  };
+  const knownNewThreadIds = new Set([
+    localThreadA.id,
+    localThreadB.id,
+    localThreadC.id
+  ]);
+  const projectNewThreadCommands = [];
+  const projectNewThreadOpened = await openNewThread("interaction-project-new-thread", {
+    nowMs: 2_000,
+    synchronizeCurrent: async () => ({ ...localThreadA, cwd: projectRoot }),
+    readGlobalState: async () => projectState,
+    readKnownThreadIds: async () => knownNewThreadIds,
+    openApp: async () => {},
+    sleep: async () => {},
+    bridge: (command) => {
+      projectNewThreadCommands.push(command);
+      return true;
+    },
+    scheduleRefreshes: () => {}
+  });
+  const projectNewThreadPlaceholder = currentThreadForDisplay();
+  const projectNewThreadKeepsScope = projectNewThreadOpened
+    && projectNewThreadCommands.join(",") === "new-project-thread"
+    && isProvisionalNewThread(projectNewThreadPlaceholder)
+    && currentControlThreadId() === projectNewThreadPlaceholder?.id
+    && activeComposerFocusLease?.projectContext?.inProject === true
+    && activeComposerFocusLease?.projectContext?.projectId === "threaddeck-project";
+  const promotedProjectThread = {
+    id: promotedProjectThreadId,
+    title: "프로젝트 새 작업",
+    cwd: projectRoot,
+    status: "idle",
+    recency_at: 2.2
+  };
+  const resolvedProjectThread = await resolvePendingNewThreadTarget(
+    [promotedProjectThread],
+    Promise.resolve(projectState)
+  );
+  const projectNewThreadPromotesMatchingTask = resolvedProjectThread?.id
+      === promotedProjectThreadId
+    && currentControlThreadId() === promotedProjectThreadId
+    && !isProvisionalNewThread(currentThreadForDisplay());
+  const manualSwitchRevokesNewThreadPlaceholder = revokeComposerFocusForRendererCurrent(
+    localThreadB.id,
+    { render: false }
+  ) && activeComposerFocusLease === null;
+
+  const standaloneNewThreadCommands = [];
+  const standaloneNewThreadOpened = await openNewThread(
+    "interaction-standalone-new-thread",
+    {
+      nowMs: 3_000,
+      synchronizeCurrent: async () => localThreadB,
+      readGlobalState: async () => projectState,
+      readKnownThreadIds: async () => knownNewThreadIds,
+      openApp: async () => {},
+      sleep: async () => {},
+      bridge: (command) => {
+        standaloneNewThreadCommands.push(command);
+        return true;
+      },
+      scheduleRefreshes: () => {}
+    }
+  );
+  const standaloneNewThreadPlaceholder = currentThreadForDisplay();
+  const standaloneNewThreadKeepsScope = standaloneNewThreadOpened
+    && standaloneNewThreadCommands.join(",") === "new-thread"
+    && isProvisionalNewThread(standaloneNewThreadPlaceholder)
+    && currentControlThreadId() === standaloneNewThreadPlaceholder?.id
+    && activeComposerFocusLease?.projectContext?.inProject === false;
+  clearComposerFocusLease({ render: false });
 
   const focusedSideChatThread = {
     id: "00000000-0000-7000-8000-000000000034",
@@ -13503,7 +13910,7 @@ async function verifyInteractionPolicy() {
       navigateSideChat: async () => true,
       focusSideChatComposer: async () => {
         listedSideChatFinalFocuses += 1;
-        return activeSideChatFocusLease?.targetThreadId === focusedSideChatThread.id;
+        return activeComposerFocusLease?.targetThreadId === focusedSideChatThread.id;
       },
       rememberThread: (thread) => {
         primaryThreadId = thread.id;
@@ -13517,7 +13924,7 @@ async function verifyInteractionPolicy() {
   );
   const listedSideChatKeyFocusesComposer = listedSideChatOpenResult
     && listedSideChatFinalFocuses === 1
-    && activeSideChatFocusLease?.targetThreadId === focusedSideChatThread.id
+    && activeComposerFocusLease?.targetThreadId === focusedSideChatThread.id
     && primaryThreadId === focusedSideChatThread.id;
 
   let explicitTaskComposerFocuses = 0;
@@ -13530,7 +13937,7 @@ async function verifyInteractionPolicy() {
       navigateDeepLink: async () => true,
       focusThreadComposer: async () => {
         explicitTaskComposerFocuses += 1;
-        return activeSideChatFocusLease === null;
+        return activeComposerFocusLease === null;
       },
       rememberThread: (thread) => {
         primaryThreadId = thread.id;
@@ -13542,7 +13949,7 @@ async function verifyInteractionPolicy() {
     }
   );
   const explicitTaskSwitchClearsSideChatPlaceholder = explicitSwitchResult
-    && activeSideChatFocusLease === null
+    && activeComposerFocusLease === null
     && primaryThreadId === localThreadA.id
     && explicitTaskComposerFocuses === 1;
 
@@ -13582,13 +13989,13 @@ async function verifyInteractionPolicy() {
   const rendererSelectionRevokesSideChatLease = rendererSelectedCurrent?.id === localThreadA.id
     && primaryThreadId === localThreadA.id
     && currentControlThreadId() === localThreadA.id
-    && activeSideChatFocusLease === null
+    && activeComposerFocusLease === null
     && pendingSideChatTarget === null
     && manualOverrideController.signal.aborted
     && manualOverrideComposerReadyCleared;
   activeComposerCreation = null;
 
-  clearSideChatFocusLease({ render: false });
+  clearComposerFocusLease({ render: false });
   primaryThreadId = localThreadB.id;
   primaryThreadRow = localThreadB;
   threadSlots = [localThreadB, localThreadA, localThreadC, ...Array(THREAD_COUNT - 3).fill(null)];
@@ -13830,6 +14237,10 @@ async function verifyInteractionPolicy() {
     && navigationWaitsForFastToggle
     && composerCreatingActionsWaitForFastToggle
     && sideChatUsesCurrentParent
+    && projectNewThreadKeepsScope
+    && projectNewThreadPromotesMatchingTask
+    && manualSwitchRevokesNewThreadPlaceholder
+    && standaloneNewThreadKeepsScope
     && sideChatVoiceUsesProvisionalComposer
     && sideChatReasoningUsesFocusedTask
     && sideChatFocusPersistsAcrossControls
@@ -13923,6 +14334,10 @@ async function verifyInteractionPolicy() {
     navigationWaitsForFastToggle,
     composerCreatingActionsWaitForFastToggle,
     sideChatUsesCurrentParent,
+    projectNewThreadKeepsScope,
+    projectNewThreadPromotesMatchingTask,
+    manualSwitchRevokesNewThreadPlaceholder,
+    standaloneNewThreadKeepsScope,
     sideChatVoiceUsesProvisionalComposer,
     sideChatReasoningUsesFocusedTask,
     sideChatFocusPersistsAcrossControls,
@@ -13944,7 +14359,7 @@ async function verifyInteractionPolicy() {
   activeDeepLinkNavigation = null;
   activeComposerCreation?.controller.abort();
   activeComposerCreation = null;
-  activeSideChatFocusLease = null;
+  activeComposerFocusLease = null;
   activeFastModeRefresh = null;
   activeFastModeUpdate = null;
   activeCurrentThreadSync = null;

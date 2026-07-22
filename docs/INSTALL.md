@@ -31,12 +31,13 @@ Apple silicon and Intel Macs use the same download. Each release also publishes
 | Codex function | Shortcut |
 |---|---:|
 | Start dictation | `Control+Shift+D` (`⌃⇧D`) |
-| New task outside a project | `Option+Command+O` (`⌥⌘O`) |
+| New task in the current project | `Shift+Command+O` (`⇧⌘O`) |
+| New standalone task | `Option+Command+O` (`⌥⌘O`) |
 | Open Side Chat | `Option+Command+S` (`⌥⌘S`) |
 
 7. Hold the microphone key, speak, and release. Codex may request microphone permission on first use.
 
-When the Micro bridge is connected, Effort, Fast mode, Side Chat, normal Send, New Task, push-to-talk, and six native task slots use Codex's own internal events. The shortcuts above remain important as a compatibility fallback. ThreadDeck's eight-card monitor, queues, goals, remote tasks, and non-Micro-slot navigation continue to use its existing read-only state and verified macOS adapter.
+When the Micro bridge is connected, Effort, Fast mode, Side Chat, normal Send, New Task, push-to-talk, and six native task slots use Codex's own internal events. New Task mirrors the Current Task scope: it stays in the same project or remains standalone. The shortcuts above remain important as a compatibility fallback. ThreadDeck's eight-card monitor, queues, goals, remote tasks, and non-Micro-slot navigation continue to use its existing read-only state and verified macOS adapter.
 
 ThreadDeck does not need Screen Recording or Full Disk Access. The optional quota key needs [CodexBar](https://github.com/steipete/CodexBar); every other key works without it.
 

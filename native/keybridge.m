@@ -1539,6 +1539,17 @@ static void new_thread(void) {
   post_key(KEY_COMMAND, false, 0);
 }
 
+static void new_project_thread(void) {
+  // Codex distinguishes context-aware New Chat (Command+Shift+O) from New
+  // standalone chat (Command+Option+O). The former preserves the project of
+  // the currently selected task.
+  post_key(KEY_COMMAND, true, kCGEventFlagMaskCommand);
+  post_key(KEY_SHIFT, true, kCGEventFlagMaskCommand | kCGEventFlagMaskShift);
+  tap_key(KEY_O, kCGEventFlagMaskCommand | kCGEventFlagMaskShift);
+  post_key(KEY_SHIFT, false, kCGEventFlagMaskCommand);
+  post_key(KEY_COMMAND, false, 0);
+}
+
 static void side_chat(void) {
   post_key(KEY_COMMAND, true, kCGEventFlagMaskCommand);
   post_key(KEY_OPTION, true, kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate);
@@ -2094,6 +2105,7 @@ static bool command_needs_post_event_access(const char *command) {
     || strcmp(command, "send-command") == 0
     || strcmp(command, "app-switch") == 0
     || strcmp(command, "new-thread") == 0
+    || strcmp(command, "new-project-thread") == 0
     || strcmp(command, "side-chat") == 0
     || strcmp(command, "media-previous") == 0
     || strcmp(command, "media-rewind") == 0
@@ -9388,6 +9400,7 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "send-command") == 0) command_return();
   else if (strcmp(argv[1], "app-switch") == 0) app_switch();
   else if (strcmp(argv[1], "new-thread") == 0) new_thread();
+  else if (strcmp(argv[1], "new-project-thread") == 0) new_project_thread();
   else if (strcmp(argv[1], "side-chat") == 0) side_chat();
   else if (strcmp(argv[1], "media-previous") == 0) tap_media_key(MEDIA_PREVIOUS);
   else if (strcmp(argv[1], "media-rewind") == 0) tap_media_key(MEDIA_REWIND);
