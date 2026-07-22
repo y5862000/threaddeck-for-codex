@@ -6,12 +6,7 @@ on:
       - main
     paths:
       - package.json
-      - pnpm-lock.yaml
-      - .github/workflows/release.yml
-      - scripts/**
-      - src/**
-      - native/**
-      - com.yechan.threaddeck.sdPlugin/**
+  workflow_dispatch:
 
 permissions:
   contents: write
@@ -25,6 +20,24 @@ jobs:
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v7
+      - name: Resolve release metadata
+        id: metadata
+        shell: bash
+        run: |
+          version="$(node -p "require('./package.json').version")"
+          echo "version=${version}" >> "$GITHUB_OUTPUT"
+          echo "tag=v${version}-beta" >> "$GITHUB_OUTPUT"
+      - name: Refuse an existing release version
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
+        shell: bash
+        run: |
+          if git ls-remote --exit-code --tags origin "refs/tags/${RELEASE_TAG}" >/dev/null 2>&1 \
+            || gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "::error::${RELEASE_TAG} already exists. Bump package.json before publishing another beta."
+            exit 1
+          fi
       - uses: pnpm/action-setup@v6
         with:
           version: 10.15.1
@@ -39,14 +52,7 @@ jobs:
           pnpm run audit
           pnpm run check
           pnpm run pack:artifact
-      - name: Resolve release metadata
-        id: metadata
-        shell: bash
-        run: |
-          version="$(node -p "require('./package.json').version")"
-          echo "version=${version}" >> "$GITHUB_OUTPUT"
-          echo "tag=v${version}-beta" >> "$GITHUB_OUTPUT"
-      - name: Publish Stream Deck pre-release
+      - name: Publish Stream Deck beta as the latest release
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ steps.metadata.outputs.tag }}
@@ -69,16 +75,8 @@ jobs:
             echo "SHA-256: \`${checksum}\`"
           } > "$notes_file"
 
-          if gh release view "$RELEASE_TAG" >/dev/null 2>&1; then
-            gh release edit "$RELEASE_TAG" \
-              --title "ThreadDeck ${RELEASE_VERSION} beta" \
-              --notes-file "$notes_file" \
-              --prerelease
-            gh release upload "$RELEASE_TAG" "$artifact" "$checksum_file" --clobber
-          else
-            gh release create "$RELEASE_TAG" "$artifact" "$checksum_file" \
-              --target "$GITHUB_SHA" \
-              --title "ThreadDeck ${RELEASE_VERSION} beta" \
-              --notes-file "$notes_file" \
-              --prerelease
-          fi
+          gh release create "$RELEASE_TAG" "$artifact" "$checksum_file" \
+            --target "$GITHUB_SHA" \
+            --title "ThreadDeck ${RELEASE_VERSION} beta" \
+            --notes-file "$notes_file" \
+            --latest

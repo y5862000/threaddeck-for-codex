@@ -3,6 +3,7 @@ import path from "node:path";
 
 const root = path.resolve(import.meta.dirname, "..");
 const pluginDirectory = path.join(root, "com.yechan.threaddeck.sdPlugin");
+const packagePath = path.join(root, "package.json");
 const manifestPath = path.join(pluginDirectory, "manifest.json");
 const englishPath = path.join(pluginDirectory, "en.json");
 const koreanPath = path.join(pluginDirectory, "ko.json");
@@ -80,6 +81,10 @@ function serialized(value) {
 }
 
 const manifest = readJson(manifestPath);
+const packageVersion = readJson(packagePath).version;
+if (!/^\d+\.\d+\.\d+$/.test(packageVersion)) {
+  throw new Error(`Unsupported package version for Stream Deck manifest: ${packageVersion}`);
+}
 const existingKorean = fs.existsSync(koreanPath) ? readJson(koreanPath) : localeFromManifest(manifest);
 const korean = {
   ...existingKorean,
@@ -99,6 +104,7 @@ for (const action of manifest.Actions) {
 manifest.Name = ROOT_COPY.en.Name;
 manifest.Description = ROOT_COPY.en.Description;
 manifest.SupportURL = "https://github.com/y5862000/threaddeck-for-codex/blob/main/docs/TROUBLESHOOTING.md";
+manifest.Version = `${packageVersion}.0`;
 
 const expected = new Map([
   [manifestPath, serialized(manifest)],

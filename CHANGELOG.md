@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+## 0.5.4-beta — 2026-07-22
+
+- Published the beta as GitHub's visible latest release while retaining the `-beta` tag and title, made the release workflow reject an existing version instead of silently overwriting its tag or assets, and synchronized the Stream Deck manifest version from `package.json` during every build.
 - Flattened the Fast bolt from a nested SVG viewport into a single transformed path for the physical Stream Deck renderer, which was showing particles but silently dropping the glyph. The visible bolt is also shifted 2 px lower to align its optical center with the Effort label.
 - Switched an already listed Side Chat through its exact renderer UUID before focusing the composer. This avoids stale title-based verification and keeps semantic Side Chat misses local to that key instead of raising a deck-wide input-permission warning.
 - Added a 720 ms eased release when an unread-completion pulse is acknowledged, so the selected task settles back to its resting card instead of losing the green highlight in one frame.

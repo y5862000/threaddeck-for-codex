@@ -12,7 +12,7 @@
 </p>
 
 <p align="center">
-  <a href="https://github.com/y5862000/threaddeck-for-codex/releases"><img alt="최신 릴리스" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
+  <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest"><img alt="최신 릴리스" src="https://img.shields.io/github/v/release/y5862000/threaddeck-for-codex?include_prereleases&style=flat-square"></a>
   <a href="https://github.com/y5862000/threaddeck-for-codex/actions/workflows/ci.yml"><img alt="CI 상태" src="https://img.shields.io/github/actions/workflow/status/y5862000/threaddeck-for-codex/ci.yml?style=flat-square&label=build"></a>
   <a href="LICENSE"><img alt="MIT 라이선스" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
   <img alt="베타" src="https://img.shields.io/badge/status-beta-F5A524?style=flat-square">
@@ -20,7 +20,7 @@
   <img alt="Stream Deck Neo" src="https://img.shields.io/badge/device-Stream%20Deck%20Neo-111111?style=flat-square">
 </p>
 
-<p align="center"><a href="README.md">English (기본)</a> · <strong>한국어</strong> · <a href="docs/INSTALL.ko.md">설치</a> · <a href="#길게-누르면-달라지는-버튼">제스처</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases">다운로드</a></p>
+<p align="center"><a href="README.md">English (기본)</a> · <strong>한국어</strong> · <a href="docs/INSTALL.ko.md">설치</a> · <a href="#길게-누르면-달라지는-버튼">제스처</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">다운로드</a></p>
 
 ThreadDeck은 Stream Deck Neo를 Codex의 물리 작업 모니터이자 컨트롤러로 바꿉니다. [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator)가 보여준 소형 하드웨어 에이전트 흐름에서 영감을 받았고, 이제 연결 가능한 경우 Codex 자체 Micro 렌더러 이벤트를 우선 사용합니다. 독립적인 8개 작업 모니터·렌더러·검증형 macOS 어댑터는 그대로 유지하므로 Micro 연결이 없거나 바뀐 Codex에서도 안전하게 기존 방식으로 폴백합니다.
 
