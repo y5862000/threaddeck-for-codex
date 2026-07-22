@@ -22,6 +22,8 @@
 
 <p align="center"><strong>English (default)</strong> · <a href="docs/README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
 
+<p align="center"><strong>Try ThreadDeck before installing:</strong> <a href="https://threaddeck.dev/">open the interactive web demo →</a></p>
+
 ThreadDeck turns a Stream Deck into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 
 The overview and gesture demos are generated from the plugin's real SVG key renderer with sanitized example tasks. English is the default documentation and release language; the same plugin automatically switches its action names and key UI to Korean when Stream Deck uses Korean. No separate language build is required.

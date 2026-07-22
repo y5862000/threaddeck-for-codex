@@ -22,6 +22,8 @@
 
 <p align="center"><a href="../README.md">English (기본)</a> · <strong>한국어</strong> · <a href="https://threaddeck.dev/">웹사이트</a> · <a href="INSTALL.ko.md">설치</a> · <a href="#길게-누르면-달라지는-버튼">제스처</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">다운로드</a></p>
 
+<p align="center"><strong>설치 전에 ThreadDeck을 직접 체험해 보세요:</strong> <a href="https://threaddeck.dev/">인터랙티브 웹 데모 열기 →</a></p>
+
 ThreadDeck은 Stream Deck을 Codex의 물리 작업 모니터이자 컨트롤러로 바꿉니다. [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator)가 보여준 소형 하드웨어 에이전트 흐름에서 영감을 받았고, 이제 연결 가능한 경우 Codex 자체 Micro 렌더러 이벤트를 우선 사용합니다. 독립적인 8개 작업 모니터·렌더러·검증형 macOS 어댑터는 그대로 유지하므로 Micro 연결이 없거나 바뀐 Codex에서도 안전하게 기존 방식으로 폴백합니다.
 
 기능 개요와 제스처 GIF는 개인정보 없는 예시 작업을 사용해 실제 SVG 버튼 렌더러에서 생성합니다. Reddit과 해외 커뮤니티 공유를 위해 저장소 미디어는 영어를 기본으로 만들고, 같은 플러그인은 Stream Deck 앱 언어가 한국어일 때 액션 이름과 버튼 UI를 자동으로 한국어로 바꿉니다. 별도 한국어 설치 파일은 없습니다.
