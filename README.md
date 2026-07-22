@@ -4,7 +4,7 @@
 
 <h1 align="center">ThreadDeck for Codex</h1>
 
-<p align="center"><strong>An open-source Codex Stream Deck plugin for Stream Deck Neo.</strong></p>
+<p align="center"><strong>An open-source physical dashboard for Codex on Stream Deck.</strong></p>
 
 <p align="center">
   Monitor live Codex Desktop tasks, switch local or remote work, control Effort and Fast mode,<br>
@@ -17,12 +17,12 @@
   <a href="LICENSE"><img alt="MIT license" src="https://img.shields.io/badge/license-MIT-10A37F?style=flat-square"></a>
   <img alt="Beta" src="https://img.shields.io/badge/status-beta-F5A524?style=flat-square">
   <img alt="macOS 13 or later" src="https://img.shields.io/badge/macOS-13%2B-111111?style=flat-square">
-  <img alt="Stream Deck Neo" src="https://img.shields.io/badge/device-Stream%20Deck%20Neo-111111?style=flat-square">
+  <img alt="Stream Deck" src="https://img.shields.io/badge/device-Stream%20Deck-111111?style=flat-square">
 </p>
 
 <p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
 
-ThreadDeck turns Elgato Stream Deck Neo into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
+ThreadDeck turns a Stream Deck into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 
 The overview and gesture demos are generated from the plugin's real SVG key renderer with sanitized example tasks. English is the default documentation and release language; the same plugin automatically switches its action names and key UI to Korean when Stream Deck uses Korean. No separate language build is required.
 
@@ -60,7 +60,7 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 3. Quit and reopen Codex once. ThreadDeck preserves the Codex session that was already open during installation; after your next normal launch it may relaunch Codex one time to attach a random `127.0.0.1` renderer bridge.
 4. Confirm the three Codex shortcuts below so the legacy fallback remains available, then test the microphone key.
 
-The package contains the editable Neo profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
+The package contains an editable ready-to-use profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
 
 | Codex function | Legacy fallback shortcut | Used by |
 |---|---:|---|
@@ -148,9 +148,9 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 </details>
 
-## Included Neo profile
+## Included profile
 
-The bundled profile has three pages and can be rearranged in Stream Deck:
+The bundled Stream Deck Neo profile has three pages and can be rearranged in Stream Deck:
 
 1. **Dashboard** — quota, New Task, Side Chat, and Send on the top row; Current Task, combined reasoning/Fast, microphone, and back navigation on the bottom row. The combined control occupies `1,1`, and Current Task remains at `0,1`. The dedicated Fast action remains available for custom layouts.
 2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current Task action are available in the action list for custom layouts.
