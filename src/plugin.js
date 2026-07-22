@@ -6113,6 +6113,14 @@ function goalBadgeSvg(thread) {
     </g>`;
 }
 
+function timingTextBaselineY(fontSize) {
+  // Keep the optical center fixed inside the 31 px timing capsule. A fixed
+  // baseline makes the compact goal+queue label sit too low as its font
+  // shrinks, because a smaller font needs less baseline offset from center.
+  const timingCapsuleCenterY = 117.5;
+  return Number((timingCapsuleCenterY + fontSize * 0.38).toFixed(2));
+}
+
 function threadTimingBarSvg(thread, completionEffect = null) {
   const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
   const hasGoalBadge = goalIsUnfinished(thread?.goal);
@@ -6123,16 +6131,17 @@ function threadTimingBarSvg(thread, completionEffect = null) {
   const timingFontSize = hasGoalBadge && queueCount > 0
     ? elapsedLabel.length >= 7 ? 13.5 : 16.5
     : hasGoalBadge && elapsedLabel.length >= 8 ? 18 : 21;
+  const timingBaselineY = timingTextBaselineY(timingFontSize);
   const completionStrength = completionEffect?.strength ?? 0;
   const completionChrome = completionEffect ? `
     <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.green}" fill-opacity="${(0.32 * completionStrength).toFixed(3)}" stroke="${THEME.green}" stroke-opacity="${(0.78 * completionStrength).toFixed(3)}" stroke-width="${(1 + completionStrength * 1.2).toFixed(2)}"/>` : "";
   const completionText = completionEffect ? `
-    <text x="${timingX}" y="125.5" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>` : "";
+    <text data-thread-timing="completion" x="${timingX}" y="${timingBaselineY}" fill="${THEME.text}" fill-opacity="${(0.82 * completionStrength).toFixed(3)}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="650" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>` : "";
   return `
     <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
     ${completionChrome}
     ${goalBadgeSvg(thread)}
-    <text x="${timingX}" y="125.5" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
+    <text data-thread-timing="base" x="${timingX}" y="${timingBaselineY}" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
     ${queueBadgeSvg(thread)}
     ${completionText}`;
 }
@@ -11331,6 +11340,24 @@ async function verifyInteractionPolicy() {
     && blockedGoalMarkup.includes(">02:05</text>");
   const completedGoalHidesBadgeButKeepsTotal = !completedGoalMarkup.includes("data-goal=")
     && completedGoalMarkup.includes(">02:05</text>");
+  const compactGoalQueueBaselineY = timingTextBaselineY(16.5);
+  const compactGoalQueueMarkup = threadTimingBarSvg({
+    ...goalThreadBase,
+    status: "working",
+    queueCount: 3,
+    goal: {
+      status: "active",
+      timeUsedSeconds: 37 * 60 + 15,
+      updatedAtMs: renderTimeMs()
+    }
+  }, { strength: 0.5 });
+  const compactGoalQueueTimingIsVerticallyCentered = compactGoalQueueBaselineY < 125.5
+    && compactGoalQueueMarkup.includes(
+      `data-thread-timing="base" x="58" y="${compactGoalQueueBaselineY}"`
+    )
+    && compactGoalQueueMarkup.includes(
+      `data-thread-timing="completion" x="58" y="${compactGoalQueueBaselineY}"`
+    );
   const completedGoalLifetimeFollowsTurn = !goalPredatesWorkingTurn(
     { status: "complete", updatedAtMs: 120_000 },
     { status: "working", startedAtMs: 90_000 }
@@ -13654,6 +13681,7 @@ async function verifyInteractionPolicy() {
     && activeGoalUsesOfficialBadge
     && blockedGoalBadgeAndTimeFreeze
     && completedGoalHidesBadgeButKeepsTotal
+    && compactGoalQueueTimingIsVerticallyCentered
     && completedGoalLifetimeFollowsTurn
     && remoteGoalProbeNeedsStableAbsence
     && unknownNewGoalDoesNotInheritCompletedTime
@@ -13744,6 +13772,7 @@ async function verifyInteractionPolicy() {
     activeGoalUsesOfficialBadge,
     blockedGoalBadgeAndTimeFreeze,
     completedGoalHidesBadgeButKeepsTotal,
+    compactGoalQueueTimingIsVerticallyCentered,
     completedGoalLifetimeFollowsTurn,
     remoteGoalProbeNeedsStableAbsence,
     unknownNewGoalDoesNotInheritCompletedTime,
