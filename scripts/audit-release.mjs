@@ -63,6 +63,57 @@ const profile = JSON.parse(fs.readFileSync(profileManifest, "utf8"));
 if (profile.Device?.UUID) failures.push("profile source still contains a hardware UUID");
 if (profile.Device?.Model !== "20GBJ9901") failures.push("profile source is not targeted at Stream Deck Neo");
 
+const expectedProfileActions = {
+  THREADDECK: {
+    "0,0": "com.yechan.threaddeck.weekly",
+    "1,0": "com.yechan.threaddeck.newthread",
+    "2,0": "com.yechan.threaddeck.sidechat",
+    "3,0": "com.yechan.threaddeck.send",
+    "0,1": "com.yechan.threaddeck.thread1",
+    "1,1": "com.yechan.threaddeck.reasoning",
+    "2,1": "com.yechan.threaddeck.voice",
+    "3,1": "com.yechan.threaddeck.page.previous"
+  },
+  THREADS: {
+    "0,0": "com.yechan.threaddeck.thread.top1",
+    "1,0": "com.yechan.threaddeck.thread2",
+    "2,0": "com.yechan.threaddeck.thread3",
+    "3,0": "com.yechan.threaddeck.thread4",
+    "0,1": "com.yechan.threaddeck.thread5",
+    "1,1": "com.yechan.threaddeck.thread6",
+    "2,1": "com.yechan.threaddeck.thread7",
+    "3,1": "com.yechan.threaddeck.page.previous"
+  },
+  MEDIA: {
+    "0,0": "com.yechan.threaddeck.media.previous",
+    "1,0": "com.yechan.threaddeck.media.rewind",
+    "2,0": "com.yechan.threaddeck.media.playpause",
+    "3,0": "com.elgato.streamdeck.system.openapp",
+    "0,1": "com.elgato.streamdeck.system.openapp",
+    "1,1": "com.elgato.streamdeck.system.openapp",
+    "2,1": "com.elgato.streamdeck.system.openapp",
+    "3,1": "com.yechan.threaddeck.page.previous"
+  }
+};
+const profilePagesRoot = path.join(path.dirname(profileManifest), "Profiles");
+const profilePages = fs.readdirSync(profilePagesRoot).map((entry) => {
+  const pageManifest = path.join(profilePagesRoot, entry, "manifest.json");
+  return JSON.parse(fs.readFileSync(pageManifest, "utf8"));
+});
+for (const [pageName, expectedActions] of Object.entries(expectedProfileActions)) {
+  const page = profilePages.find((candidate) => candidate.Name === pageName);
+  const actions = page?.Controllers?.find((controller) => controller.Type === "Keypad")?.Actions;
+  if (!actions) {
+    failures.push(`recommended profile is missing ${pageName}`);
+    continue;
+  }
+  for (const [coordinate, actionUuid] of Object.entries(expectedActions)) {
+    if (actions[coordinate]?.UUID !== actionUuid) {
+      failures.push(`recommended profile ${pageName} ${coordinate} is not ${actionUuid}`);
+    }
+  }
+}
+
 if (failures.length > 0) {
   console.error("Release audit failed:\n" + failures.map((failure) => `- ${failure}`).join("\n"));
   process.exit(1);

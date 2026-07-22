@@ -20,7 +20,7 @@
   <img alt="Stream Deck" src="https://img.shields.io/badge/device-Stream%20Deck-111111?style=flat-square">
 </p>
 
-<p align="center"><strong>English (default)</strong> · <a href="docs/README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
+<p align="center"><strong>English (default)</strong> · <a href="docs/README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="docs/PROFILE.md">Neo profile</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
 
 <p align="center"><strong>Try ThreadDeck before installing:</strong> <a href="https://threaddeck.dev/">open the interactive web demo →</a></p>
 
@@ -158,7 +158,9 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 ## Included profile
 
-The bundled Stream Deck Neo profile has three pages and can be rearranged in Stream Deck:
+<p align="center"><img src="docs/media/neo-preview.png" width="680" alt="Recommended ThreadDeck for Codex profile on Stream Deck Neo"></p>
+
+The bundled recommended Stream Deck Neo profile has three pages and can be rearranged in Stream Deck. Release builds also export a standalone recovery or manual-import copy; see the [visual layout and import guidance](docs/PROFILE.md).
 
 1. **Dashboard** — quota, New Task, Side Chat, and Send on the top row; Current Task, combined reasoning/Fast, microphone, and back navigation on the bottom row. The combined control occupies `1,1`, and Current Task remains at `0,1`. The dedicated Fast action remains available for custom layouts.
 2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current Task action are available in the action list for custom layouts.
@@ -259,6 +261,7 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 - [Related projects](docs/ALTERNATIVES.md) · [Korean](docs/ALTERNATIVES.ko.md)
 - [Contributing](.github/CONTRIBUTING.md) · [Korean](docs/CONTRIBUTING.ko.md)
 - [Support](.github/SUPPORT.md) · [Korean](docs/SUPPORT.ko.md)
+- [Recommended Neo profile](docs/PROFILE.md) · [Korean](docs/PROFILE.ko.md)
 - [Changelog](CHANGELOG.md) · [Korean](docs/CHANGELOG.ko.md)
 
 ## License and trademarks

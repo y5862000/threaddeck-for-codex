@@ -14891,6 +14891,19 @@ async function verifyInteractionPolicy() {
   activeCurrentThreadSync = null;
   currentThreadIdentityCandidates = [];
   lastCurrentThreadSyncAtMs = 0;
+  cancelVoiceReleaseRetry();
+  for (const state of currentVoicePressByContext.values()) {
+    if (state.timer) clearTimeout(state.timer);
+  }
+  for (const timer of voiceStartVerificationTimers.values()) clearTimeout(timer);
+  voiceStartVerificationTimers.clear();
+  for (const timer of sendLongPressTimers.values()) clearTimeout(timer);
+  sendLongPressTimers.clear();
+  sendPressStartedAt.clear();
+  sendLongPressArmedContexts.clear();
+  for (const state of threadPressByContext.values()) {
+    if (state.timer) clearTimeout(state.timer);
+  }
   threadPressByContext.clear();
   currentVoicePressByContext.clear();
   activeSendDispatchByContext.clear();
@@ -14990,10 +15003,12 @@ function runSelectedMode() {
       process.exitCode = 1;
     });
   } else if (interactionContractMode) {
-    verifyInteractionPolicy().catch((error) => {
-      console.error(error);
-      process.exitCode = 1;
-    });
+    verifyInteractionPolicy()
+      .then(() => process.exit(process.exitCode ?? 0))
+      .catch((error) => {
+        console.error(error);
+        process.exit(1);
+      });
   } else if (demoOutput || demoLightOutput || completedKeyOutput || demoAnimationDirectory || gestureAnimationDirectory) {
     if (gestureAnimationDirectory) renderGestureAnimations(gestureAnimationDirectory, "dark");
     else if (demoAnimationDirectory) renderDemoAnimation(demoAnimationDirectory, "dark");
