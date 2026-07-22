@@ -98,6 +98,12 @@ const { CodexControlPlane, verifyAfterMicroDelivery } = require("./control-plane
 const { CodexMicroBootstrap } = require("./micro-bootstrap");
 const { CodexMicroBridge, confirmedMicroThreadSnapshot } = require("./micro-cdp");
 const {
+  framePolicyForDevice,
+  normalizeDeviceInfo,
+  registrationDevices
+} = require("./device-frame-policy");
+const { createImageDeliveryQueue } = require("./image-delivery");
+const {
   applySideChatLogLine,
   createSideChatDiscoveryState,
   openDiscoveredSideChats
@@ -348,9 +354,16 @@ const runtimeTraceEnabled = !snapshotMode
   && !completedKeyOutput
   && !demoAnimationDirectory
   && !gestureAnimationDirectory;
+// A manual escape hatch keeps every control usable with manifest artwork if a
+// future Stream Deck release regresses dynamic-image handling. Normal runtime
+// delivery stays enabled and is bounded by the coalescing queue below.
+const liveImageDeliveryEnabled = process.env.THREADDECK_SAFE_DISPLAY !== "1";
 
 const contexts = new Map();
 const contextDeviceIds = new Map();
+const frameDeviceInfoById = new Map(
+  registrationDevices(registrationInfo).map((device) => [device.id, device])
+);
 const contextImages = new Map();
 const contextSentImages = new Map();
 const contextFeedback = new Map();
@@ -400,6 +413,40 @@ let reasoningCatalogAppServerStartedAtMs = null;
 const threadPressByContext = new Map();
 const currentVoicePressByContext = new Map();
 let socket = null;
+
+function updateFrameDeviceInfo(deviceId, deviceInfo) {
+  const normalized = normalizeDeviceInfo(deviceId, deviceInfo);
+  if (!normalized.id) return null;
+  frameDeviceInfoById.set(normalized.id, normalized);
+  return normalized;
+}
+
+function framePolicyForContext(context) {
+  const deviceId = contextDeviceIds.get(context) ?? "unknown-device";
+  return framePolicyForDevice(frameDeviceInfoById.get(deviceId), { deviceId });
+}
+
+const imageDeliveryQueue = createImageDeliveryQueue({
+  deliver: (context, svg) => sendImageImmediately(context, svg),
+  isOpen: () => socket?.readyState === WebSocket.OPEN,
+  bufferedAmount: () => Number(socket?.bufferedAmount) || 0,
+  // Each connected device has an independent lane. Neo uses the measured
+  // ceiling from the physical stress test; unmeasured devices start from a
+  // conservative type/size policy and slow further under socket pressure.
+  resolvePolicy: (context) => framePolicyForContext(context),
+  minContextIntervalMs: 100,
+  minGlobalIntervalMs: 34,
+  maxBufferedBytes: 16 * 1024,
+  backpressureRetryMs: 50,
+  maxSlowdownMultiplier: 4,
+  recoveryMs: 3_000,
+  onAdaptiveChange: ({ reason, slowdownMultiplier }) => {
+    runtimeTrace("image-delivery-adaptive", {
+      phase: reason,
+      result: `x${slowdownMultiplier.toFixed(2)}`
+    });
+  }
+});
 let activeUsageRefresh = null;
 let activeThreadRefresh = null;
 let activeAppearanceRefresh = null;
@@ -745,13 +792,27 @@ function setTitle(context, title) {
   send({ event: "setTitle", context, payload: { target: 0, title } });
 }
 
-function sendImage(context, svg) {
+function sendImageImmediately(context, svg) {
   if (socket?.readyState !== WebSocket.OPEN) return false;
   if (contextSentImages.get(context) === svg) return false;
+  if (runtimeTraceEnabled) {
+    if (!liveImageDeliveryEnabled) return false;
+  }
   const image = `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
   send({ event: "setImage", context, payload: { target: 0, image } });
   contextSentImages.set(context, svg);
   return true;
+}
+
+function sendImage(context, svg) {
+  // Snapshot/contract modes use a synchronous fake socket and need exact
+  // deterministic frames. Only a live Stream Deck connection is throttled.
+  if (!runtimeTraceEnabled) return sendImageImmediately(context, svg);
+  if (!liveImageDeliveryEnabled) return false;
+  // Always replace a queued frame, even when the newest desired frame equals
+  // the last one already displayed. Otherwise an older pending animation
+  // frame could be delivered after the visual state has returned to rest.
+  return imageDeliveryQueue.enqueue(context, svg);
 }
 
 function feedbackOverlaySvg(svg, feedback) {
@@ -8955,6 +9016,7 @@ function switchProfilePage(context, device, action, settings = {}) {
   if (!device) return false;
   const target = resolveProfilePageTarget(action, settings, visibleActionsForDevice(device));
   if (!target) {
+    runtimeTrace("page-navigation", { phase: "resolve", result: "failed" });
     showFeedback(context, "error", t("feedback.stateCheck"));
     console.warn("Could not identify the visible ThreadDeck profile page; navigation was not sent.");
     return false;
@@ -8972,6 +9034,10 @@ function switchProfilePage(context, device, action, settings = {}) {
     }
   };
   send(message);
+  runtimeTrace("page-navigation", {
+    phase: action === ACTIONS.pagePrevious ? "previous" : "next",
+    result: String(target.page)
+  });
   return true;
 }
 
@@ -8981,6 +9047,13 @@ function registerPlugin() {
 
   socket.addEventListener("open", () => {
     send({ event: registerEvent, uuid: pluginUUID });
+    for (const device of frameDeviceInfoById.values()) {
+      const policy = framePolicyForDevice(device, { deviceId: device.id });
+      runtimeTrace("image-delivery-policy", {
+        phase: "registered",
+        result: `${policy.profile}:${policy.aggregateFps}`
+      });
+    }
     // The watcher never launches Codex and preserves the Codex generation that
     // was already open when ThreadDeck first gained this backend. A later
     // normal Codex launch can be recovered once with a loopback-only bridge.
@@ -9002,6 +9075,10 @@ function registerPlugin() {
     void refreshUsage();
   });
 
+  socket.addEventListener("close", () => {
+    imageDeliveryQueue.clear();
+  });
+
   socket.addEventListener("message", async (event) => {
     let raw = event.data;
     if (typeof raw !== "string") {
@@ -9016,6 +9093,32 @@ function registerPlugin() {
       message = JSON.parse(raw);
     } catch {
       return;
+    }
+
+    if (message.event === "deviceDidConnect" || message.event === "deviceDidChange") {
+      const device = updateFrameDeviceInfo(message.device, message.deviceInfo);
+      if (device) {
+        imageDeliveryQueue.resetLane(device.id);
+        const policy = framePolicyForDevice(device, { deviceId: device.id });
+        runtimeTrace("image-delivery-policy", {
+          phase: message.event === "deviceDidConnect" ? "connected" : "changed",
+          result: `${policy.profile}:${policy.aggregateFps}`
+        });
+      }
+    } else if (message.event === "deviceDidDisconnect") {
+      const deviceId = String(message.device ?? "");
+      if (deviceId) {
+        frameDeviceInfoById.delete(deviceId);
+        imageDeliveryQueue.resetLane(deviceId);
+      }
+      runtimeTrace("image-delivery-policy", { phase: "disconnected", result: "reset" });
+    }
+
+    if (["willAppear", "willDisappear", "keyDown", "keyUp"].includes(message.event)) {
+      runtimeTrace("streamdeck-event", {
+        phase: message.event,
+        result: String(message.action ?? "unknown").split(".").pop()
+      });
     }
 
     if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
@@ -9069,6 +9172,7 @@ function registerPlugin() {
       contextDeviceIds.delete(message.context);
       contextImages.delete(message.context);
       contextSentImages.delete(message.context);
+      imageDeliveryQueue.remove(message.context);
       contextFeedback.delete(message.context);
       permissionAlertedContexts.delete(message.context);
       microBridgeAlertedContexts.delete(message.context);
