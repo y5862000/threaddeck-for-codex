@@ -116,12 +116,6 @@ The microphone starts recording as soon as it is pressed. Keep holding while you
 
 Both Send actions fire on release. A tap sends Return. The elapsed-time threshold is **0.6 seconds**; the blue border confirms that the long action has been armed. For an unambiguous Command+Return, wait for blue and then release.
 
-### App launchers: open or quit
-
-![Neutral guide for the bundled app launchers: tap to open or focus, long-press to quit](docs/media/app-launcher-long-press.gif)
-
-The Media page includes Stream Deck, Music, Chrome, and Codex launchers built with Elgato's **Open Application** action. Tap to open the configured app or bring it forward; long-press to quit it. Stream Deck owns the real key artwork and long-press timing, so the GIF intentionally uses a neutral guide key rather than redistributing application icons. You can replace any launcher in Stream Deck and choose its own long-press behavior.
-
 ## Read a task card
 
 | Example | Meaning |

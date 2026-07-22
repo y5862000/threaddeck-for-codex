@@ -9343,17 +9343,27 @@ function demoPreviewSvg(keySvgs) {
   const margin = 28;
   const gap = 18;
   const keySize = 144;
+  const keyRadius = 22;
   const width = margin * 2 + keySize * 4 + gap * 3;
   const height = margin * 2 + keySize * 2 + gap;
-  const images = keySvgs.map((svg, index) => {
+  const keyPositions = keySvgs.map((svg, index) => {
     const column = index % 4;
     const row = Math.floor(index / 4);
     const x = margin + column * (keySize + gap);
     const y = margin + row * (keySize + gap);
+    return { svg, index, x, y };
+  });
+  const clips = keyPositions.map(({ index, x, y }) => (
+    `<clipPath id="demoKeyClip${index}"><rect x="${x}" y="${y}" width="${keySize}" height="${keySize}" rx="${keyRadius}"/></clipPath>`
+  )).join("\n    ");
+  const images = keyPositions.map(({ svg, index, x, y }) => {
     const data = Buffer.from(svg).toString("base64");
-    return `<image x="${x}" y="${y}" width="${keySize}" height="${keySize}" href="data:image/svg+xml;base64,${data}"/>`;
+    return `<image x="${x}" y="${y}" width="${keySize}" height="${keySize}" clip-path="url(#demoKeyClip${index})" href="data:image/svg+xml;base64,${data}"/>`;
   }).join("\n  ");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <defs>
+    ${clips}
+  </defs>
   <rect width="${width}" height="${height}" rx="34" fill="#2F2F2F"/>
   ${images}
 </svg>\n`;
@@ -9470,7 +9480,7 @@ function renderCompletedTaskKey(outputPath, mode = "dark") {
   resetDemoEffects();
   const completedThread = {
     id: DEMO_COMPLETED_ID,
-    title: "Docs preview",
+    title: "Docs ready",
     pinned: false,
     status: "completed",
     startedAtMs: DEMO_EPOCH_MS - 12 * 60_000 - 17_000,
@@ -9518,7 +9528,9 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
 
 function documentationImage(svg, x, y, size) {
   const data = Buffer.from(svg).toString("base64");
-  return `<image x="${x}" y="${y}" width="${size}" height="${size}" href="data:image/svg+xml;base64,${data}"/>`;
+  const radius = (size * 22 / 144).toFixed(1);
+  return `<defs><clipPath id="documentationKeyClip"><rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${radius}"/></clipPath></defs>
+  <image x="${x}" y="${y}" width="${size}" height="${size}" clip-path="url(#documentationKeyClip)" href="data:image/svg+xml;base64,${data}"/>`;
 }
 
 function gestureStageRows(stages, activeStage, accent) {
