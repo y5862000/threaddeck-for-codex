@@ -434,7 +434,7 @@
       "UUID": "com.yechan.threaddeck.page.next"
     }
   ],
-  "Author": "Yechan",
+  "Author": "ThreadDeck",
   "Category": "ThreadDeck for Codex",
   "CategoryIcon": "images/category",
   "CodePath": "bin/plugin.js",
@@ -459,7 +459,7 @@
       "Readonly": false
     }
   ],
-  "SDKVersion": 2,
+  "SDKVersion": 3,
   "Software": {
     "MinimumVersion": "7.4"
   },

@@ -22,19 +22,36 @@ pnpm exec streamdeck pack "$STAGING_DIR/$PLUGIN_NAME" \
 
 # The packer writes a FAT-compatible ZIP and therefore does not preserve the
 # native helper's executable bit. Exercise the installed layout so every
-# release proves that the Node entry point repairs keybridge before first use.
+# release proves that the packaged source remains immutable while an exact
+# executable copy is staged outside the DRM-protected plugin bundle.
 ARTIFACT="$ROOT_DIR/release/com.yechan.threaddeck.streamDeckPlugin"
 CHECKSUM="$ARTIFACT.sha256"
 EXTRACTED_DIR="$STAGING_DIR/extracted"
+RUNTIME_CACHE="$STAGING_DIR/runtime-cache"
 mkdir -p "$EXTRACTED_DIR"
 /usr/bin/unzip -q "$ARTIFACT" -d "$EXTRACTED_DIR"
 EXTRACTED_PLUGIN="$EXTRACTED_DIR/$PLUGIN_NAME"
 chmod 0666 "$EXTRACTED_PLUGIN/bin/keybridge"
-node "$EXTRACTED_PLUGIN/bin/plugin.js" --verify-keybridge-permission >/dev/null
-[[ -x "$EXTRACTED_PLUGIN/bin/keybridge" ]] || {
-  echo "Packaged plugin did not repair keybridge permissions" >&2
+THREADDECK_KEYBRIDGE_CACHE_DIR="$RUNTIME_CACHE" \
+  node "$EXTRACTED_PLUGIN/bin/plugin.js" --verify-keybridge-permission >/dev/null
+[[ ! -x "$EXTRACTED_PLUGIN/bin/keybridge" ]] || {
+  echo "Packaged keybridge was modified in place, which violates DRM immutability" >&2
   exit 1
 }
-echo "Packaged keybridge permission repair passed."
+runtime_bridges=("$RUNTIME_CACHE"/keybridge-*(N))
+(( ${#runtime_bridges[@]} == 1 )) || {
+  echo "Packaged plugin did not stage exactly one KeyBridge runtime copy" >&2
+  exit 1
+}
+RUNTIME_KEY_BRIDGE="${runtime_bridges[1]}"
+[[ -x "$RUNTIME_KEY_BRIDGE" ]] || {
+  echo "Staged KeyBridge runtime copy is not executable" >&2
+  exit 1
+}
+/usr/bin/cmp -s "$EXTRACTED_PLUGIN/bin/keybridge" "$RUNTIME_KEY_BRIDGE" || {
+  echo "Staged KeyBridge runtime copy differs from the packaged source" >&2
+  exit 1
+}
+echo "Immutable packaged KeyBridge staging passed."
 (cd "$ROOT_DIR/release" && shasum -a 256 "${ARTIFACT##*/}") > "$CHECKSUM"
 echo "Wrote ${CHECKSUM#$ROOT_DIR/}"

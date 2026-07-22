@@ -6,5 +6,5 @@ SOURCE="$ROOT_DIR/assets/plugin.svg"
 IMAGES="$ROOT_DIR/com.yechan.threaddeck.sdPlugin/images"
 
 mkdir -p "$IMAGES"
-node "$ROOT_DIR/scripts/rasterize.mjs" "$SOURCE" "$IMAGES/plugin@2x.png" 288 288
-node "$ROOT_DIR/scripts/rasterize.mjs" "$SOURCE" "$IMAGES/plugin.png" 144 144
+node "$ROOT_DIR/scripts/rasterize.mjs" "$SOURCE" "$IMAGES/plugin@2x.png" 512 512
+node "$ROOT_DIR/scripts/rasterize.mjs" "$SOURCE" "$IMAGES/plugin.png" 256 256

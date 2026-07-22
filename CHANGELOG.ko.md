@@ -4,6 +4,7 @@
 
 ## 미배포
 
+- SDK 3, 조직명과 맞춘 제작자 정보, 최신 256/512px 플러그인 아이콘, 불변 번들로 Stream Deck Marketplace DRM 제출을 준비했습니다. 이제 배포된 네이티브 헬퍼를 제자리에서 변경하지 않고 내용 해시가 붙은 KeyBridge 복사본을 로컬 Application Support에서 검증·실행합니다.
 - README의 중심 설명을 Stream Deck용 Codex 물리 대시보드로 정리했습니다. 이제 Neo는 기본 제공 레이아웃이나 실기 검증 호환성을 정확히 밝혀야 하는 곳에만 표시합니다.
 - Effort 적용이 끝나기 전에 추론 강도/Fast 결합 버튼을 길게 누르면 뒤이어 생긴 Effort Promise를 Fast 결과로 잘못 받아 실제 전환을 건너뛰던 경합을 고쳤습니다. 이제 길게 누른 Fast 요청은 활성 제어 후속 작업을 모두 기다린 뒤 정확히 한 번 실행됩니다.
 - 공개 프로젝트 웹사이트 [threaddeck.dev](https://threaddeck.dev/)를 README 주요 링크와 GitHub 저장소 메타데이터에 추가했습니다.

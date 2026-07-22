@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Prepared the Stream Deck package for Marketplace DRM with SDK 3, organization-aligned author metadata, current 256/512 px plugin icons, and an immutable bundle. A content-addressed KeyBridge copy is now verified and executed from local Application Support instead of changing the distributed native helper in place.
 - Reframed the README around ThreadDeck as a physical Codex dashboard for Stream Deck. Neo now appears only where the bundled layout or tested hardware compatibility needs to be explicit.
 - Fixed a race where holding the combined Effort/Fast key while an Effort update was still settling could adopt a successor Effort promise as the Fast result and silently skip the actual toggle. Held Fast intent now drains every active control successor and dispatches exactly once.
 - Added the public project website, [threaddeck.dev](https://threaddeck.dev/), to the primary README links and GitHub repository metadata.

@@ -179,6 +179,7 @@ ThreadDeck has no account, telemetry, analytics, update server, or cloud backend
 | `~/Library/Application Support/ThreadDeck/remote-goals-v1.json` | Local read/write | Last observed remote goal status and numeric time for at most seven days; no objective, title, or conversation text |
 | `~/Library/Application Support/ThreadDeck/unread-completions-v1.json` | Local read/write | Task UUID and numeric completion/notice timestamps for unviewed completion cues; no title or conversation text |
 | `~/Library/Application Support/ThreadDeck/media-pause-lease-v1.plist` | Temporary local read/write | Bundle identifiers of media apps paused by the current voice hold; expires after ten minutes and contains no title, URL, PID, or media text |
+| `~/Library/Application Support/ThreadDeck/bin/keybridge-<sha256>` | Local executable cache | Content-addressed copy of the packaged native helper, used so Marketplace DRM can keep the distributed plugin immutable; contains executable code only and no user data |
 | Codex renderer bridge on random `127.0.0.1` port | Local read/control | Reads active task, next-run Effort/Fast, theme, and up to six Micro slots; dispatches a Codex Micro event only after a physical ThreadDeck action |
 | `codex-micro-bootstrap-v1.json` and `codex-micro-bridge.json` | Local read/write | Process generation, loopback port, health, cooldown, and numeric timestamps only; no title, prompt, transcript, or credential |
 | CodexBar CLI | Optional child process | Weekly remaining quota only; CodexBar has its own provider behavior |

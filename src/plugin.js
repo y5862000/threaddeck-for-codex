@@ -81,7 +81,7 @@ const {
   remoteThreadRowsFromState
 } = require("./codex-state");
 const { consumeLifecycleLines } = require("./local-lifecycle");
-const { ensureKeyBridgeExecutable } = require("./keybridge-permissions");
+const { prepareKeyBridgeExecutable } = require("./keybridge-permissions");
 const {
   REASONING_EFFORT_ORDER,
   loadReasoningOptionCatalog,
@@ -200,7 +200,8 @@ const PROCESS_REGISTRY = path.resolve(
 const CODEX_DESKTOP_LOG_ROOT = path.resolve(
   process.env.THREADDECK_CODEX_LOG_ROOT || path.join(USER_HOME, "Library", "Logs", "com.openai.codex")
 );
-const KEY_BRIDGE = path.join(__dirname, "keybridge");
+const PACKAGED_KEY_BRIDGE = path.join(__dirname, "keybridge");
+let KEY_BRIDGE = PACKAGED_KEY_BRIDGE;
 const RUNTIME_TRACE_PATH = path.resolve(
   process.env.THREADDECK_TRACE_PATH
     || path.join(USER_HOME, "Library", "Logs", "ThreadDeck", "runtime.jsonl")
@@ -14023,7 +14024,12 @@ function installShutdownHandlers() {
 function runSelectedMode() {
   if (keyBridgePermissionContractMode) {
     fsSync.accessSync(KEY_BRIDGE, fsSync.constants.X_OK);
-    console.log(JSON.stringify({ passed: true, keybridgeExecutable: true }));
+    console.log(JSON.stringify({
+      passed: true,
+      keybridgeExecutable: true,
+      packagedPath: PACKAGED_KEY_BRIDGE,
+      runtimePath: KEY_BRIDGE
+    }));
   } else if (completionContractMode) {
     verifyCompletionFanout();
   } else if (refreshResilienceContractMode) {
@@ -14091,7 +14097,7 @@ function main() {
     || demoAnimationDirectory
     || gestureAnimationDirectory
   );
-  if (!renderingOnly) ensureKeyBridgeExecutable(KEY_BRIDGE);
+  if (!renderingOnly) KEY_BRIDGE = prepareKeyBridgeExecutable(PACKAGED_KEY_BRIDGE);
   installShutdownHandlers();
   runSelectedMode();
 }
