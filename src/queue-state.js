@@ -77,9 +77,25 @@ function queueCountForWindow(window) {
   return Math.max(deleteCount, actionCount);
 }
 
+function queueBadgeLabel(queueCount) {
+  const normalizedCount = Math.max(0, Number.parseInt(queueCount, 10) || 0);
+  if (normalizedCount === 0) return "";
+  return normalizedCount >= 9 ? "9+" : `+${normalizedCount}`;
+}
+
+function queueTitleFingerprints(thread) {
+  const fingerprints = new Set();
+  const titles = [thread?.title, ...(Array.isArray(thread?.queueTitles) ? thread.queueTitles : [])];
+  for (const title of titles) {
+    if (typeof title !== "string" || !title.trim()) continue;
+    for (const fingerprint of titleFingerprints(title)) fingerprints.add(fingerprint);
+  }
+  return fingerprints;
+}
+
 function matchingHeaderPositions(window, thread) {
   const positions = [];
-  for (const fingerprint of titleFingerprints(thread?.title)) {
+  for (const fingerprint of queueTitleFingerprints(thread)) {
     positions.push(...(window.headerPositions?.get(fingerprint) ?? []));
   }
   return positions;
@@ -166,6 +182,8 @@ function queueCountsByThreadForWindow(window, threads) {
 
 module.exports = {
   parseCodexQueueWindows,
+  queueBadgeLabel,
   queueCountForWindow,
-  queueCountsByThreadForWindow
+  queueCountsByThreadForWindow,
+  queueTitleFingerprints
 };

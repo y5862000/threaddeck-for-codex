@@ -66,8 +66,10 @@ const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
 const { isInternalThreadRecord } = require("./thread-privacy");
 const {
   parseCodexQueueWindows,
+  queueBadgeLabel,
   queueCountForWindow,
-  queueCountsByThreadForWindow
+  queueCountsByThreadForWindow,
+  queueTitleFingerprints
 } = require("./queue-state");
 const {
   canContinueLogCursor,
@@ -94,7 +96,11 @@ const {
   permissionIssueLabel
 } = require("./permission-health");
 const { resolveProfilePageTarget } = require("./profile-navigation");
-const { CodexControlPlane, verifyAfterMicroDelivery } = require("./control-plane");
+const {
+  CodexControlPlane,
+  definiteMicroFallback,
+  verifyAfterMicroDelivery
+} = require("./control-plane");
 const { CodexMicroBootstrap } = require("./micro-bootstrap");
 const { CodexMicroBridge, confirmedMicroThreadSnapshot } = require("./micro-cdp");
 const {
@@ -172,6 +178,8 @@ const CURRENT_THREAD_SYNC_CACHE_MS = 250;
 const REASONING_INPUT_SETTLE_MS = 1_100;
 const MICRO_REASONING_INPUT_SETTLE_MS = 90;
 const REASONING_PROGRESS_TRANSITION_MS = 320;
+const REASONING_PARTICLE_ACCELERATION_MS = 420;
+const REASONING_PARTICLE_DECELERATION_MS = 520;
 const MICRO_TASK_SWITCH_VERIFY_DELAYS_MS = [45, 80, 140, 220, 320, 480];
 const SQLITE = "/usr/bin/sqlite3";
 const USER_HOME = os.homedir();
@@ -402,6 +410,7 @@ const reasoningAvailableEffortsByThreadId = new Map();
 const reasoningPowerSelectionsByThreadId = new Map();
 const reasoningVisualOverrideByThreadId = new Map();
 const reasoningProgressTransitionByKey = new Map();
+const reasoningParticleMotionByKey = new Map();
 const reasoningPendingCountByThreadId = new Map();
 const reasoningPendingCountByContext = new Map();
 const reasoningInputBatchByKey = new Map();
@@ -725,7 +734,7 @@ function revokeComposerFocusForRendererCurrent(currentId, options = {}) {
   // only stable renderer identity. Preserve that short provisional phase, but
   // once a target exists any different renderer task is an explicit selection
   // and must win immediately.
-  if (currentId === expectedId) return false;
+  if (currentId === expectedId && options.force !== true) return false;
   if (lease.kind === "side-chat") pendingSideChatTarget = null;
   if (activeComposerCreation?.kind === lease.kind) {
     activeComposerCreation.markComposerReady?.(null);
@@ -851,6 +860,7 @@ function runtimeTrace(event, fields = {}) {
 }
 let sideChatSessionStartMs = null;
 const sideChatParentById = new Map();
+const sideChatTitleById = new Map();
 const sideChatLifecycleCache = new Map();
 const closedSideChatAtMs = new Map();
 const sideChatCloseLogOffsets = new Map();
@@ -1113,6 +1123,79 @@ function reasoningProgressTransitionActive(scope, threadId, nowMs = renderTimeMs
     && nowMs - transition.startedAtMs < REASONING_PROGRESS_TRANSITION_MS;
 }
 
+function reasoningParticleMotionKey(scope, threadId) {
+  return threadId ? `${scope}:${threadId}` : null;
+}
+
+function reasoningParticleSpeedAt(motion, nowMs) {
+  if (!motion) return 0;
+  const durationMs = motion.toSpeed > motion.fromSpeed
+    ? REASONING_PARTICLE_ACCELERATION_MS
+    : REASONING_PARTICLE_DECELERATION_MS;
+  const elapsedMs = Math.max(0, nowMs - motion.startedAtMs);
+  if (elapsedMs >= durationMs) return motion.toSpeed;
+  const progress = smootherStep01(elapsedMs / durationMs);
+  return motion.fromSpeed + (motion.toSpeed - motion.fromSpeed) * progress;
+}
+
+function animatedReasoningParticleMotion(scope, threadId, fast, nowMs = renderTimeMs()) {
+  const targetSpeed = fast ? 1 : 0;
+  const key = reasoningParticleMotionKey(scope, threadId);
+  if (!key) return { phase: (nowMs % 820) / 820, speed: targetSpeed };
+
+  let motion = reasoningParticleMotionByKey.get(key);
+  if (!motion || nowMs < motion.lastAtMs) {
+    motion = {
+      phase: 0,
+      speed: targetSpeed,
+      fromSpeed: targetSpeed,
+      toSpeed: targetSpeed,
+      startedAtMs: nowMs,
+      lastAtMs: nowMs
+    };
+    reasoningParticleMotionByKey.set(key, motion);
+    return { phase: motion.phase, speed: motion.speed };
+  }
+
+  const previousSpeed = reasoningParticleSpeedAt(motion, motion.lastAtMs);
+  let currentSpeed = reasoningParticleSpeedAt(motion, nowMs);
+  const elapsedSinceFrameMs = Math.max(0, Math.min(120, nowMs - motion.lastAtMs));
+  motion.phase = (motion.phase
+    + elapsedSinceFrameMs / 820 * ((previousSpeed + currentSpeed) / 2)) % 1;
+  motion.lastAtMs = nowMs;
+  motion.speed = currentSpeed;
+
+  if (motion.toSpeed !== targetSpeed) {
+    motion.fromSpeed = currentSpeed;
+    motion.toSpeed = targetSpeed;
+    motion.startedAtMs = nowMs;
+    motion.speed = currentSpeed;
+  } else {
+    const durationMs = targetSpeed > motion.fromSpeed
+      ? REASONING_PARTICLE_ACCELERATION_MS
+      : REASONING_PARTICLE_DECELERATION_MS;
+    if (nowMs - motion.startedAtMs >= durationMs) {
+      currentSpeed = targetSpeed;
+      motion.speed = targetSpeed;
+      motion.fromSpeed = targetSpeed;
+    }
+  }
+  reasoningParticleMotionByKey.set(key, motion);
+  return { phase: motion.phase, speed: currentSpeed };
+}
+
+function reasoningParticleTransitionActive(scope, threadId, nowMs = renderTimeMs()) {
+  const motion = reasoningParticleMotionByKey.get(
+    reasoningParticleMotionKey(scope, threadId)
+  );
+  if (!motion) return false;
+  const durationMs = motion.toSpeed > motion.fromSpeed
+    ? REASONING_PARTICLE_ACCELERATION_MS
+    : REASONING_PARTICLE_DECELERATION_MS;
+  return Math.abs(motion.toSpeed - reasoningParticleSpeedAt(motion, nowMs)) > 0.002
+    && nowMs - motion.startedAtMs < durationMs;
+}
+
 function flowingReasoningSlider(accent, label, fast, layout = {}) {
   const trackX = layout.trackX ?? 9;
   const trackY = layout.trackY ?? 8;
@@ -1142,18 +1225,31 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
   const edgeFade = (position, width = 0.16) => Math.max(0, Math.min(1, position / width, (1 - position) / width));
   const particlePadding = 3;
   const particleFlowWidth = Math.max(0, fillWidth - particlePadding * 2);
-  const particleCycleMs = fast ? 820 : 2600;
-  const particlePhase = (nowMs % particleCycleMs) / particleCycleMs;
+  const particleScope = layout.particleScope ?? "slider";
+  const particleThreadId = layout.particleThreadId ?? layout.idSuffix ?? particleScope;
+  const particleState = animatedReasoningParticleMotion(
+    particleScope,
+    particleThreadId,
+    fast,
+    nowMs
+  );
+  const particleSpeed = particleState.speed;
+  const particleMotion = particleSpeed > 0.002
+    ? fast ? particleSpeed >= 0.998 ? "flow" : "accelerating" : "decelerating"
+    : appearance.ultra ? "jitter" : "none";
+  const particlePhase = particleState.phase;
+  const jitterPhase = (nowMs % 1400) / 1400;
   const particleCount = 10;
-  const particles = !fast || particleFlowWidth < 1 ? "" : Array.from({ length: particleCount }, (_, index) => {
+  const particles = particleMotion === "none" || particleFlowWidth < 1 ? "" : Array.from({ length: particleCount }, (_, index) => {
     const random = (channel) => seededParticleUnit(index, channel);
     const loopAngle = particlePhase * Math.PI * 2;
+    const jitterAngle = jitterPhase * Math.PI * 2;
     let position;
     let x;
     let y;
     let radius;
     let baseOpacity;
-    if (fast) {
+    if (particleSpeed > 0.002) {
       // Each particle starts at a stable pseudo-random offset and follows its
       // own shallow lane while the group still communicates fast forward flow.
       position = (random(0) - particlePhase + 1) % 1;
@@ -1165,10 +1261,33 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
         + Math.sin(loopAngle * yWobbleFrequency + random(6) * Math.PI * 2) * (0.45 + random(7) * 0.8);
       radius = 0.94 + random(8) * 0.38;
       baseOpacity = 0.62 + random(9) * 0.2;
+    } else {
+      // Standard-speed Ultra mirrors Codex's compact slider: particles keep
+      // their own place and only tremble and shimmer. Fast mode is the sole
+      // state that communicates forward motion across the track.
+      position = (random(0) - particlePhase + 1) % 1;
+      const xJitterFrequency = 2 + Math.floor(random(1) * 3);
+      const yJitterFrequency = 2 + Math.floor(random(2) * 4);
+      x = trackX + particlePadding + position * particleFlowWidth
+        + Math.sin(jitterAngle * xJitterFrequency + random(3) * Math.PI * 2) * (0.16 + random(4) * 0.3);
+      y = trackCenterY + (random(5) - 0.5) * 10.5
+        + Math.sin(jitterAngle * yJitterFrequency + random(6) * Math.PI * 2) * (0.28 + random(7) * 0.54);
+      radius = 0.9 + random(8) * 0.42;
+      const shimmer = 0.82 + 0.18 * (0.5 + 0.5 * Math.sin(
+        jitterAngle * (1 + Math.floor(random(1) * 2)) + random(9) * Math.PI * 2
+      ));
+      baseOpacity = (0.56 + random(9) * 0.26) * shimmer;
     }
-    const opacity = Math.max(0, Math.min(0.94, baseOpacity * edgeFade(position, fast ? 0.12 : 0.08)));
+    const visibility = appearance.ultra ? 1 : smootherStep01(particleSpeed);
+    const opacity = Math.max(0, Math.min(
+      0.94,
+      baseOpacity * edgeFade(position, particleSpeed > 0.002 ? 0.12 : 0.08) * visibility
+    ));
     return `<circle cx="${x.toFixed(1)}" cy="${y.toFixed(1)}" r="${radius.toFixed(2)}" fill="#FFFFFF" opacity="${opacity.toFixed(2)}"/>`;
   }).join("");
+  const particleLayer = particles
+    ? `<g data-reasoning-particles="${particleMotion}" data-reasoning-particle-speed="${particleSpeed.toFixed(3)}">${particles}</g>`
+    : "";
   const modeIconPath = "M21 14L17.2 20.3H21L19.8 27L26 19H22.3L24.3 14Z";
   const restModeIcon = showLabel && fast ? `<path data-mode="fast" d="${modeIconPath}" fill="${THEME.text}" fill-opacity=".88"/>` : "";
   const filledModeIcon = showLabel && fast ? `<path data-mode="fast" d="${modeIconPath}" fill="#FFFFFF" fill-opacity=".92"/>` : "";
@@ -1193,7 +1312,7 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
   <g clip-path="url(#${fillClipId})">
     <rect data-reasoning-progress="${effortProgress.toFixed(3)}" x="${trackX}" y="${trackY}" width="${fillWidth.toFixed(1)}" height="${trackHeight}" rx="${trackRadius}" fill="url(#${fillId})"/>
     ${ambientGlow}
-    ${particles}
+    ${particleLayer}
   </g>
   ${restModeIcon}
   ${showLabel ? `<text x="${textX}" y="27" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${fontSize}" font-weight="600" text-anchor="start" clip-path="url(#headerClip)">${escapeXml(labelText)}</text>` : ""}
@@ -1358,6 +1477,8 @@ function threadHeader(accent, status, statusLabel, activity, pulsing = false, re
   if (status === "working") {
     return flowingReasoningSlider(accent, { text: label, effort: reasoningEffort }, fast, {
       progressOverride: animatedReasoningProgress("thread", threadId, reasoningEffort),
+      particleScope: "thread",
+      particleThreadId: threadId,
       idSuffix: threadId ? `Thread${String(threadId).replace(/[^A-Za-z0-9]/g, "")}` : "Thread"
     });
   }
@@ -1916,7 +2037,7 @@ const REASONING_CONTROL_LABEL_METRICS = Object.freeze({
   LIGHT: Object.freeze({ fontSize: 23, width: 67.4 }),
   MEDIUM: Object.freeze({ fontSize: 23, width: 93.0 }),
   HIGH: Object.freeze({ fontSize: 23, width: 57.5 }),
-  "EXTRA HIGH": Object.freeze({ fontSize: 16, width: 98.4 }),
+  XHIGH: Object.freeze({ fontSize: 23, width: 73.4 }),
   MAX: Object.freeze({ fontSize: 23, width: 52.1 }),
   ULTRA: Object.freeze({ fontSize: 23, width: 72.7 }),
   EFFORT: Object.freeze({ fontSize: 23, width: 82.0 })
@@ -1957,7 +2078,7 @@ function reasoningControlSvg(
     low: "LIGHT",
     medium: "MEDIUM",
     high: "HIGH",
-    xhigh: "EXTRA HIGH",
+    xhigh: "XHIGH",
     max: "MAX",
     ultra: "ULTRA"
   }[effort] ?? "EFFORT");
@@ -1985,6 +2106,8 @@ function reasoningControlSvg(
       trackStrokeWidth: 1,
       showLabel: false,
       idSuffix: "Control",
+      particleScope: "control",
+      particleThreadId: activeThreadId,
       progressOverride: animatedReasoningProgress(
         "control",
         activeThreadId,
@@ -2953,7 +3076,8 @@ async function voiceTargetIsFocused(targetThreadId, options = {}) {
   if (!thread) return false;
   if (!options.probe && options.useMicro !== false) {
     const snapshot = await codexControlPlane.refreshReadOnly({ quiet: true });
-    if (snapshot?.activeThreadKey) return snapshot.activeThreadKey === targetThreadId;
+    const activeThreadId = microSnapshotActiveThreadId(snapshot);
+    if (activeThreadId) return activeThreadId === targetThreadId;
   }
   // Submission safety needs the same identity-aware focused-header probe used
   // after remote navigation. In particular, a title-only queue match cannot
@@ -4248,6 +4372,7 @@ function releaseVoiceKeysSync(rawOptions = {}) {
   reasoningPowerSelectionsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningProgressTransitionByKey.clear();
+  reasoningParticleMotionByKey.clear();
   reasoningPendingCountByThreadId.clear();
   reasoningPendingCountByContext.clear();
   if (released && voiceMediaPaused && bridge("media-resume-paused", null, { quiet: true })) {
@@ -4283,7 +4408,7 @@ async function readCodexQueueWindows(options = {}) {
 
 function queueWindowThreadCandidates(window, threads) {
   return threads.filter((thread) => {
-    for (const fingerprint of titleFingerprints(thread.title)) {
+    for (const fingerprint of queueTitleFingerprints(thread)) {
       if (window.headers.has(fingerprint)) return true;
     }
     return false;
@@ -4344,25 +4469,110 @@ function composerStateNeedsRefreshForThread(threadId, state = fastModeState) {
     || !normalizedReasoningEffort(state?.reasoningEffort);
 }
 
+function microSnapshotActiveThreadId(snapshot) {
+  if (snapshot?.focusedComposerKind === "main") {
+    const sideChatCreationInFlight = activeComposerCreation?.kind === "side-chat"
+      && activeComposerCreation.controller?.signal?.aborted !== true;
+    if (!sideChatCreationInFlight) {
+      return snapshot?.activeThreadKey ?? snapshot?.activeSideChatThreadId ?? null;
+    }
+  }
+  if (snapshot?.focusedComposerKind === "side-chat") {
+    return snapshot?.activeSideChatThreadId ?? snapshot?.activeThreadKey ?? null;
+  }
+  return snapshot?.activeSideChatThreadId ?? snapshot?.activeThreadKey ?? null;
+}
+
+function genericSideChatTitle(value) {
+  return /^(?:side\s*chat|sidechat|사이드\s*챗|사이드챗)(?:\s+\d+)?$/i
+    .test(String(value ?? "").trim());
+}
+
+function rememberMicroSideChatTitles(sideChats) {
+  for (const sideChat of Array.isArray(sideChats) ? sideChats : []) {
+    const id = sideChat?.id;
+    const title = typeof sideChat?.title === "string" ? sideChat.title.trim() : "";
+    if (!id || !title) continue;
+    const previous = sideChatTitleById.get(id);
+    if (!previous || genericSideChatTitle(previous)) sideChatTitleById.set(id, title);
+    const canonicalTitle = sideChatTitleById.get(id);
+    const cached = sideChatRowsCache.find((thread) => thread?.id === id);
+    if (cached && canonicalTitle) {
+      cached.title = canonicalTitle;
+      cached.fallbackTitle = false;
+      cached.queueTitles = [...new Set([
+        canonicalTitle,
+        ...(Array.isArray(cached.queueTitles) ? cached.queueTitles : [])
+      ])];
+    }
+  }
+}
+
+async function refreshMicroSideChatTitleCache() {
+  // Establish the current app-server session boundary first. A new session
+  // intentionally clears every old Side Chat cache, including titles.
+  await readAppServerSessionStartMs();
+  const snapshot = await codexControlPlane.refreshReadOnly({ quiet: true });
+  rememberMicroSideChatTitles(snapshot?.sideChats);
+  return snapshot;
+}
+
 function applyMicroReadOnlySnapshot(snapshot, options = {}) {
-  const activeThreadKey = snapshot?.activeThreadKey;
+  rememberMicroSideChatTitles(snapshot?.sideChats);
+  const activeSideChatThreadId = snapshot?.activeSideChatThreadId ?? null;
+  const activeThreadKey = microSnapshotActiveThreadId(snapshot);
   if (!activeThreadKey) return null;
   const candidates = options.candidates ?? currentThreadCandidatesForSync();
+  const leasedSideChat = activeComposerFocusLease?.kind === "side-chat"
+    ? activeComposerFocusThread(candidates)
+    : null;
   const current = candidates.find((thread) => thread?.id === activeThreadKey)
     ?? combinedVisibleThreads().find((thread) => thread?.id === activeThreadKey)
+    ?? (activeSideChatThreadId && leasedSideChat
+      ? {
+        ...leasedSideChat,
+        id: activeSideChatThreadId,
+        parentId: leasedSideChat.parentId ?? activeComposerFocusLease?.parentId ?? null,
+        remote: false,
+        ephemeral: true,
+        provisionalSideChat: false,
+        requiresStrictIdentity: true
+      }
+      : null)
     ?? null;
   if (!current?.id) return null;
 
   const leasedComposer = activeComposerFocusThread(candidates);
-  if (leasedComposer && leasedComposer.id !== current.id) {
+  const mainComposerOverridesSideChat = snapshot?.focusedComposerKind === "main"
+    && activeComposerFocusLease?.kind === "side-chat"
+    && !(activeComposerCreation?.kind === "side-chat"
+      && activeComposerCreation.controller?.signal?.aborted !== true);
+  if (leasedComposer && (leasedComposer.id !== current.id || mainComposerOverridesSideChat)) {
     // The renderer reports the composer that actually owns keyboard input.
     // A manual in-app task change therefore revokes an older provisional or
     // discovered Side Chat lease without waiting for an Accessibility poll.
-    revokeComposerFocusForRendererCurrent(current.id, { render: false });
+    revokeComposerFocusForRendererCurrent(current.id, {
+      render: false,
+      force: mainComposerOverridesSideChat
+    });
   }
   if (current.ephemeral) {
     if (activeComposerFocusLease?.kind === "side-chat") {
       promoteSideChatFocusLease(current, { render: false });
+      if (pendingSideChatTarget
+          && !pendingSideChatTarget.targetThreadId
+          && Number.isFinite(activeComposerFocusLease.requestedAtMs)) {
+        pendingSideChatTarget = {
+          ...pendingSideChatTarget,
+          targetThreadId: current.id
+        };
+        if (current.parentId) sideChatParentById.set(current.id, current.parentId);
+        bindPendingVoiceContextsToThread(
+          current.id,
+          options.nowMs ?? Date.now(),
+          activeComposerFocusLease.requestedAtMs
+        );
+      }
     }
     else {
       activateSideChatFocusLease({
@@ -4429,7 +4639,8 @@ async function microControlThreadStatus(thread, options = {}) {
   const refresh = options.refresh
     ?? (() => codexControlPlane.refreshReadOnly({ force: true, quiet: true }));
   const snapshot = await refresh();
-  if (!snapshot?.activeThreadKey) {
+  const activeThreadId = microSnapshotActiveThreadId(snapshot);
+  if (!activeThreadId) {
     return { available: false, matches: false, snapshot: null };
   }
   if (options.apply !== false) {
@@ -4438,7 +4649,7 @@ async function microControlThreadStatus(thread, options = {}) {
       promote: false
     });
   }
-  const matches = snapshot.activeThreadKey === thread.id;
+  const matches = activeThreadId === thread.id;
   runtimeTrace("micro-control-target", {
     result: matches ? "confirmed" : "mismatch"
   });
@@ -4592,6 +4803,28 @@ async function focusCurrentComposer(context = null, options = {}) {
   const focus = options.focus
     ?? ((targetCommand) => runKeyBridgeAwaited(targetCommand, context, { quiet: true }));
   return focus(command);
+}
+
+async function focusAdvancedReasoningComposer(context = null, options = {}) {
+  const openApp = options.openApp
+    ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
+      timeout: 5000
+    }));
+  const waitFrontmost = options.waitFrontmost
+    ?? (() => execFileAsync(KEY_BRIDGE, ["codex-wait-frontmost"], {
+      timeout: 3000,
+      maxBuffer: 4096
+    }));
+  const focusComposer = options.focusComposer
+    ?? (() => focusCurrentComposer(context));
+  // Max and Ultra are absent from Codex Micro's compact power axis on some
+  // models. Their exact fallback must operate Codex's visible Advanced list,
+  // whose AX controls deliberately reject presses while another app is
+  // frontmost. Activate Codex only for that Advanced-only path; ordinary
+  // Effort and Fast controls remain renderer-native and stay off-screen.
+  await openApp();
+  await waitFrontmost();
+  return focusComposer();
 }
 
 async function currentControlThreadIsFocused(thread, options = {}) {
@@ -5062,7 +5295,7 @@ function refreshFastMode(options = {}) {
         const provisionalCurrent = isProvisionalComposerThread(thread)
           && threadBelongsToActiveComposerFocus(thread);
         if (snapshot
-            && (snapshot.activeThreadKey === threadId || provisionalCurrent)
+            && (microSnapshotActiveThreadId(snapshot) === threadId || provisionalCurrent)
             && (typeof snapshot.fastEnabled === "boolean"
               || normalizedReasoningEffort(snapshot.reasoningEffort))) {
           microObserved = {
@@ -5207,7 +5440,7 @@ function toggleFastMode(context, options = {}) {
             await sleepWithSignal(120);
             const snapshot = await bridge.refreshReadOnly();
             if (!isProvisionalComposerThread(thread)
-                && snapshot.activeThreadKey !== threadId) {
+                && microSnapshotActiveThreadId(snapshot) !== threadId) {
               throw new Error("Fast mode changed outside the verified current task");
             }
             return {
@@ -5518,7 +5751,7 @@ function performReasoningEffortChange(context, options = {}) {
               await sleepWithSignal(160);
               const snapshot = await bridge.refreshReadOnly();
               if (!isProvisionalComposerThread(thread)
-                  && snapshot.activeThreadKey !== threadId) {
+                  && microSnapshotActiveThreadId(snapshot) !== threadId) {
                 throw new Error("Power selection changed outside the verified current task");
               }
               if (normalizedReasoningModel(snapshot.model) !== powerTarget.model
@@ -5596,7 +5829,7 @@ function performReasoningEffortChange(context, options = {}) {
               await sleepWithSignal(140);
               const snapshot = await bridge.refreshReadOnly();
               if (!isProvisionalComposerThread(thread)
-                  && snapshot.activeThreadKey !== threadId) {
+                  && microSnapshotActiveThreadId(snapshot) !== threadId) {
                 throw new Error("Effort changed outside the verified current task");
               }
               return snapshot;
@@ -5671,8 +5904,15 @@ function performReasoningEffortChange(context, options = {}) {
       }
       if (productionNativeAction
           && !ensureCommandPermissions(bridgeCapability, context)) return false;
+      const exactTargetEffort = productionNativeAction
+          && expectedEffort
+          && (needsAdvancedFallback || microNeedsExactCorrection)
+        ? expectedEffort
+        : null;
       const focusTargetComposer = options.focusTargetComposer
-        ?? (() => focusCurrentComposer(context));
+        ?? (exactTargetEffort
+          ? () => focusAdvancedReasoningComposer(context)
+          : () => focusCurrentComposer(context));
       if (productionNativeAction && !await focusTargetComposer()) {
         throw new Error("Codex current composer was not focused");
       }
@@ -5680,11 +5920,6 @@ function performReasoningEffortChange(context, options = {}) {
         throw new Error("Codex current task was not focused");
       }
 
-      const exactTargetEffort = productionNativeAction
-          && expectedEffort
-          && (needsAdvancedFallback || microNeedsExactCorrection)
-        ? expectedEffort
-        : null;
       const stepEffort = options.stepEffort
         ?? ((stepDirection, count) => execFileAsync(
           KEY_BRIDGE,
@@ -5736,7 +5971,7 @@ function performReasoningEffortChange(context, options = {}) {
             force: true,
             quiet: true
           });
-          if (rendererUltraSnapshot?.activeThreadKey === threadId
+          if (microSnapshotActiveThreadId(rendererUltraSnapshot) === threadId
               && normalizedReasoningEffort(rendererUltraSnapshot.reasoningEffort)
                 === "ultra") {
             confirmed = {
@@ -6203,9 +6438,8 @@ function displayThreadTitle(thread) {
 }
 
 function queueBadgeSvg(thread) {
-  const queueCount = Math.max(0, Number.parseInt(thread?.queueCount, 10) || 0);
-  if (queueCount === 0) return "";
-  const label = queueCount > 9 ? "9+" : `+${queueCount}`;
+  const label = queueBadgeLabel(thread?.queueCount);
+  if (!label) return "";
   return `
     <rect x="88" y="108" width="31" height="19" rx="9.5" fill="${THEME.amber}" fill-opacity=".18" stroke="${THEME.amber}" stroke-opacity=".62"/>
     <text x="103.5" y="122.5" fill="${THEME.amber}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" font-variant-numeric="tabular-nums" text-anchor="middle">${label}</text>`;
@@ -6532,6 +6766,7 @@ async function readAppServerSessionStartMs(nowMs = Date.now()) {
     sideChatSessionStartMs = startedAtMs;
     sideChatRowsCache = [];
     sideChatParentById.clear();
+    sideChatTitleById.clear();
     sideChatLifecycleCache.clear();
     closedSideChatAtMs.clear();
     sideChatCloseLogOffsets.clear();
@@ -6597,7 +6832,9 @@ async function readEphemeralSideChats(
       if (!Number.isFinite(createdAtMs)
           || createdAtMs + APP_SERVER_START_TOLERANCE_MS < sessionStartedAtMs) continue;
       const firstPrompt = prompts.find((prompt) => typeof prompt === "string" && prompt.trim());
-      if (!firstPrompt || isInternalThreadRecord({ title: firstPrompt })) continue;
+      const rendererTitle = sideChatTitleById.get(id) ?? null;
+      const preferredTitle = rendererTitle ?? firstPrompt;
+      if (!preferredTitle || isInternalThreadRecord({ title: preferredTitle })) continue;
       const rememberedParentId = discoveredById.get(id)?.parentId
         ?? sideChatParentById.get(id)
         ?? parentId
@@ -6605,7 +6842,8 @@ async function readEphemeralSideChats(
       if (rememberedParentId) sideChatParentById.set(id, rememberedParentId);
       sideChatsById.set(id, {
         id,
-        title: normalizeTitle(firstPrompt),
+        title: normalizeTitle(preferredTitle),
+        queueTitles: [...new Set([rendererTitle, firstPrompt].filter(Boolean))],
         fallbackTitle: false,
         cwd: "",
         rollout_path: null,
@@ -6630,10 +6868,15 @@ async function readEphemeralSideChats(
       ?? null;
     if (rememberedParentId) sideChatParentById.set(record.id, rememberedParentId);
     const createdAtMs = record.createdAtMs;
+    const rendererTitle = sideChatTitleById.get(record.id) ?? null;
     sideChatsById.set(record.id, {
       id: record.id,
-      title: current?.fallbackTitle === false ? current.title : "",
-      fallbackTitle: current?.fallbackTitle !== false,
+      title: rendererTitle ?? (current?.fallbackTitle === false ? current.title : ""),
+      queueTitles: [...new Set([
+        rendererTitle,
+        ...(Array.isArray(current?.queueTitles) ? current.queueTitles : [])
+      ].filter(Boolean))],
+      fallbackTitle: !rendererTitle && current?.fallbackTitle !== false,
       cwd: "",
       rollout_path: null,
       recency_at: Math.floor(createdAtMs / 1000),
@@ -6661,7 +6904,10 @@ async function readEphemeralSideChats(
 
   const activeSideChatIds = new Set(sideChats.map((thread) => thread.id));
   for (const id of sideChatParentById.keys()) {
-    if (!activeSideChatIds.has(id)) sideChatParentById.delete(id);
+    if (!activeSideChatIds.has(id)) {
+      sideChatParentById.delete(id);
+      sideChatTitleById.delete(id);
+    }
   }
   // Prompt history is persisted asynchronously and can briefly omit an
   // entry while Codex rewrites the state file. Keep lifecycle/close memory
@@ -7891,6 +8137,7 @@ function annotateKnownTitleAmbiguity(selected, candidates) {
 }
 
 async function readTopThreads() {
+  const microSideChatTitlesPromise = refreshMicroSideChatTitleCache();
   const queueWindowsPromise = readCodexQueueWindows();
   const globalStatePromise = readGlobalStateSnapshot();
   const [rows, persistentIds, remoteRows, pinnedIds, activeThreadIds, sidebarNames, goalSnapshot] = await Promise.all([
@@ -7916,6 +8163,7 @@ async function readTopThreads() {
     }))
     .filter((row) => !isInternalThreadRecord(row));
   await resolvePendingNewThreadTarget(localRows, globalStatePromise);
+  await microSideChatTitlesPromise;
   const sideChats = await readEphemeralSideChats(
     persistentIds,
     primaryThreadId ?? localRows[0]?.id ?? null,
@@ -7936,6 +8184,7 @@ async function readTopThreads() {
   for (const thread of sideChats) {
     if (sideChatLifecycles.get(thread.id)?.status !== "closed") continue;
     sideChatParentById.delete(thread.id);
+    sideChatTitleById.delete(thread.id);
     if (activeComposerFocusLease?.kind === "side-chat"
         && activeComposerFocusLease.targetThreadId === thread.id) {
       clearComposerFocusLease({ render: false });
@@ -8241,6 +8490,7 @@ function threadReasoningTrackShouldAnimate(thread) {
       isFastServiceTier(thread.serviceTier)
       || normalizedReasoningEffort(thread.reasoningEffort) === "ultra"
       || reasoningProgressTransitionActive("thread", thread.id)
+      || reasoningParticleTransitionActive("thread", thread.id)
     );
 }
 
@@ -8255,6 +8505,7 @@ function reasoningControlShouldAnimate(
       state.enabled === true
       || normalizedReasoningEffort(visualEffort ?? state.reasoningEffort) === "ultra"
       || reasoningProgressTransitionActive("control", activeThreadId)
+      || reasoningParticleTransitionActive("control", activeThreadId)
     );
 }
 
@@ -8790,6 +9041,54 @@ async function performListedSideChatNavigation(thread, slot, options = {}) {
   if (await focusSideChatComposer()
       && await sideChatFocused({ signal, probe: options.focusProbe })) return true;
 
+  // A Side Chat can already be mounted in Codex's tab strip even when another
+  // browser-use or Side Chat tab is selected. Select that exact renderer tab
+  // before replaying the parent deep link; reopening the parent can otherwise
+  // tear down the tab strip just before the activation attempt.
+  const activateMountedSideChat = options.activateMountedSideChat
+    ?? (async () => {
+      const openApp = options.openApp
+        ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
+          timeout: 5000,
+          signal
+        }));
+      const waitFrontmost = options.waitFrontmost
+        ?? (() => execFileAsync(KEY_BRIDGE, ["codex-wait-frontmost"], {
+          timeout: 3000,
+          maxBuffer: 4096,
+          signal
+        }));
+      await openApp();
+      throwIfAborted(signal);
+      await waitFrontmost();
+      throwIfAborted(signal);
+      try {
+        const result = await codexMicroBridge.focusSideChat(thread.id, {
+          mountTimeoutMs: 180,
+          selectionTimeoutMs: 650,
+          restoreRetained: false
+        });
+        return {
+          backend: "micro",
+          identityVerified: result?.threadId === thread.id && result?.selected === true
+        };
+      } catch (error) {
+        if (error?.delivery === "unknown") throw error;
+        return null;
+      }
+    });
+  try {
+    const activation = await activateMountedSideChat();
+    throwIfAborted(signal);
+    if (activation?.identityVerified === true && await focusSideChatComposer()) return true;
+  } catch (error) {
+    if (isAbortError(error)) throw error;
+    // An unconfirmed renderer click is still verified once through the visible
+    // composer before any parent navigation is allowed to replace the view.
+    if (await focusSideChatComposer()
+        && await sideChatFocused({ signal, probe: options.focusProbe })) return true;
+  }
+
   const parentId = thread.parentId ?? sideChatParentById.get(thread.id) ?? null;
   const parent = options.parentThread ?? knownThreadById(parentId);
   if (!parent?.id) throw new Error("Side Chat parent task was not found");
@@ -8803,23 +9102,27 @@ async function performListedSideChatNavigation(thread, slot, options = {}) {
   const fingerprints = [...titleFingerprints(thread.title)];
   const activateSideChat = options.activateSideChat
     ?? (async () => {
-      const result = await codexControlPlane.execute("side-chat-switch", {
-        micro: (bridge) => bridge.focusSideChat(thread.id),
-        legacy: () => execFileAsync(
+      try {
+        const result = await codexMicroBridge.focusSideChat(thread.id);
+        codexControlPlane.noteMicroSuccess();
+        return {
+          backend: "micro",
+          identityVerified: result?.threadId === thread.id && result?.selected === true
+        };
+      } catch (error) {
+        codexControlPlane.noteMicroFailure(error);
+        if (!definiteMicroFallback(error)) throw error;
+      }
+      try {
+        await execFileAsync(
           KEY_BRIDGE,
           ["codex-open-side-chat", thread.id, ...fingerprints],
           { timeout: 3000, maxBuffer: 32 * 1024, signal }
-        )
-      }, { quiet: true });
-      if (!result.ok) {
-        throw result.error ?? new Error("Side Chat tab activation failed");
+        );
+        return { backend: "legacy", identityVerified: false };
+      } catch (error) {
+        throw new Error("Side Chat tab activation failed", { cause: error });
       }
-      return {
-        backend: result.backend,
-        identityVerified: result.backend === "micro"
-          && result.value?.threadId === thread.id
-          && result.value?.selected === true
-      };
     });
   let lastError = null;
   for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -9242,6 +9545,7 @@ async function openSideChat(context, options = {}) {
         return result.ok;
       });
   const scheduleRefreshes = options.scheduleRefreshes ?? scheduleSideChatTargetRefreshes;
+  const feedback = options.feedback ?? showFeedback;
   const synchronizeCurrent = options.synchronizeCurrent ?? synchronizeCurrentCodexThread;
   const waitFocused = options.waitFocused ?? waitForPendingSideChatFocus;
   const waitComposerReady = options.waitComposerReady ?? waitForPendingSideChatComposerReady;
@@ -9252,9 +9556,10 @@ async function openSideChat(context, options = {}) {
       { quiet: true }
     ));
   return beginComposerCreation("side-chat", async (signal, creation) => {
+    let composerReadyFeedbackShown = false;
     try {
       pendingSideChatTarget = null;
-      showFeedback(context, "loading", "사이드챗 전환");
+      feedback(context, "loading", "사이드챗 전환");
       const requestedAtMs = options.nowMs ?? Date.now();
       creation.requestedAtMs = requestedAtMs;
       const currentThread = await synchronizeCurrent({
@@ -9295,7 +9600,11 @@ async function openSideChat(context, options = {}) {
         sleep,
         focusComposer: focusSideChatComposer
       })).then((ready) => {
-        if (ready) creation.markComposerReady(ready);
+        if (ready) {
+          creation.markComposerReady(ready);
+          composerReadyFeedbackShown = true;
+          feedback(context, "success", "사이드챗 준비");
+        }
       }).catch((error) => {
         if (!isAbortError(error)) {
           console.error(
@@ -9318,14 +9627,14 @@ async function openSideChat(context, options = {}) {
         requestedAtMs,
         targetThreadId: focusedSideChat.id
       });
-      showFeedback(context, "success", "사이드챗 준비");
+      if (!composerReadyFeedbackShown) feedback(context, "success", "사이드챗 준비");
       return true;
     } catch (error) {
       if (isAbortError(error)) {
         clearFeedback(context);
         return false;
       }
-      showFeedback(context, "error", "전환 실패");
+      feedback(context, "error", "전환 실패");
       console.error(`Could not open Codex side chat: ${error?.message ?? "unknown error"}`);
       return false;
     }
@@ -9647,6 +9956,7 @@ function resetDemoEffects() {
   reasoningPowerSelectionsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningProgressTransitionByKey.clear();
+  reasoningParticleMotionByKey.clear();
   reasoningPendingCountByThreadId.clear();
   reasoningPendingCountByContext.clear();
   globalCompletionStartedAtMs = null;
@@ -10657,14 +10967,18 @@ async function verifyThreadRefreshResilience() {
   const savedSideChatSessionStartMs = sideChatSessionStartMs;
   const savedSideChatRowsCache = sideChatRowsCache;
   const savedSideChatParents = new Map(sideChatParentById);
+  const savedSideChatTitles = new Map(sideChatTitleById);
   let sideChatCachePreserved = false;
   let persistentSideChatReentryBlocked = false;
+  let sideChatRendererTitleWinsPromptHistory = false;
   try {
     const sessionStartedAtMs = sideChatCreatedAtMs - 1_000;
     appServerSessionCache = { checkedAtMs: Date.now(), startedAtMs: sessionStartedAtMs };
     sideChatSessionStartMs = sessionStartedAtMs;
     sideChatRowsCache = [];
     sideChatParentById.clear();
+    sideChatTitleById.clear();
+    sideChatTitleById.set(sideChatId, "최초 사이드챗 질문");
     const persistentRows = [stableThread];
     const first = await readEphemeralSideChats(
       persistentRows,
@@ -10703,6 +11017,9 @@ async function verifyThreadRefreshResilience() {
       && afterSemanticFailure[0]?.id === sideChatId
       && afterValidEmptyState.length === 0
       && sideChatRowsCache.length === 0;
+    sideChatRendererTitleWinsPromptHistory = first[0]?.title === "최초 사이드챗 질문"
+      && first[0]?.queueTitles?.includes("최초 사이드챗 질문")
+      && first[0]?.queueTitles?.includes("임시 사이드 작업");
     persistentSideChatReentryBlocked = blockedPersistentId.length === 0;
   } finally {
     appServerSessionCache = savedAppServerSessionCache;
@@ -10710,6 +11027,8 @@ async function verifyThreadRefreshResilience() {
     sideChatRowsCache = savedSideChatRowsCache;
     sideChatParentById.clear();
     for (const [id, parentId] of savedSideChatParents) sideChatParentById.set(id, parentId);
+    sideChatTitleById.clear();
+    for (const [id, title] of savedSideChatTitles) sideChatTitleById.set(id, title);
   }
 
   const passed = recoveredInsideRefresh
@@ -10719,6 +11038,7 @@ async function verifyThreadRefreshResilience() {
     && startupErrorStable
     && rankedListKeepsAllEight
     && sideChatCachePreserved
+    && sideChatRendererTitleWinsPromptHistory
     && persistentSideChatReentryBlocked;
   console.log(JSON.stringify({
     passed,
@@ -10728,6 +11048,7 @@ async function verifyThreadRefreshResilience() {
     oneOffStartupHidden,
     rankedListKeepsAllEight,
     sideChatCachePreserved,
+    sideChatRendererTitleWinsPromptHistory,
     persistentSideChatReentryBlocked,
     startupErrorAfterFailures: startupErrorStable ? THREAD_REFRESH_STARTUP_ERROR_FAILURES : null
   }));
@@ -13156,13 +13477,34 @@ async function verifyInteractionPolicy() {
       "up",
       2
     );
+    const enteringMax = reasoningEffortExecutionPlan(
+      "xhigh",
+      "max",
+      options,
+      "up",
+      1
+    );
     return lighter.mode === "micro"
       && lighter.direction === "down"
       && lighter.count === 3
       && roundTrip.mode === "none"
       && leavingAdvanced.mode === "exact"
+      && enteringMax.mode === "exact"
+      && enteringMax.targetEffort === "max"
       && enteringUltra.mode === "exact"
       && reasoningInputSettleMs({}, "high", true) === REASONING_INPUT_SETTLE_MS;
+  })();
+  const advancedReasoningForegroundPreparation = await (async () => {
+    const operations = [];
+    const focused = await focusAdvancedReasoningComposer(null, {
+      openApp: async () => { operations.push("open"); },
+      waitFrontmost: async () => { operations.push("frontmost"); },
+      focusComposer: async () => {
+        operations.push("composer");
+        return true;
+      }
+    });
+    return focused && operations.join(",") === "open,frontmost,composer";
   })();
   reasoningAvailableEffortsByThreadId.set(
     localThreadB.id,
@@ -13366,16 +13708,66 @@ async function verifyInteractionPolicy() {
   fixedRenderTimeMs = 1_140;
   const fastReasoningFrameB = reasoningControlSvg(fastHighState, localThreadB.id);
   const fastThreadFrameB = threadSvg(fastAnimatedThread, 0);
+  const standardHighTransitionStart = reasoningControlSvg({
+    ...fastHighState,
+    enabled: false
+  }, localThreadB.id);
+  fixedRenderTimeMs = 1_400;
+  const standardHighTransitionMiddle = reasoningControlSvg({
+    ...fastHighState,
+    enabled: false
+  }, localThreadB.id);
+  const decelerationWasActive = reasoningParticleTransitionActive(
+    "control",
+    localThreadB.id,
+    fixedRenderTimeMs
+  );
+  fixedRenderTimeMs = 1_700;
   const standardHighVisual = reasoningControlSvg({
     ...fastHighState,
     enabled: false
   }, localThreadB.id);
+  const accelerationThreadId = "particle-acceleration";
+  const accelerationState = {
+    ...fastHighState,
+    threadId: accelerationThreadId,
+    enabled: false
+  };
+  fixedRenderTimeMs = 2_000;
+  reasoningControlSvg(accelerationState, accelerationThreadId);
+  reasoningControlSvg({ ...accelerationState, enabled: true }, accelerationThreadId);
+  fixedRenderTimeMs = 2_210;
+  const accelerationMiddle = reasoningControlSvg(
+    { ...accelerationState, enabled: true },
+    accelerationThreadId
+  );
+  const accelerationWasActive = reasoningParticleTransitionActive(
+    "control",
+    accelerationThreadId,
+    fixedRenderTimeMs
+  );
+  fixedRenderTimeMs = 2_480;
+  const accelerationSettled = reasoningControlSvg(
+    { ...accelerationState, enabled: true },
+    accelerationThreadId
+  );
+  fixedRenderTimeMs = 1_000;
+  const standardUltraThreadId = "standard-ultra-particles";
+  const standardUltraState = {
+    ...fastHighState,
+    threadId: standardUltraThreadId,
+    enabled: false,
+    reasoningEffort: "ultra"
+  };
+  const standardUltraFrameA = reasoningControlSvg(standardUltraState, standardUltraThreadId);
+  fixedRenderTimeMs = 1_140;
+  const standardUltraFrameB = reasoningControlSvg(standardUltraState, standardUltraThreadId);
   const reasoningFastLabelCases = [
     ["low", "gpt-5.6-terra", "TERRA LIGHT"],
     ["low", "gpt-5.6-sol", "LIGHT"],
     ["medium", "gpt-5.6-sol", "MEDIUM"],
     ["high", "gpt-5.6-sol", "HIGH"],
-    ["xhigh", "gpt-5.6-sol", "EXTRA HIGH"],
+    ["xhigh", "gpt-5.6-sol", "XHIGH"],
     ["max", "gpt-5.6-sol", "MAX"],
     ["ultra", "gpt-5.6-sol", "ULTRA"]
   ];
@@ -13427,13 +13819,49 @@ async function verifyInteractionPolicy() {
     && standardHighVisual.includes('x="72" y="58"')
     && standardHighVisual.includes('text-anchor="middle">HIGH</text>');
   fixedRenderTimeMs = previousFixedRenderTimeMs;
+  const particleSpeedOf = (svg) => Number.parseFloat(
+    svg.match(/data-reasoning-particle-speed="([0-9.]+)"/)?.[1] ?? "NaN"
+  );
   const fastParticlesAnimateAcrossFrames = fastReasoningFrameA.includes('<circle cx="')
     && fastThreadFrameA.includes('<circle cx="')
+    && fastReasoningFrameA.includes('data-reasoning-particles="flow"')
+    && fastThreadFrameA.includes('data-reasoning-particles="flow"')
     && fastReasoningFrameA !== fastReasoningFrameB
     && fastThreadFrameA !== fastThreadFrameB
     && !standardHighVisual.includes('<circle cx="')
     && reasoningControlShouldAnimate(fastHighState, localThreadB.id)
     && threadReasoningTrackShouldAnimate(fastAnimatedThread);
+  const fastParticlesEaseBetweenSpeeds = standardHighTransitionStart.includes(
+    'data-reasoning-particles="decelerating"'
+  )
+    && particleSpeedOf(standardHighTransitionStart) >= 0.998
+    && standardHighTransitionMiddle.includes('data-reasoning-particles="decelerating"')
+    && particleSpeedOf(standardHighTransitionMiddle) > 0
+    && particleSpeedOf(standardHighTransitionMiddle) < 1
+    && decelerationWasActive
+    && !standardHighVisual.includes('<circle cx="')
+    && accelerationMiddle.includes('data-reasoning-particles="accelerating"')
+    && particleSpeedOf(accelerationMiddle) > 0
+    && particleSpeedOf(accelerationMiddle) < 1
+    && accelerationWasActive
+    && accelerationSettled.includes('data-reasoning-particles="flow"')
+    && particleSpeedOf(accelerationSettled) >= 0.998;
+  const firstParticlePosition = (svg) => {
+    const match = svg.match(/<circle cx="([0-9.]+)" cy="([0-9.]+)"/);
+    return match ? { x: Number(match[1]), y: Number(match[2]) } : null;
+  };
+  const standardUltraParticleA = firstParticlePosition(standardUltraFrameA);
+  const standardUltraParticleB = firstParticlePosition(standardUltraFrameB);
+  const ultraStandardParticlesJitterInPlace = standardUltraFrameA.includes(
+    'data-reasoning-particles="jitter"'
+  ) && standardUltraFrameB.includes('data-reasoning-particles="jitter"')
+    && !standardUltraFrameA.includes('data-reasoning-particles="flow"')
+    && standardUltraFrameA !== standardUltraFrameB
+    && standardUltraParticleA !== null
+    && standardUltraParticleB !== null
+    && Math.abs(standardUltraParticleA.x - standardUltraParticleB.x) <= 1
+    && Math.abs(standardUltraParticleA.y - standardUltraParticleB.y) <= 2
+    && reasoningControlShouldAnimate(standardUltraState, standardUltraThreadId);
 
   let resolveStaleFastRefresh;
   const staleFastRefreshState = new Promise((resolve) => { resolveStaleFastRefresh = resolve; });
@@ -13650,6 +14078,7 @@ async function verifyInteractionPolicy() {
   };
   let releaseSideChatFocus;
   let sideChatFocusWaitStarted;
+  const sideChatFocusFeedbackKinds = [];
   const sideChatFocusGate = new Promise((resolve) => { releaseSideChatFocus = resolve; });
   const sideChatFocusReady = new Promise((resolve) => { sideChatFocusWaitStarted = resolve; });
   const sideChatCreationForVoice = openSideChat("interaction-side-chat-focus-voice", {
@@ -13658,6 +14087,7 @@ async function verifyInteractionPolicy() {
     openApp: async () => {},
     sleep: async () => {},
     bridge: () => true,
+    feedback: (_context, kind) => { sideChatFocusFeedbackKinds.push(kind); },
     scheduleRefreshes: () => {},
     waitComposerReady: async (requestedAtMs) => ({ requestedAtMs }),
     waitFocused: async () => {
@@ -13672,6 +14102,8 @@ async function verifyInteractionPolicy() {
   });
   await sideChatFocusReady;
   await activeComposerCreation?.composerReadyPromise;
+  const sideChatButtonClearsLoadingAtComposerReady =
+    sideChatFocusFeedbackKinds.join(",") === "loading,success";
   const sideChatVoiceContext = "interaction-side-chat-focus-voice-control";
   contexts.set(sideChatVoiceContext, ACTIONS.voice);
   contextImages.set(sideChatVoiceContext, voiceSvg("idle"));
@@ -13864,6 +14296,7 @@ async function verifyInteractionPolicy() {
         pairedFocusChecks += 1;
         return pairedFocusChecks >= 2;
       },
+      activateMountedSideChat: async () => null,
       navigateParent: async (parent) => {
         if (parent.id === localThreadB.id) pairedParentNavigations += 1;
         return true;
@@ -13891,6 +14324,7 @@ async function verifyInteractionPolicy() {
         staleSideChatTitleChecks += 1;
         return false;
       },
+      activateMountedSideChat: async () => null,
       navigateParent: async () => true,
       activateSideChat: async () => {
         exactSideChatTabActivations += 1;
@@ -13901,6 +14335,34 @@ async function verifyInteractionPolicy() {
   const exactSideChatUuidBypassesStaleTitle = exactSideChatNavigation
     && exactSideChatTabActivations === 1
     && staleSideChatTitleChecks === 1;
+
+  let mountedSideChatFocuses = 0;
+  let mountedSideChatActivations = 0;
+  let mountedSideChatParentNavigations = 0;
+  const mountedSideChatNavigation = await performListedSideChatNavigation(
+    focusedSideChatThread,
+    1,
+    {
+      parentThread: localThreadB,
+      focusSideChatComposer: async () => {
+        mountedSideChatFocuses += 1;
+        return mountedSideChatFocuses >= 2;
+      },
+      sideChatFocused: async () => false,
+      activateMountedSideChat: async () => {
+        mountedSideChatActivations += 1;
+        return { identityVerified: true };
+      },
+      navigateParent: async () => {
+        mountedSideChatParentNavigations += 1;
+        return true;
+      }
+    }
+  );
+  const mountedSideChatSwitchesWithoutParentReplay = mountedSideChatNavigation
+    && mountedSideChatFocuses === 2
+    && mountedSideChatActivations === 1
+    && mountedSideChatParentNavigations === 0;
 
   let listedSideChatFinalFocuses = 0;
   const listedSideChatOpenResult = await openListedSideChat(
@@ -13978,6 +14440,24 @@ async function verifyInteractionPolicy() {
       return true;
     }
   };
+  const rendererSelectedSideChat = applyMicroReadOnlySnapshot({
+    activeThreadKey: localThreadB.id,
+    activeSideChatThreadId: focusedSideChatThread.id,
+    focusedComposerKind: "side-chat",
+    reasoningEffort: "high",
+    fastEnabled: false
+  }, {
+    candidates: [localThreadA, localThreadB, focusedSideChatThread],
+    promote: false
+  });
+  const rendererSideChatSelectionPreservesLease =
+    rendererSelectedSideChat?.id === focusedSideChatThread.id
+    && primaryThreadId === focusedSideChatThread.id
+    && currentControlThreadId() === focusedSideChatThread.id
+    && activeComposerFocusLease?.targetThreadId === focusedSideChatThread.id
+    && pendingSideChatTarget?.targetThreadId === focusedSideChatThread.id
+    && !manualOverrideController.signal.aborted
+    && !manualOverrideComposerReadyCleared;
   const rendererSelectedCurrent = applyMicroReadOnlySnapshot({
     activeThreadKey: localThreadA.id,
     reasoningEffort: "high",
@@ -13994,6 +14474,38 @@ async function verifyInteractionPolicy() {
     && manualOverrideController.signal.aborted
     && manualOverrideComposerReadyCleared;
   activeComposerCreation = null;
+
+  primaryThreadId = focusedSideChatThread.id;
+  primaryThreadRow = focusedSideChatThread;
+  activateSideChatFocusLease({
+    requestedAtMs: 6677,
+    parentId: localThreadB.id,
+    targetThreadId: focusedSideChatThread.id,
+    thread: focusedSideChatThread,
+    render: false
+  });
+  pendingSideChatTarget = {
+    requestedAtMs: 6677,
+    knownIds: new Set(),
+    parentId: localThreadB.id,
+    targetThreadId: focusedSideChatThread.id
+  };
+  const rendererFocusedMainComposer = applyMicroReadOnlySnapshot({
+    activeThreadKey: localThreadB.id,
+    activeSideChatThreadId: focusedSideChatThread.id,
+    focusedComposerKind: "main",
+    reasoningEffort: "high",
+    fastEnabled: false
+  }, {
+    candidates: [localThreadA, localThreadB, focusedSideChatThread],
+    promote: false
+  });
+  const focusedMainComposerRevokesSelectedSideChat =
+    rendererFocusedMainComposer?.id === localThreadB.id
+    && primaryThreadId === localThreadB.id
+    && currentControlThreadId() === localThreadB.id
+    && activeComposerFocusLease === null
+    && pendingSideChatTarget === null;
 
   clearComposerFocusLease({ render: false });
   primaryThreadId = localThreadB.id;
@@ -14226,12 +14738,15 @@ async function verifyInteractionPolicy() {
     && userSpecificReasoningOptionsAreRespected
     && terraLightPowerAxisIsConnected
     && reasoningFinalTargetPlanningIsSafe
+    && advancedReasoningForegroundPreparation
     && rapidReasoningCoalescesToFinalTarget
     && reasoningInputDuringApplyStartsOneSuccessor
     && reasoningControlUsesCenteredAnimatedTrack
     && reasoningFastGlyphStaysLeftOfLabel
     && effortBarsAnimateBidirectionally
     && fastParticlesAnimateAcrossFrames
+    && fastParticlesEaseBetweenSpeeds
+    && ultraStandardParticlesJitterInPlace
     && staleFastRefreshCannotOverwriteToggle
     && fastRefreshRecoversWithoutPageReentry
     && navigationWaitsForFastToggle
@@ -14241,14 +14756,18 @@ async function verifyInteractionPolicy() {
     && projectNewThreadPromotesMatchingTask
     && manualSwitchRevokesNewThreadPlaceholder
     && standaloneNewThreadKeepsScope
+    && sideChatButtonClearsLoadingAtComposerReady
     && sideChatVoiceUsesProvisionalComposer
     && sideChatReasoningUsesFocusedTask
     && sideChatFocusPersistsAcrossControls
     && listedSideChatRestoresPairedView
     && exactSideChatUuidBypassesStaleTitle
+    && mountedSideChatSwitchesWithoutParentReplay
     && listedSideChatKeyFocusesComposer
     && explicitTaskSwitchClearsSideChatPlaceholder
+    && rendererSideChatSelectionPreservesLease
     && rendererSelectionRevokesSideChatLease
+    && focusedMainComposerRevokesSelectedSideChat
     && creationAndFastLeaseIsBidirectional
     && navigationSupersedesPendingCreation
     && creationSupersedesPendingNavigation
@@ -14322,12 +14841,15 @@ async function verifyInteractionPolicy() {
     userSpecificReasoningOptionsAreRespected,
     terraLightPowerAxisIsConnected,
     reasoningFinalTargetPlanningIsSafe,
+    advancedReasoningForegroundPreparation,
     rapidReasoningCoalescesToFinalTarget,
     reasoningInputDuringApplyStartsOneSuccessor,
     reasoningControlUsesCenteredAnimatedTrack,
     reasoningFastGlyphStaysLeftOfLabel,
     effortBarsAnimateBidirectionally,
     fastParticlesAnimateAcrossFrames,
+    fastParticlesEaseBetweenSpeeds,
+    ultraStandardParticlesJitterInPlace,
     staleFastRefreshCannotOverwriteToggle,
     passiveUnknownFastRefreshPreservesConfirmedState,
     fastRefreshRecoversWithoutPageReentry,
@@ -14338,14 +14860,18 @@ async function verifyInteractionPolicy() {
     projectNewThreadPromotesMatchingTask,
     manualSwitchRevokesNewThreadPlaceholder,
     standaloneNewThreadKeepsScope,
+    sideChatButtonClearsLoadingAtComposerReady,
     sideChatVoiceUsesProvisionalComposer,
     sideChatReasoningUsesFocusedTask,
     sideChatFocusPersistsAcrossControls,
     listedSideChatRestoresPairedView,
     exactSideChatUuidBypassesStaleTitle,
+    mountedSideChatSwitchesWithoutParentReplay,
     listedSideChatKeyFocusesComposer,
     explicitTaskSwitchClearsSideChatPlaceholder,
+    rendererSideChatSelectionPreservesLease,
     rendererSelectionRevokesSideChatLease,
+    focusedMainComposerRevokesSelectedSideChat,
     creationAndFastLeaseIsBidirectional,
     navigationSupersedesPendingCreation,
     creationSupersedesPendingNavigation,
@@ -14380,6 +14906,7 @@ async function verifyInteractionPolicy() {
   reasoningPowerSelectionsByThreadId.clear();
   reasoningVisualOverrideByThreadId.clear();
   reasoningProgressTransitionByKey.clear();
+  reasoningParticleMotionByKey.clear();
   reasoningPendingCountByThreadId.clear();
   reasoningPendingCountByContext.clear();
   voiceHeldContexts.clear();

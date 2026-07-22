@@ -67,6 +67,13 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
   assert.deepEqual(normalizeMicroSnapshot({
     connected: true,
     activeThreadKey: "thread-1",
+    activeSideChatThreadId: "sidechat:019f8442-7025-7b42-8fc0-0b93f0be2073",
+    focusedComposerKind: "main",
+    sideChats: [{
+      id: "sidechat:019f8442-7025-7b42-8fc0-0b93f0be2073",
+      title: "Original Side Chat question",
+      selected: true
+    }],
     model: "GPT-5.6-TERRA",
     reasoningEffort: "High",
     powerSelections: [
@@ -83,6 +90,13 @@ test("normalizes the read-only Micro snapshot without conversation text", () => 
   }), {
     connected: true,
     activeThreadKey: "thread-1",
+    activeSideChatThreadId: "019f8442-7025-7b42-8fc0-0b93f0be2073",
+    focusedComposerKind: "main",
+    sideChats: [{
+      id: "019f8442-7025-7b42-8fc0-0b93f0be2073",
+      title: "Original Side Chat question",
+      selected: true
+    }],
     model: "gpt-5.6-terra",
     reasoningEffort: "high",
     powerSelectionId: null,
@@ -211,6 +225,12 @@ test("all generated renderer entrypoints remain syntactically valid", () => {
   assert.match(runPowerSelectionExpression("gpt-5.6-terra", "low"), /onSelectPower/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /3207467860/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /codex-micro-device-state-changed/);
+  assert.match(READ_ONLY_SNAPSHOT_EXPRESSION, /activeSideChatThreadId/);
+  assert.match(READ_ONLY_SNAPSHOT_EXPRESSION, /focusedComposerKind/);
+  assert.match(READ_ONLY_SNAPSHOT_EXPRESSION, /sideChats/);
+  assert.match(READ_ONLY_SNAPSHOT_EXPRESSION, /data-tab-id\^="sidechat:"/);
+  assert.match(READ_ONLY_SNAPSHOT_EXPRESSION, /data-codex-composer-root/);
+  assert.match(READ_ONLY_SNAPSHOT_EXPRESSION, /sidechat:/);
 });
 
 test("focuses an exact Side Chat tab by renderer UUID", async () => {
@@ -220,7 +240,7 @@ test("focuses an exact Side Chat tab by renderer UUID", async () => {
   let expression = "";
   bridge.evaluate = async (value, options) => {
     expression = value;
-    assert.equal(options.timeoutMs, 1800);
+    assert.equal(options.timeoutMs, 2800);
     return { delivered: true, selected: true, alreadySelected: false, threadId };
   };
   assert.deepEqual(await bridge.focusSideChat(threadId), {
@@ -232,6 +252,22 @@ test("focuses an exact Side Chat tab by renderer UUID", async () => {
   assert.match(expression, new RegExp(`sidechat:${threadId}`));
   assert.match(expression, /data-tab-id/);
   assert.match(expression, /aria-selected/);
+  assert.match(expression, /role="button"/);
+  assert.match(expression, /role="tabpanel"/);
+  assert.match(expression, /mountDeadline/);
+  assert.match(expression, /local-conversation-thread-/);
+  assert.match(expression, /activateRetainedTab/);
+  assert.match(expression, /activeTab\$/);
+  assert.match(expression, /sideChatsMarker/);
+
+  bridge.evaluate = async (value) => {
+    assert.match(value, /const restoreRetained = false/);
+    return { delivered: false, selected: false, matches: 0, threadId };
+  };
+  await assert.rejects(
+    () => bridge.focusSideChat(threadId, { restoreRetained: false }),
+    (error) => error.code === "MICRO_CAPABILITY_UNAVAILABLE" && error.delivery === "none"
+  );
 
   bridge.evaluate = async () => ({
     delivered: false,

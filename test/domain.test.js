@@ -39,6 +39,7 @@ const {
 } = require("../src/goal-state");
 const {
   parseCodexQueueWindows,
+  queueBadgeLabel,
   queueCountForWindow,
   queueCountsByThreadForWindow
 } = require("../src/queue-state");
@@ -686,9 +687,19 @@ test("queue parsing counts localized and English button fingerprints", () => {
   assert.equal(queueCountForWindow(windows[1]), 3);
 });
 
+test("queue badge switches to 9+ at nine queued messages and stays capped", () => {
+  assert.equal(queueBadgeLabel(0), "");
+  assert.equal(queueBadgeLabel(1), "+1");
+  assert.equal(queueBadgeLabel(8), "+8");
+  assert.equal(queueBadgeLabel(9), "9+");
+  assert.equal(queueBadgeLabel(10), "9+");
+  assert.equal(queueBadgeLabel("27"), "9+");
+});
+
 test("queue row geometry keeps normal-task and Side Chat counts separate", () => {
   const mainTitle = "스트림덱";
-  const sideChatTitle = "이 프로젝트 소개해";
+  const sideChatTitle = "최초 사이드챗 질문";
+  const stalePromptHistoryTitle = "두 번째 사이드챗 질문";
   const deleteFingerprint = stringFingerprint("Delete queued message");
   const actionFingerprint = stringFingerprint("Queued message actions");
   const output = [
@@ -706,7 +717,12 @@ test("queue row geometry keeps normal-task and Side Chat counts separate", () =>
   const [window] = parseCodexQueueWindows(output);
   const counts = queueCountsByThreadForWindow(window, [
     { id: "main", title: mainTitle },
-    { id: "side", title: sideChatTitle, ephemeral: true }
+    {
+      id: "side",
+      title: stalePromptHistoryTitle,
+      queueTitles: [sideChatTitle],
+      ephemeral: true
+    }
   ]);
 
   assert.equal(queueCountForWindow(window), 2);

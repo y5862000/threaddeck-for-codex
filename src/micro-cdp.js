@@ -175,6 +175,19 @@ function normalizeMicroPowerSelections(values) {
   return selections;
 }
 
+function normalizeMicroSideChats(values) {
+  const seen = new Set();
+  const sideChats = [];
+  for (const value of Array.isArray(values) ? values : []) {
+    const id = microThreadIdFromKey(value?.id ?? value?.threadId ?? value?.tabId);
+    const title = typeof value?.title === "string" ? value.title.trim() : "";
+    if (!id || !title || seen.has(id)) continue;
+    seen.add(id);
+    sideChats.push({ id, title, selected: value?.selected === true });
+  }
+  return sideChats;
+}
+
 function normalizeMicroSnapshot(value) {
   const snapshot = value && typeof value === "object" ? value : {};
   const model = normalizeMicroModel(snapshot.model);
@@ -190,6 +203,13 @@ function normalizeMicroSnapshot(value) {
   return {
     connected: snapshot.connected === true,
     activeThreadKey: microThreadIdFromKey(snapshot.activeThreadKey),
+    activeSideChatThreadId: microThreadIdFromKey(snapshot.activeSideChatThreadId),
+    focusedComposerKind: snapshot.focusedComposerKind === "main"
+      ? "main"
+      : snapshot.focusedComposerKind === "side-chat"
+        ? "side-chat"
+        : null,
+    sideChats: normalizeMicroSideChats(snapshot.sideChats),
     model,
     reasoningEffort,
     powerSelectionId,
@@ -304,8 +324,29 @@ const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
   const visible = (element) => Boolean(element && element.getClientRects().length > 0 && getComputedStyle(element).visibility !== 'hidden');
   const composerRoots = [...document.querySelectorAll('[data-codex-composer-root]')].filter(visible);
   const focusedRoot = document.activeElement?.closest?.('[data-codex-composer-root]');
+  const selectedSideChatTab = [
+    ...document.querySelectorAll('[data-tab-id^="sidechat:"][aria-selected="true"]'),
+    ...document.querySelectorAll('[data-app-shell-tab-panel-controller="right"][data-tab-id^="sidechat:"], [role="tabpanel"][data-tab-id^="sidechat:"]')
+  ].find(visible);
+  const rightPanelSelector = '[data-app-shell-tab-panel-controller="right"], [role="tabpanel"][data-tab-id^="sidechat:"]';
+  const sideChatComposerRoot = composerRoots.find((root) => root.closest(rightPanelSelector))
+    ?? (selectedSideChatTab
+      ? [...composerRoots].sort((left, right) => right.getBoundingClientRect().x - left.getBoundingClientRect().x)[0] ?? null
+      : null);
+  const mainComposerRoot = composerRoots.find((root) => root.closest('[data-pip-anchor-host="codex-main-thread"]'))
+    ?? [...composerRoots].sort((left, right) => left.getBoundingClientRect().x - right.getBoundingClientRect().x)[0]
+    ?? null;
+  const focusedComposerKind = focusedRoot && visible(focusedRoot)
+    ? focusedRoot === sideChatComposerRoot || Boolean(focusedRoot.closest(rightPanelSelector))
+      ? 'side-chat'
+      : 'main'
+    : null;
   const activeComposerRoot = focusedRoot && visible(focusedRoot)
     ? focusedRoot
+    : focusedComposerKind === 'main'
+      ? mainComposerRoot
+      : focusedComposerKind === 'side-chat'
+        ? sideChatComposerRoot
     : [...composerRoots].sort((left, right) => right.getBoundingClientRect().x - left.getBoundingClientRect().x)[0] ?? null;
   const intelligenceTrigger = activeComposerRoot?.querySelector('[data-codex-intelligence-trigger]')
     ?? [...document.querySelectorAll('[data-codex-intelligence-trigger]')].find(visible)
@@ -358,6 +399,22 @@ const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
     ?? document.querySelector('[data-app-action-sidebar-thread-id][aria-current="page"]')?.getAttribute('data-app-action-sidebar-thread-id')
     ?? document.querySelector('[data-above-composer-conversation-id]')?.getAttribute('data-above-composer-conversation-id')
     ?? null;
+  // Side Chats share their parent task's ordinary composer identity. Preserve
+  // the exact selected right-panel tab separately so clients do not mistake
+  // that parent id for a manual switch away from the Side Chat.
+  const activeSideChatThreadId = selectedSideChatTab
+    ?.getAttribute('data-tab-id')
+    ?.replace(/^sidechat:/, '')
+    ?? null;
+  const sideChats = [];
+  const seenSideChatIds = new Set();
+  for (const tab of [...document.querySelectorAll('[data-tab-id^="sidechat:"][role="button"]')].filter(visible)) {
+    const id = tab.getAttribute('data-tab-id')?.replace(/^sidechat:/, '') ?? null;
+    const title = (tab.innerText || tab.textContent || '').replace(/\\s+/g, ' ').trim();
+    if (!id || !title || seenSideChatIds.has(id)) continue;
+    seenSideChatIds.add(id);
+    sideChats.push({ id, title, selected: id === activeSideChatThreadId });
+  }
 
   let slots = [];
   const slotSignalsUrl = urls.find((url) => url.includes('/assets/codex-micro-slot-signals-'));
@@ -435,6 +492,9 @@ const READ_ONLY_SNAPSHOT_EXPRESSION = `(async () => {
   return {
     connected: true,
     activeThreadKey,
+    activeSideChatThreadId,
+    focusedComposerKind,
+    sideChats,
     model,
     reasoningEffort,
     powerSelectionId,
@@ -781,7 +841,7 @@ function runUltraWarningConfirmationExpression(timeoutMs = 4500) {
   })()`;
 }
 
-function runSideChatFocusExpression(threadId) {
+function runSideChatFocusExpression(threadId, options = {}) {
   const normalizedThreadId = String(threadId ?? "").trim().toLowerCase();
   if (!CODEX_EXACT_THREAD_UUID_PATTERN.test(normalizedThreadId)) {
     throw new MicroBridgeError("Invalid Side Chat thread id.", {
@@ -790,43 +850,213 @@ function runSideChatFocusExpression(threadId) {
     });
   }
   const tabId = `sidechat:${normalizedThreadId}`;
+  const mountTimeoutMs = Math.max(0, Math.min(
+    3000,
+    Math.trunc(options.mountTimeoutMs ?? 1400)
+  ));
+  const selectionTimeoutMs = Math.max(200, Math.min(
+    2000,
+    Math.trunc(options.selectionTimeoutMs ?? 800)
+  ));
+  const restoreRetained = options.restoreRetained !== false;
   return `(async () => {
     const tabId = ${JSON.stringify(tabId)};
     const threadId = ${JSON.stringify(normalizedThreadId)};
+    const mountTimeoutMs = ${mountTimeoutMs};
+    const selectionTimeoutMs = ${selectionTimeoutMs};
+    const restoreRetained = ${restoreRetained};
     const visible = (element) => Boolean(
       element
       && element.getClientRects().length > 0
       && getComputedStyle(element).visibility !== 'hidden'
     );
-    const roots = [...document.querySelectorAll('[data-tab-id]')]
-      .filter((element) => element.getAttribute('data-tab-id') === tabId && visible(element));
-    const tabs = [...new Set(roots.flatMap((root) => (
-      root.matches('[role="tab"]')
-        ? [root]
-        : [...root.querySelectorAll('[role="tab"]')]
-    )))].filter(visible);
-    if (tabs.length !== 1) {
+    const mountedControl = () => {
+      const roots = [...document.querySelectorAll('[data-tab-id]')]
+        .filter((element) => element.getAttribute('data-tab-id') === tabId && visible(element));
+      const tabs = [...new Set(roots.flatMap((root) => (
+        root.matches('[role="tab"]')
+          ? [root]
+          : [...root.querySelectorAll('[role="tab"]')]
+      )))].filter(visible);
+      if (tabs.length > 0) return { controls: tabs, kind: 'tab' };
+      const buttons = roots.filter((root) => root.matches('[role="button"]'));
+      return { controls: [...new Set(buttons)].filter(visible), kind: 'button' };
+    };
+    const exactPanelVisible = () => [...document.querySelectorAll(
+      '[data-app-shell-tab-panel-controller="right"][data-tab-id], [role="tabpanel"][data-tab-id]'
+    )].some((panel) => panel.getAttribute('data-tab-id') === tabId && visible(panel));
+    const activateRetainedTab = async () => {
+      if (!restoreRetained) return { attempted: false, activated: false };
+      try {
+        ${ASSET_URLS_SOURCE}
+        const localConversationUrl = urls.find((url) => (
+          url.includes('/assets/local-conversation-thread-')
+        ));
+        if (!localConversationUrl) {
+          return { attempted: true, activated: false, error: 'Side Chat module is unavailable.' };
+        }
+        const source = await (await fetch(localConversationUrl)).text();
+        const sideChatsMarker = source.indexOf('defaultMessage:\`Side chats\`');
+        const sideChatsSource = sideChatsMarker >= 0
+          ? source.slice(Math.max(0, sideChatsMarker - 3000), sideChatsMarker + 4000)
+          : source;
+        const activationAlias = sideChatsSource.match(
+          /([A-Za-z_$][\\w$]*)\\([A-Za-z_$][\\w$]*,\`right\`,[A-Za-z_$][\\w$]*\\.tabId\\)/
+        )?.[1] ?? null;
+        const panelAlias = sideChatsSource.match(
+          /([A-Za-z_$][\\w$]*)\\.tabs\\$/
+        )?.[1] ?? null;
+        if (!activationAlias || !panelAlias) {
+          return { attempted: true, activated: false, error: 'Side Chat controller aliases are unavailable.' };
+        }
+        const imports = [...source.matchAll(
+          /import\\s*\\{([^}]*)\\}\\s*from\\s*["']([^"']+)["']/g
+        )];
+        const resolveAlias = (alias) => {
+          for (const match of imports) {
+            for (const rawSpecifier of match[1].split(',')) {
+              const parts = rawSpecifier.trim().split(/\\s+as\\s+/);
+              const exportName = parts[0];
+              const localName = parts[1] ?? parts[0];
+              if (localName === alias) {
+                return {
+                  exportName,
+                  url: new URL(match[2], localConversationUrl).href
+                };
+              }
+            }
+          }
+          return null;
+        };
+        const activationImport = resolveAlias(activationAlias);
+        const panelImport = resolveAlias(panelAlias);
+        if (!activationImport || !panelImport) {
+          return { attempted: true, activated: false, error: 'Side Chat controller imports are unavailable.' };
+        }
+        const activationNamespace = await import(activationImport.url);
+        const panelNamespace = await import(panelImport.url);
+        const activateTab = activationNamespace[activationImport.exportName];
+        const rightPanel = panelNamespace[panelImport.exportName];
+        if (typeof activateTab !== 'function'
+            || rightPanel?.panelId !== 'right'
+            || !rightPanel.tabs$
+            || !rightPanel.activeTab$) {
+          return { attempted: true, activated: false, error: 'Side Chat controller shape is unavailable.' };
+        }
+
+        const root = document.getElementById('root');
+        const reactKey = root && Object.getOwnPropertyNames(root)
+          .find((key) => key.startsWith('__reactContainer$'));
+        if (!root || !reactKey) {
+          return { attempted: true, activated: false, error: 'Codex renderer root is unavailable.' };
+        }
+        const queue = [root[reactKey]];
+        const seenFibers = new Set();
+        const seenStores = new Set();
+        let routeStore = null;
+        while (queue.length && seenFibers.size < 40000 && !routeStore) {
+          const fiber = queue.pop();
+          if (!fiber || seenFibers.has(fiber)) continue;
+          seenFibers.add(fiber);
+          let hook = fiber.memoizedState;
+          for (let hookCount = 0; hook && hookCount < 100; hookCount += 1, hook = hook.next) {
+            const candidate = hook.memoizedState?.current;
+            if (!candidate
+                || typeof candidate !== 'object'
+                || seenStores.has(candidate)
+                || typeof candidate.get !== 'function'
+                || typeof candidate.set !== 'function') continue;
+            seenStores.add(candidate);
+            try {
+              const tabs = candidate.get(rightPanel.tabs$);
+              if (Array.isArray(tabs) && tabs.some((tab) => tab?.tabId === tabId)) {
+                routeStore = candidate;
+                break;
+              }
+            } catch {}
+          }
+          if (fiber.child) queue.push(fiber.child);
+          if (fiber.sibling) queue.push(fiber.sibling);
+        }
+        if (!routeStore) {
+          return { attempted: true, activated: false, error: 'The exact Side Chat is not retained.' };
+        }
+        const delivered = activateTab(routeStore, 'right', tabId) === true;
+        const activeDeadline = Date.now() + selectionTimeoutMs;
+        let activeTabId = null;
+        while (Date.now() < activeDeadline) {
+          const activeTab = routeStore.get(rightPanel.activeTab$);
+          activeTabId = typeof activeTab === 'string' ? activeTab : activeTab?.tabId ?? null;
+          if (activeTabId === tabId) break;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+        }
+        return {
+          attempted: true,
+          activated: delivered && activeTabId === tabId,
+          activeTabId
+        };
+      } catch (error) {
+        return {
+          attempted: true,
+          activated: false,
+          error: String(error?.message ?? error)
+        };
+      }
+    };
+    let retained = await activateRetainedTab();
+    let mounted = mountedControl();
+    if (retained.activated) {
+      const retainedPanelDeadline = Date.now() + selectionTimeoutMs;
+      while (!exactPanelVisible() && Date.now() < retainedPanelDeadline) {
+        await new Promise((resolve) => setTimeout(resolve, 20));
+      }
+      if (exactPanelVisible()) {
+        return {
+          delivered: true,
+          selected: true,
+          alreadySelected: false,
+          controlKind: 'retained-state',
+          retainedRestored: true,
+          threadId
+        };
+      }
+      mounted = mountedControl();
+    }
+    const mountDeadline = Date.now() + mountTimeoutMs;
+    while (mounted.controls.length === 0 && Date.now() < mountDeadline) {
+      await new Promise((resolve) => setTimeout(resolve, 30));
+      mounted = mountedControl();
+    }
+    if (mounted.controls.length !== 1) {
+      const selected = retained.activated && exactPanelVisible();
       return {
-        delivered: false,
-        error: tabs.length === 0
-          ? 'The exact Side Chat tab is not mounted.'
-          : 'The exact Side Chat tab is ambiguous.',
-        matches: tabs.length,
+        delivered: selected,
+        selected,
+        retainedRestored: retained.activated,
+        error: selected
+          ? null
+          : mounted.controls.length === 0
+            ? retained.error ?? 'The exact Side Chat tab is not mounted.'
+            : 'The exact Side Chat tab is ambiguous.',
+        matches: mounted.controls.length,
         threadId
       };
     }
-    const tab = tabs[0];
-    const alreadySelected = tab.getAttribute('aria-selected') === 'true';
-    tab.click();
-    tab.focus({ preventScroll: true });
-    const deadline = Date.now() + 700;
-    while (tab.getAttribute('aria-selected') !== 'true' && Date.now() < deadline) {
+    const control = mounted.controls[0];
+    const selected = () => control.getAttribute('aria-selected') === 'true' || exactPanelVisible();
+    const alreadySelected = selected();
+    control.click();
+    control.focus({ preventScroll: true });
+    const selectionDeadline = Date.now() + selectionTimeoutMs;
+    while (!selected() && Date.now() < selectionDeadline) {
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
     return {
       delivered: true,
-      selected: tab.getAttribute('aria-selected') === 'true',
+      selected: selected(),
       alreadySelected,
+      controlKind: mounted.kind,
+      retainedRestored: retained.activated,
       threadId
     };
   })()`;
@@ -1102,12 +1332,25 @@ class CodexMicroBridge {
     }
   }
 
-  async focusSideChat(threadId) {
+  async focusSideChat(threadId, options = {}) {
+    const mountTimeoutMs = Math.max(0, Math.min(
+      3000,
+      Math.trunc(options.mountTimeoutMs ?? 1400)
+    ));
+    const selectionTimeoutMs = Math.max(200, Math.min(
+      2000,
+      Math.trunc(options.selectionTimeoutMs ?? 800)
+    ));
+    const restoreRetained = options.restoreRetained !== false;
     try {
       await this.ensureConnected();
       const result = await this.evaluate(
-        runSideChatFocusExpression(threadId),
-        { timeoutMs: 1800 }
+        runSideChatFocusExpression(threadId, {
+          mountTimeoutMs,
+          selectionTimeoutMs,
+          restoreRetained
+        }),
+        { timeoutMs: Math.max(1400, mountTimeoutMs + selectionTimeoutMs + 600) }
       );
       if (result?.delivered !== true) {
         throw new MicroBridgeError(
