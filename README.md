@@ -20,7 +20,7 @@
   <img alt="Stream Deck Neo" src="https://img.shields.io/badge/device-Stream%20Deck%20Neo-111111?style=flat-square">
 </p>
 
-<p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
+<p align="center"><strong>English (default)</strong> · <a href="README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
 
 ThreadDeck turns Elgato Stream Deck Neo into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and now uses Codex's own Micro renderer events when they are available. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable Micro bridge falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 

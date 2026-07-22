@@ -5034,8 +5034,18 @@ function afterFastModeUpdate(startNavigation) {
   // Fast mode is scoped to the focused composer, while the native AX action
   // deliberately accepts no task id. Keep task navigation behind the active
   // toggle so a later button press cannot move focus between its verification
-  // and AXPress and accidentally change the next task instead.
-  return update.catch(() => false).then(startNavigation);
+  // and AXPress and accidentally change the next task instead. An Effort tap
+  // can replace the active control promise with a successor while this wait is
+  // in flight. Drain that successor too; otherwise toggleFastMode() would see
+  // it as active, return the Effort promise, and silently swallow the held Fast
+  // gesture without ever dispatching FAST.
+  return update.catch(() => false).then(() => {
+    const successor = activeFastModeUpdate;
+    if (successor && successor !== update) {
+      return afterFastModeUpdate(startNavigation);
+    }
+    return startNavigation();
+  });
 }
 
 function toggleFastMode(context, options = {}) {
@@ -12574,6 +12584,60 @@ async function verifyInteractionPolicy() {
     && callsBeforeReasoningKeyUp === 1
     && immediateReasoningFastToggleCalls === 1;
 
+  const queuedReasoningHoldContext = "interaction-reasoning-fast-queued";
+  contexts.set(queuedReasoningHoldContext, ACTIONS.reasoning);
+  let releaseBlockedControl;
+  const blockedControlGate = new Promise((resolve) => {
+    releaseBlockedControl = resolve;
+  });
+  let blockedControlUpdate;
+  blockedControlUpdate = blockedControlGate.finally(() => {
+    if (activeFastModeUpdate === blockedControlUpdate) activeFastModeUpdate = null;
+  });
+  activeFastModeUpdate = blockedControlUpdate;
+  let queuedReasoningFastToggleCalls = 0;
+  fastModePressStartedAt.set(queuedReasoningHoldContext, Date.now());
+  const queuedThresholdToggle = triggerReasoningFastModeHold(
+    queuedReasoningHoldContext,
+    {
+      feedback: () => {},
+      synchronizeCurrent: async () => localThreadB,
+      focusProbe: async () => ({ stdout: "match=uuid" }),
+      toggleMode: async () => {
+        queuedReasoningFastToggleCalls += 1;
+        return {
+          stdout: "requested=on state=on available=1 changed=1 verified=1 reasoning=max service_tier=priority composer_focused=1\n"
+        };
+      }
+    }
+  );
+  // Model an Effort successor replacing the operation that the hold first
+  // observed. The Fast gesture must follow both controls, not adopt the
+  // successor's result as if the FAST event itself had run.
+  let releaseSuccessorControl;
+  const successorControlGate = new Promise((resolve) => {
+    releaseSuccessorControl = resolve;
+  });
+  let successorControlUpdate;
+  successorControlUpdate = successorControlGate.finally(() => {
+    if (activeFastModeUpdate === successorControlUpdate) activeFastModeUpdate = null;
+  });
+  activeFastModeUpdate = successorControlUpdate;
+  const queuedThresholdRelease = endReasoningControlPress(
+    queuedReasoningHoldContext
+  );
+  releaseBlockedControl(true);
+  await blockedControlUpdate;
+  releaseSuccessorControl(true);
+  const queuedReasoningHoldResults = await Promise.all([
+    queuedThresholdToggle,
+    queuedThresholdRelease,
+    successorControlUpdate
+  ]);
+  const reasoningFastHoldSurvivesEffortSuccessor = queuedReasoningHoldResults.every(Boolean)
+    && queuedReasoningFastToggleCalls === 1
+    && fastModeState.enabled === true;
+
   const reasoningContext = "interaction-reasoning";
   contexts.set(reasoningContext, ACTIONS.reasoning);
   reasoningDirectionByThreadId.delete(localThreadB.id);
@@ -13748,6 +13812,7 @@ async function verifyInteractionPolicy() {
     && fastToggleRestoresComposerAfterNativeFocusMiss
     && fastModeWorksOnRelease
     && reasoningFastToggleStartsAtThreshold
+    && reasoningFastHoldSurvivesEffortSuccessor
     && reasoningPingPongStateIsVerified
     && optimisticReasoningMovesBeforeNativeConfirmation
     && userSpecificReasoningOptionsAreRespected
@@ -13839,6 +13904,7 @@ async function verifyInteractionPolicy() {
     fastToggleRestoresComposerAfterNativeFocusMiss,
     fastModeWorksOnRelease,
     reasoningFastToggleStartsAtThreshold,
+    reasoningFastHoldSurvivesEffortSuccessor,
     reasoningPingPongStateIsVerified,
     optimisticReasoningMovesBeforeNativeConfirmation,
     userSpecificReasoningOptionsAreRespected,
