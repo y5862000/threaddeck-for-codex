@@ -10314,7 +10314,43 @@ function resetDemoEffects() {
   lastUnreadCompletionFrameAtMs = 0;
 }
 
-function demoPreviewSvg(keySvgs) {
+function documentationPressDepth(elapsedMs, pressedAtMs, releasedAtMs) {
+  const attackMs = 90;
+  const releaseMs = 120;
+  const reboundMs = 180;
+  if (elapsedMs < pressedAtMs) return 0;
+  if (elapsedMs < pressedAtMs + attackMs) {
+    return smootherStep01((elapsedMs - pressedAtMs) / attackMs);
+  }
+  if (elapsedMs < releasedAtMs) return 1;
+  if (elapsedMs < releasedAtMs + releaseMs) {
+    return 1 - smootherStep01((elapsedMs - releasedAtMs) / releaseMs);
+  }
+  if (elapsedMs < releasedAtMs + releaseMs + reboundMs) {
+    const progress = (elapsedMs - releasedAtMs - releaseMs) / reboundMs;
+    return -0.12 * Math.sin(Math.PI * progress) ** 2;
+  }
+  return 0;
+}
+
+function documentationPressTransform(x, y, size, depth) {
+  const normalizedDepth = Math.max(-0.2, Math.min(1, Number(depth) || 0));
+  const centerX = x + size / 2;
+  const centerY = y + size / 2;
+  const scale = 1 - 0.055 * normalizedDepth;
+  const offsetY = 2.8 * Math.max(0, normalizedDepth);
+  return {
+    depth: normalizedDepth,
+    transform: `translate(${centerX.toFixed(2)} ${(centerY + offsetY).toFixed(2)}) scale(${scale.toFixed(4)}) translate(${(-centerX).toFixed(2)} ${(-centerY).toFixed(2)})`
+  };
+}
+
+function combineDocumentationPressDepths(...depths) {
+  const positive = Math.max(...depths);
+  return positive > 0 ? positive : Math.min(...depths);
+}
+
+function demoPreviewSvg(keySvgs, pressDepths = []) {
   const margin = 28;
   const gap = 18;
   const keySize = 144;
@@ -10333,7 +10369,10 @@ function demoPreviewSvg(keySvgs) {
   )).join("\n    ");
   const images = keyPositions.map(({ svg, index, x, y }) => {
     const data = Buffer.from(svg).toString("base64");
-    return `<image x="${x}" y="${y}" width="${keySize}" height="${keySize}" clip-path="url(#demoKeyClip${index})" href="data:image/svg+xml;base64,${data}"/>`;
+    const press = documentationPressTransform(x, y, keySize, pressDepths[index]);
+    return `<g data-demo-key="${index}" data-press-depth="${press.depth.toFixed(3)}" transform="${press.transform}">
+    <image x="${x}" y="${y}" width="${keySize}" height="${keySize}" clip-path="url(#demoKeyClip${index})" href="data:image/svg+xml;base64,${data}"/>
+  </g>`;
   }).join("\n  ");
   return `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
   <defs>
@@ -10342,6 +10381,18 @@ function demoPreviewSvg(keySvgs) {
   <rect width="${width}" height="${height}" rx="34" fill="#2F2F2F"/>
   ${images}
 </svg>\n`;
+}
+
+function demoOverviewPressDepths(elapsedMs) {
+  const depths = Array(8).fill(0);
+  depths[5] = combineDocumentationPressDepths(
+    documentationPressDepth(elapsedMs, 450, 610),
+    documentationPressDepth(elapsedMs, 1_050, 1_210),
+    documentationPressDepth(elapsedMs, 1_650, 1_810),
+    documentationPressDepth(elapsedMs, 2_050, 2_700)
+  );
+  depths[4] = documentationPressDepth(elapsedMs, 2_950, 3_700);
+  return depths;
 }
 
 function demoKeySvgs(nowMs, elapsedMs = 0, animated = false) {
@@ -10496,7 +10547,10 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   for (let index = 0; index < frameCount; index += 1) {
     const elapsedMs = index * frameIntervalMs;
     const nowMs = DEMO_EPOCH_MS + elapsedMs;
-    const frame = demoPreviewSvg(demoKeySvgs(nowMs, elapsedMs, true));
+    const frame = demoPreviewSvg(
+      demoKeySvgs(nowMs, elapsedMs, true),
+      demoOverviewPressDepths(elapsedMs)
+    );
     fsSync.writeFileSync(path.join(resolvedDirectory, `frame-${String(index).padStart(3, "0")}.svg`), frame);
   }
   fixedRenderTimeMs = null;
@@ -10504,11 +10558,14 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   console.log(`Rendered ${frameCount} animation frames in ${resolvedDirectory}`);
 }
 
-function documentationImage(svg, x, y, size) {
+function documentationImage(svg, x, y, size, pressDepth = 0) {
   const data = Buffer.from(svg).toString("base64");
   const radius = (size * 22 / 144).toFixed(1);
+  const press = documentationPressTransform(x, y, size, pressDepth);
   return `<defs><clipPath id="documentationKeyClip"><rect x="${x}" y="${y}" width="${size}" height="${size}" rx="${radius}"/></clipPath></defs>
-  <image x="${x}" y="${y}" width="${size}" height="${size}" clip-path="url(#documentationKeyClip)" href="data:image/svg+xml;base64,${data}"/>`;
+  <g data-press-depth="${press.depth.toFixed(3)}" transform="${press.transform}">
+    <image x="${x}" y="${y}" width="${size}" height="${size}" clip-path="url(#documentationKeyClip)" href="data:image/svg+xml;base64,${data}"/>
+  </g>`;
 }
 
 function gestureStageRows(stages, activeStage, accent) {
@@ -10528,13 +10585,13 @@ function gestureStageRows(stages, activeStage, accent) {
   }).join("\n");
 }
 
-function gesturePreviewSvg({ title, subtitle, keySvg, stages, activeStage, accent, result }) {
+function gesturePreviewSvg({ title, subtitle, keySvg, stages, activeStage, accent, result, pressDepth = 0 }) {
   return `<svg xmlns="http://www.w3.org/2000/svg" width="960" height="420" viewBox="0 0 960 420" text-rendering="optimizeLegibility">
   <rect width="960" height="420" rx="32" fill="#1C1C1E"/>
   <text x="42" y="48" fill="#F2F6FA" font-family="${FONT_STACK}" font-size="27" font-weight="700">${escapeXml(title)}</text>
   <text x="42" y="76" fill="#AEB3BA" font-family="${FONT_STACK}" font-size="16.5" font-weight="500">${escapeXml(subtitle)}</text>
   <rect x="42" y="98" width="300" height="274" rx="24" fill="#28282A" stroke="#3A3A3C"/>
-  ${documentationImage(keySvg, 80, 113, 224)}
+  ${documentationImage(keySvg, 80, 113, 224, pressDepth)}
   <rect x="72" y="337" width="240" height="26" rx="13" fill="${accent}" fill-opacity=".14" stroke="${accent}" stroke-opacity=".55"/>
   <text x="192" y="355" fill="${accent}" font-family="${FONT_STACK}" font-size="14.5" font-weight="650" text-anchor="middle">${escapeXml(result)}</text>
   ${gestureStageRows(stages, activeStage, accent)}
@@ -10612,7 +10669,8 @@ function taskHoldGestureFrame(nowMs, elapsedMs) {
     stages,
     activeStage,
     accent,
-    result
+    result,
+    pressDepth: documentationPressDepth(elapsedMs, 350, 2_650)
   });
 }
 
@@ -10656,7 +10714,8 @@ function voiceHoldGestureFrame(nowMs, elapsedMs) {
     stages,
     activeStage,
     accent,
-    result
+    result,
+    pressDepth: documentationPressDepth(elapsedMs, 300, 2_300)
   });
 }
 
@@ -10697,7 +10756,11 @@ function sendHoldGestureFrame(nowMs, elapsedMs) {
     stages,
     activeStage,
     accent,
-    result
+    result,
+    pressDepth: combineDocumentationPressDepths(
+      documentationPressDepth(elapsedMs, 250, 650),
+      documentationPressDepth(elapsedMs, 1_900, 4_050)
+    )
   });
 }
 
@@ -10751,7 +10814,11 @@ function appLauncherGestureFrame(nowMs, elapsedMs) {
     stages,
     activeStage,
     accent,
-    result
+    result,
+    pressDepth: combineDocumentationPressDepths(
+      documentationPressDepth(elapsedMs, 300, 900),
+      documentationPressDepth(elapsedMs, 1_800, 4_150)
+    )
   });
 }
 

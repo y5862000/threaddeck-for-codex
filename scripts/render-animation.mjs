@@ -113,9 +113,18 @@ function verifyOverviewEffortAnimation(svgDirectory) {
     .filter((name) => name.endsWith(".svg"))
     .sort();
   const values = [];
+  const pressDepths = new Map();
   let taskCompleted = false;
   for (const frame of frames) {
     const outerSvg = fs.readFileSync(path.join(svgDirectory, frame), "utf8");
+    for (const match of outerSvg.matchAll(/data-demo-key="(\d+)" data-press-depth="(-?[0-9.]+)"/g)) {
+      const key = Number(match[1]);
+      const depth = Number(match[2]);
+      const observed = pressDepths.get(key) ?? { min: 0, max: 0 };
+      observed.min = Math.min(observed.min, depth);
+      observed.max = Math.max(observed.max, depth);
+      pressDepths.set(key, observed);
+    }
     const keySvgs = [...outerSvg.matchAll(/href="data:image\/svg\+xml;base64,([^"]+)"/g)]
       .map((match) => Buffer.from(match[1], "base64").toString("utf8"));
     const pair = [keySvgs[4], keySvgs[5]].map((keySvg) => {
@@ -145,7 +154,14 @@ function verifyOverviewEffortAnimation(svgDirectory) {
       `Overview Effort tracks jump between levels; found only ${intermediateValues.size} interpolated values.`
     );
   }
+  for (const key of [4, 5]) {
+    const observed = pressDepths.get(key);
+    if (!observed || observed.max < 0.95 || observed.min > -0.05) {
+      throw new Error(`Overview key ${key} does not show a full press and spring return.`);
+    }
+  }
   console.log(`Verified ${intermediateValues.size} interpolated Effort positions in both overview tracks.`);
+  console.log("Verified physical press depth and spring return on overview task and Effort keys.");
 }
 
 try {
