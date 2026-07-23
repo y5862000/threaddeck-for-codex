@@ -4,6 +4,13 @@
 
 ## Unreleased
 
+## 0.5.6 — 2026-07-23
+
+- Close only a verified open Codex Model/Effort/Speed popover before a physical task-key switch, then continue through the normal Micro-first task selection and exact destination check. Main, remote, and Side Chat keys no longer fail when the current composer settings menu was left open.
+- Added a shared motion system for every transient key state: voice capture and transcription, Send arming and confirmation, usage refresh, permission and bridge alerts, feedback labels, theme changes, and ordinary renderer updates now enter, interpolate, and settle instead of appearing or disappearing in one frame. Motion remains paced by each connected device's adaptive frame budget.
+- Render the dedicated microphone and its target task at the active device frame budget while transcription is pending, instead of tying the visible breath to the 100 ms text-probe cadence.
+- Make task-key dictation submission confirmation tolerate Codex rebuilding the composer from a focused field into a stable empty aggregate field. The bounded verification window now samples five times, requires two matching reset observations after a focus-shape change, and keeps `Sent` visible slightly longer without weakening exact-task checks.
+
 ## 0.5.5 — 2026-07-23
 
 - Graduated the automated GitHub workflow from `-beta` prereleases to stable version tags and titles. The published release now includes the plugin, its SHA-256, the standalone recommended Neo profile, and that profile's SHA-256.

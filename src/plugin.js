@@ -110,6 +110,12 @@ const {
 } = require("./device-frame-policy");
 const { createImageDeliveryQueue } = require("./image-delivery");
 const {
+  crossfadeSvgFrames,
+  easedProgress,
+  interpolate,
+  smootherStep01
+} = require("./motion");
+const {
   applySideChatLogLine,
   createSideChatDiscoveryState,
   openDiscoveredSideChats
@@ -158,7 +164,13 @@ const {
   VOICE_TEXT_PROBE_INTERVAL_MS,
   VOICE_TRANSCRIPTION_POLL_INTERVAL_MS,
   VOICE_TRANSCRIPTION_STABLE_MS,
-  VOICE_TRANSCRIPTION_TIMEOUT_MS
+  VOICE_TRANSCRIPTION_TIMEOUT_MS,
+  VISUAL_FEEDBACK_ATTACK_MS,
+  VISUAL_FEEDBACK_RELEASE_MS,
+  VISUAL_ISSUE_TRANSITION_MS,
+  VISUAL_STATE_TRANSITION_MS,
+  VISUAL_THEME_TRANSITION_MS,
+  VISUAL_USAGE_TRANSITION_MS
 } = require("./config");
 
 const execFileAsync = promisify(execFile);
@@ -376,6 +388,7 @@ const frameDeviceInfoById = new Map(
 const contextImages = new Map();
 const contextSentImages = new Map();
 const contextFeedback = new Map();
+const contextVisualTransitions = new Map();
 const permissionAlertedContexts = new Set();
 const microBridgeAlertedContexts = new Set();
 const operationFailureByCapability = new Map();
@@ -801,6 +814,9 @@ let desktopLogPathCache = { checkedAtMs: 0, path: null, paths: [] };
 let permissionHealthCache = { checkedAtMs: 0, health: null };
 let permissionIssue = null;
 let microBridgeIssue = null;
+let permissionIssueTransition = null;
+let microBridgeIssueTransition = null;
+let usageVisualTransition = null;
 let microBootstrapStatus = { state: "idle", detail: null, atMs: null };
 let lastPermissionRequestAtMs = 0;
 let activePermissionRefresh = null;
@@ -918,34 +934,61 @@ function sendImage(context, svg) {
   return imageDeliveryQueue.enqueue(context, svg);
 }
 
-function feedbackOverlaySvg(svg, feedback) {
+function feedbackStrengthAt(feedback, nowMs = renderTimeMs()) {
+  if (!feedback) return 0;
+  if (Number.isFinite(feedback.exitStartedAtMs)) {
+    const release = 1 - easedProgress(
+      feedback.exitStartedAtMs,
+      VISUAL_FEEDBACK_RELEASE_MS,
+      nowMs
+    );
+    return Math.max(0, (feedback.exitFromStrength ?? 1) * release);
+  }
+  return easedProgress(feedback.startedAtMs, VISUAL_FEEDBACK_ATTACK_MS, nowMs);
+}
+
+function feedbackOverlaySvg(svg, feedback, nowMs = renderTimeMs(), opacityOverride = null) {
   const accent = feedback.kind === "error" ? THEME.red : feedback.kind === "success" ? THEME.green : THEME.blue;
   const label = compactLine(feedbackLabel(feedback.label), 6.2);
   const labelWidth = Math.max(1, titleVisualWidth(label));
   const labelFontSize = Math.max(12.5, Math.min(15.5, 76 / labelWidth)).toFixed(1);
+  const strength = Math.max(0, Math.min(
+    1,
+    Number.isFinite(opacityOverride) ? opacityOverride : feedbackStrengthAt(feedback, nowMs)
+  ));
+  if (strength < 0.001) return svg;
+  const loadingPhase = ((nowMs % 900) / 900) * Math.PI * 2;
+  const dotOpacity = (offset) => (
+    strength * (0.34 + 0.66 * (0.5 + 0.5 * Math.sin(loadingPhase + offset)))
+  ).toFixed(3);
   const icon = feedback.kind === "loading"
-    ? `<circle cx="27" cy="119" r="2" fill="${accent}" opacity=".4"/><circle cx="34" cy="119" r="2" fill="${accent}" opacity=".7"/><circle cx="41" cy="119" r="2" fill="${accent}"/>`
+    ? `<circle cx="27" cy="119" r="2" fill="${accent}" opacity="${dotOpacity(0)}"/><circle cx="34" cy="119" r="2" fill="${accent}" opacity="${dotOpacity(-2.1)}"/><circle cx="41" cy="119" r="2" fill="${accent}" opacity="${dotOpacity(-4.2)}"/>`
     : feedback.kind === "error"
       ? `<path d="M29 114L39 124M39 114L29 124" stroke="${accent}" stroke-width="2.3" stroke-linecap="round"/>`
       : `<path d="M28 119L32.5 123L40 114.5" fill="none" stroke="${accent}" stroke-width="2.3" stroke-linecap="round" stroke-linejoin="round"/>`;
   const overlay = `
+  <g opacity="${strength.toFixed(3)}">
   <rect x="15" y="105" width="114" height="28" rx="10" fill="${THEME.raised}" stroke="${THEME.borderStrong}"/>
   ${icon}
-  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="600" text-anchor="middle">${escapeXml(label)}</text>`;
+  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="600" text-anchor="middle">${escapeXml(label)}</text>
+  </g>`;
   return svg.replace("</svg>", `${overlay}\n</svg>`);
 }
 
-function permissionIssueOverlaySvg(svg, issue) {
+function permissionIssueOverlaySvg(svg, issue, opacity = 1) {
+  if (!issue || opacity < 0.001) return svg;
   const label = compactLine(permissionIssueLabel(issue), 6.2);
   const labelWidth = Math.max(1, titleVisualWidth(label));
   const labelFontSize = Math.max(12.5, Math.min(15.5, 76 / labelWidth)).toFixed(1);
   const overlay = `
+  <g opacity="${Math.max(0, Math.min(1, opacity)).toFixed(3)}">
   <rect x="5.2" y="5.2" width="133.6" height="133.6" rx="15.4" fill="none" stroke="${THEME.red}" stroke-width="3.2" stroke-opacity=".92"/>
   <rect x="15" y="105" width="114" height="28" rx="10" fill="${THEME.raised}" stroke="${THEME.red}" stroke-width="1.4"/>
   <path d="M28 123L34 112L40 123Z" fill="none" stroke="${THEME.red}" stroke-width="2" stroke-linejoin="round"/>
   <path d="M34 116V119" stroke="${THEME.red}" stroke-width="2" stroke-linecap="round"/>
   <circle cx="34" cy="121.5" r="1" fill="${THEME.red}"/>
-  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="650" text-anchor="middle">${escapeXml(label)}</text>`;
+  <text x="84" y="125" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="650" text-anchor="middle">${escapeXml(label)}</text>
+  </g>`;
   return svg.replace("</svg>", `${overlay}\n</svg>`);
 }
 
@@ -955,16 +998,19 @@ function microBridgeIssueLabel(issue) {
   return t("micro.checkBridge");
 }
 
-function microBridgeIssueOverlaySvg(svg, issue) {
+function microBridgeIssueOverlaySvg(svg, issue, opacity = 1) {
+  if (!issue || opacity < 0.001) return svg;
   const accent = issue === "connecting" ? THEME.blue : THEME.amber;
   const label = compactLine(microBridgeIssueLabel(issue), 6.2);
   const labelWidth = Math.max(1, titleVisualWidth(label));
   const labelFontSize = Math.max(12.5, Math.min(15.5, 78 / labelWidth)).toFixed(1);
   const overlay = `
+  <g opacity="${Math.max(0, Math.min(1, opacity)).toFixed(3)}">
   <rect x="5.2" y="5.2" width="133.6" height="133.6" rx="15.4" fill="none" stroke="${accent}" stroke-width="2.5" stroke-opacity=".86"/>
   <rect x="15" y="109" width="114" height="25" rx="9.5" fill="${THEME.raised}" stroke="${accent}" stroke-width="1.2"/>
   <circle cx="29" cy="121.5" r="3.1" fill="${accent}"/>
-  <text x="80" y="127" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="650" text-anchor="middle">${escapeXml(label)}</text>`;
+  <text x="80" y="127" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="${labelFontSize}" font-weight="650" text-anchor="middle">${escapeXml(label)}</text>
+  </g>`;
   return svg.replace("</svg>", `${overlay}\n</svg>`);
 }
 
@@ -972,30 +1018,89 @@ function isMicroControlAction(action) {
   return action === ACTIONS.reasoning || action === ACTIONS.fastMode;
 }
 
-function setImage(context, svg) {
+function contextVisualFrame(context, nowMs = renderTimeMs()) {
+  const transition = contextVisualTransitions.get(context);
+  if (!transition) return contextImages.get(context) ?? null;
+  const progress = easedProgress(transition.startedAtMs, transition.durationMs, nowMs);
+  return crossfadeSvgFrames(transition.fromSvg, transition.toSvg, progress);
+}
+
+function setImage(context, svg, nowMs = renderTimeMs()) {
+  const transition = contextVisualTransitions.get(context);
   contextImages.set(context, svg);
-  sendImage(context, composedContextSvg(context, svg));
+  if (transition) {
+    transition.toSvg = svg;
+    if (nowMs - transition.startedAtMs < transition.durationMs) {
+      sendImage(context, composedContextSvg(context, contextVisualFrame(context, nowMs), nowMs));
+      return;
+    }
+    contextVisualTransitions.delete(context);
+  }
+  sendImage(context, composedContextSvg(context, svg, nowMs));
+}
+
+function setImageTransition(
+  context,
+  svg,
+  durationMs = VISUAL_STATE_TRANSITION_MS,
+  nowMs = renderTimeMs(),
+  fromSvg = null
+) {
+  const previous = fromSvg ?? contextVisualFrame(context, nowMs) ?? contextImages.get(context);
+  contextImages.set(context, svg);
+  if (!previous || previous === svg || !Number.isFinite(durationMs) || durationMs <= 0) {
+    contextVisualTransitions.delete(context);
+    sendImage(context, composedContextSvg(context, svg, nowMs));
+    return;
+  }
+  contextVisualTransitions.set(context, {
+    fromSvg: previous,
+    toSvg: svg,
+    startedAtMs: nowMs,
+    durationMs
+  });
+  sendImage(context, composedContextSvg(context, previous, nowMs));
 }
 
 function showFeedback(context, kind, label, durationMs) {
   const token = ++feedbackSerial;
-  const feedback = { kind, label: feedbackLabel(label), token };
+  const nowMs = Date.now();
+  const previous = contextFeedback.get(context);
+  const feedback = {
+    kind,
+    label: feedbackLabel(label),
+    token,
+    startedAtMs: nowMs,
+    previous: previous
+      ? { ...previous, previous: null, frozenStrength: feedbackStrengthAt(previous, nowMs) }
+      : null
+  };
   const duration = Number.isFinite(durationMs) ? durationMs : kind === "loading" ? 16_000 : kind === "error" ? 1_100 : 800;
   contextFeedback.set(context, feedback);
   const baseSvg = contextImages.get(context);
   if (baseSvg) sendImage(context, composedContextSvg(context, baseSvg));
   setTimeout(() => {
     if (contextFeedback.get(context)?.token !== token) return;
-    contextFeedback.delete(context);
-    const currentSvg = contextImages.get(context);
-    if (contexts.has(context) && currentSvg) sendImage(context, composedContextSvg(context, currentSvg));
+    dismissFeedback(context, token);
   }, duration);
 }
 
-function clearFeedback(context) {
-  if (!contextFeedback.delete(context)) return;
+function dismissFeedback(context, token = null, nowMs = Date.now()) {
+  const feedback = contextFeedback.get(context);
+  if (!feedback || (token !== null && feedback.token !== token)) return false;
+  if (!Number.isFinite(feedback.exitStartedAtMs)) {
+    feedback.exitFromStrength = feedbackStrengthAt(feedback, nowMs);
+    feedback.exitStartedAtMs = nowMs;
+  }
   const currentSvg = contextImages.get(context);
-  if (contexts.has(context) && currentSvg) sendImage(context, composedContextSvg(context, currentSvg));
+  if (contexts.has(context) && currentSvg) {
+    sendImage(context, composedContextSvg(context, contextVisualFrame(context, nowMs) ?? currentSvg, nowMs));
+  }
+  return true;
+}
+
+function clearFeedback(context) {
+  dismissFeedback(context);
 }
 
 function clampPercent(value) {
@@ -1322,11 +1427,6 @@ function flowingReasoningSlider(accent, label, fast, layout = {}) {
   </g>`;
 }
 
-function smootherStep01(value) {
-  const x = Math.max(0, Math.min(1, Number(value) || 0));
-  return x * x * x * (x * (x * 6 - 15) + 10);
-}
-
 function completionPulseState(threadId, nowMs = renderTimeMs()) {
   const startedAtMs = completionPulseStartedAt.get(threadId);
   if (!Number.isFinite(startedAtMs)) return null;
@@ -1426,18 +1526,50 @@ function applyGlobalCompletion(svg, effect) {
   return chrome ? svg.replace("</svg>", `${chrome}\n</svg>`) : svg;
 }
 
+function issueTransitionLayers(currentIssue, transition, nowMs = renderTimeMs()) {
+  if (!transition) return currentIssue ? [{ issue: currentIssue, opacity: 1 }] : [];
+  const progress = easedProgress(
+    transition.startedAtMs,
+    VISUAL_ISSUE_TRANSITION_MS,
+    nowMs
+  );
+  const layers = [];
+  if (transition.from) layers.push({ issue: transition.from, opacity: 1 - progress });
+  if (transition.to) layers.push({ issue: transition.to, opacity: progress });
+  return layers;
+}
+
 function composedContextSvg(context, svg, nowMs = renderTimeMs()) {
   let rendered = svg;
   const globalEffect = globalCompletionPulseState(nowMs);
   if (globalEffect && contextThreadId(context) !== globalCompletionThreadId) {
     rendered = applyGlobalCompletion(rendered, globalEffect);
   }
-  if (permissionIssue) rendered = permissionIssueOverlaySvg(rendered, permissionIssue);
-  else if (microBridgeIssue && isMicroControlAction(contexts.get(context))) {
-    rendered = microBridgeIssueOverlaySvg(rendered, microBridgeIssue);
+  const permissionLayers = issueTransitionLayers(permissionIssue, permissionIssueTransition, nowMs);
+  if (permissionLayers.length > 0) {
+    for (const layer of permissionLayers) {
+      rendered = permissionIssueOverlaySvg(rendered, layer.issue, layer.opacity);
+    }
+  } else if (isMicroControlAction(contexts.get(context))) {
+    for (const layer of issueTransitionLayers(microBridgeIssue, microBridgeIssueTransition, nowMs)) {
+      rendered = microBridgeIssueOverlaySvg(rendered, layer.issue, layer.opacity);
+    }
   }
   const feedback = contextFeedback.get(context);
-  return feedback ? feedbackOverlaySvg(rendered, feedback) : rendered;
+  if (!feedback) return rendered;
+  const strength = feedbackStrengthAt(feedback, nowMs);
+  if (feedback.previous) {
+    const previousStrength = Number.isFinite(feedback.previous.frozenStrength)
+      ? feedback.previous.frozenStrength
+      : feedbackStrengthAt(feedback.previous, nowMs);
+    rendered = feedbackOverlaySvg(
+      rendered,
+      feedback.previous,
+      nowMs,
+      previousStrength * (1 - strength)
+    );
+  }
+  return feedbackOverlaySvg(rendered, feedback, nowMs, strength);
 }
 
 function completionPulseChrome(effect) {
@@ -1688,7 +1820,9 @@ function cancelSendPress(context, restoreImage = false) {
   sendLongPressTimers.delete(context);
   sendPressStartedAt.delete(context);
   sendLongPressArmedContexts.delete(context);
-  if (restoreImage && contexts.get(context) === ACTIONS.send) setImage(context, sendSvg(false));
+  if (restoreImage && contexts.get(context) === ACTIONS.send) {
+    setImageTransition(context, sendSvg(false));
+  }
 }
 
 function beginSendPress(context) {
@@ -1697,7 +1831,7 @@ function beginSendPress(context) {
   const timer = setTimeout(() => {
     if (!sendPressStartedAt.has(context) || contexts.get(context) !== ACTIONS.send) return;
     sendLongPressArmedContexts.add(context);
-    setImage(context, sendSvg(true));
+    setImageTransition(context, sendSvg(true));
   }, SEND_LONG_PRESS_MS);
   sendLongPressTimers.set(context, timer);
 }
@@ -2309,7 +2443,7 @@ function staticActionSvg(action, context = null) {
 }
 
 function currentActionSvg(action, context = null) {
-  if (action === ACTIONS.weekly) return usageSvg(usageState.remaining, usageState.failed);
+  if (action === ACTIONS.weekly) return usageSvg(usageRemainingAt(), usageState.failed);
   const slot = THREAD_SLOT_BY_ACTION.get(action);
   if (slot !== undefined) return threadSvg(displayedThreadSlot(slot), slot);
   return staticActionSvg(action, context);
@@ -2350,6 +2484,11 @@ function alertMicroBridgeContext(context) {
 function setMicroBridgeIssue(nextIssue) {
   if (microBridgeIssue === nextIssue) return false;
   const previousIssue = microBridgeIssue;
+  microBridgeIssueTransition = {
+    from: previousIssue,
+    to: nextIssue,
+    startedAtMs: Date.now()
+  };
   microBridgeIssue = nextIssue;
   microBridgeAlertedContexts.clear();
   renderMicroBridgeIssueContexts();
@@ -2402,6 +2541,11 @@ function setPermissionIssue(nextIssue, context = null) {
     return false;
   }
   const previousIssue = permissionIssue;
+  permissionIssueTransition = {
+    from: previousIssue,
+    to: nextIssue,
+    startedAtMs: Date.now()
+  };
   permissionIssue = nextIssue;
   permissionAlertedContexts.clear();
   renderPermissionIssueContexts();
@@ -2489,6 +2633,7 @@ function commandPermissionRequirements(command) {
     || command.startsWith("codex-open-side-chat")
     || command.startsWith("codex-find-thread")
     || command.startsWith("codex-search-thread")
+    || command === "codex-dismiss-intelligence-popover"
     || [
       "voice-down",
       "send",
@@ -2830,10 +2975,99 @@ function contextSupportsVoice(context) {
   return action === ACTIONS.voice || THREAD_SLOT_BY_ACTION.has(action);
 }
 
-function renderVoiceContextState(context, state, nowMs = Date.now()) {
-  if (contexts.get(context) === ACTIONS.voice) setImage(context, voiceSvg(state, nowMs));
+function renderVoiceContextState(context, state, nowMs = Date.now(), transition = false) {
+  if (contexts.get(context) === ACTIONS.voice) {
+    const svg = voiceSvg(state, nowMs);
+    if (transition) setImageTransition(context, svg, VISUAL_STATE_TRANSITION_MS, nowMs);
+    else setImage(context, svg, nowMs);
+  }
   const targetThreadId = voiceTargetThreadByContext.get(context);
-  if (targetThreadId) renderVoiceTargetThreadContexts(targetThreadId, nowMs);
+  if (targetThreadId) renderVoiceTargetThreadContexts(targetThreadId, nowMs, transition);
+}
+
+function renderAnimatedVoiceContexts(nowMs = Date.now()) {
+  const targetThreadIds = new Set();
+  for (const [context, state] of voiceStateByContext) {
+    if (state !== "transcribing" || !contexts.has(context)) continue;
+    if (contexts.get(context) === ACTIONS.voice) {
+      setImage(context, voiceSvg(state, nowMs));
+    }
+    const targetThreadId = voiceTargetThreadByContext.get(context);
+    if (targetThreadId) targetThreadIds.add(targetThreadId);
+  }
+  for (const targetThreadId of targetThreadIds) {
+    renderVoiceTargetThreadContexts(targetThreadId, nowMs);
+  }
+}
+
+function renderAnimatedAuxiliaryContexts(nowMs = Date.now()) {
+  const animatedContexts = new Set();
+
+  for (const [context, transition] of contextVisualTransitions) {
+    if (!contexts.has(context)) {
+      contextVisualTransitions.delete(context);
+      continue;
+    }
+    const complete = nowMs - transition.startedAtMs >= transition.durationMs;
+    if (complete) contextVisualTransitions.delete(context);
+    const frame = complete
+      ? transition.toSvg
+      : crossfadeSvgFrames(
+        transition.fromSvg,
+        transition.toSvg,
+        easedProgress(transition.startedAtMs, transition.durationMs, nowMs)
+      );
+    sendImage(context, composedContextSvg(context, frame, nowMs));
+    animatedContexts.add(context);
+  }
+
+  for (const [context, feedback] of contextFeedback) {
+    if (!contexts.has(context)) {
+      contextFeedback.delete(context);
+      continue;
+    }
+    const strength = feedbackStrengthAt(feedback, nowMs);
+    if (Number.isFinite(feedback.exitStartedAtMs) && strength < 0.002) {
+      contextFeedback.delete(context);
+      const baseSvg = contextVisualFrame(context, nowMs) ?? contextImages.get(context);
+      if (baseSvg) sendImage(context, composedContextSvg(context, baseSvg, nowMs));
+      continue;
+    }
+    if (feedback.previous && strength >= 0.999) feedback.previous = null;
+    if (
+      feedback.kind === "loading"
+      || feedback.previous
+      || Number.isFinite(feedback.exitStartedAtMs)
+      || strength < 0.999
+    ) {
+      const baseSvg = contextVisualFrame(context, nowMs) ?? contextImages.get(context);
+      if (baseSvg) sendImage(context, composedContextSvg(context, baseSvg, nowMs));
+      animatedContexts.add(context);
+    }
+  }
+
+  const permissionAnimating = permissionIssueTransition
+    && nowMs - permissionIssueTransition.startedAtMs < VISUAL_ISSUE_TRANSITION_MS;
+  const microAnimating = microBridgeIssueTransition
+    && nowMs - microBridgeIssueTransition.startedAtMs < VISUAL_ISSUE_TRANSITION_MS;
+  if (permissionAnimating || microAnimating) {
+    for (const [context, action] of contexts) {
+      if (!permissionAnimating && (!microAnimating || !isMicroControlAction(action))) continue;
+      if (animatedContexts.has(context)) continue;
+      const baseSvg = contextVisualFrame(context, nowMs) ?? contextImages.get(context);
+      if (baseSvg) sendImage(context, composedContextSvg(context, baseSvg, nowMs));
+    }
+  } else {
+    permissionIssueTransition = null;
+    microBridgeIssueTransition = null;
+  }
+
+  if (usageVisualTransition) {
+    if (nowMs - usageVisualTransition.startedAtMs >= VISUAL_USAGE_TRANSITION_MS) {
+      usageVisualTransition = null;
+    }
+    renderUsageContexts(nowMs);
+  }
 }
 
 function setVoiceVisualState(context, state, durationMs = null, nowMs = Date.now()) {
@@ -2841,7 +3075,7 @@ function setVoiceVisualState(context, state, durationMs = null, nowMs = Date.now
   else voiceStateByContext.set(context, state);
   if (Number.isFinite(durationMs)) voiceStateResetAtMs.set(context, nowMs + durationMs);
   else voiceStateResetAtMs.delete(context);
-  renderVoiceContextState(context, state, nowMs);
+  renderVoiceContextState(context, state, nowMs, true);
   if (state === "idle") voiceTargetThreadByContext.delete(context);
 }
 
@@ -3097,9 +3331,19 @@ async function waitForVoiceDraftReset(context, targetThreadId, tracker, options 
     if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return false;
     const current = stateReader();
     if (voiceDraftReturnedToBaseline(current, tracker)) return true;
-    const changedAfterSubmit = comparableTextInputStates(current, tracker.lastObserved)
+    if (!current) continue;
+    const stillShowsSubmittedDraft = comparableTextInputStates(current, tracker.lastObserved)
+      && sameTextInputState(current, tracker.lastObserved);
+    if (stillShowsSubmittedDraft) {
+      stableResetCandidate = null;
+      stableResetObservations = 0;
+      continue;
+    }
+    const emptyAfterFocusChange = current.length === 0;
+    const baselineShapedReset = comparableTextInputStates(current, tracker.baseline)
+      && current.length === tracker.baseline?.length
       && !sameTextInputState(current, tracker.lastObserved);
-    if (!changedAfterSubmit) {
+    if (!emptyAfterFocusChange && !baselineShapedReset) {
       stableResetCandidate = null;
       stableResetObservations = 0;
       continue;
@@ -3109,11 +3353,11 @@ async function waitForVoiceDraftReset(context, targetThreadId, tracker, options 
       stableResetCandidate = current;
       stableResetObservations = 1;
     }
-    // A composer that contained text before dictation may reset to a
-    // placeholder rather than the exact baseline fingerprint. Require the new
-    // post-submit state to remain unchanged across all three probes before
-    // accepting that form of reset.
-    if (stableResetObservations >= 3) return true;
+    // Codex can rebuild the composer after a native Micro submit, changing the
+    // probe from focused to aggregate even though the draft cleared. Two
+    // matching empty/baseline-shaped reads confirm that rebuild without
+    // mistaking one transient focus loss for a successful submission.
+    if (stableResetObservations >= 2) return true;
   }
   return false;
 }
@@ -4825,6 +5069,52 @@ async function focusAdvancedReasoningComposer(context = null, options = {}) {
   await openApp();
   await waitFrontmost();
   return focusComposer();
+}
+
+async function prepareCodexTaskSwitch(context = null, options = {}) {
+  const openApp = options.openApp
+    ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], {
+      timeout: 5000,
+      signal: options.signal ?? undefined
+    }));
+  const waitFrontmost = options.waitFrontmost
+    ?? (() => execFileAsync(KEY_BRIDGE, ["codex-wait-frontmost"], {
+      timeout: 3000,
+      maxBuffer: 4096,
+      signal: options.signal ?? undefined
+    }));
+  const dismissPopover = options.dismissPopover
+    ?? (async () => {
+      const command = "codex-dismiss-intelligence-popover";
+      // Keep Micro switching available when Accessibility is temporarily
+      // unavailable. The native preflight is mandatory only after it proves
+      // that this exact popover was open but could not be closed.
+      if (!ensureCommandPermissions(command, context, true)) return true;
+      try {
+        await execFileAsync(KEY_BRIDGE, [command], {
+          timeout: 2500,
+          maxBuffer: 4096,
+          signal: options.signal ?? undefined
+        });
+        noteBridgeSuccess(command, true);
+        return true;
+      } catch (error) {
+        const output = String(error?.stdout ?? "");
+        const verifiedCloseFailure = output.includes(
+          "visible=1 dismissed=1 verified=0"
+        );
+        noteBridgeFailure(command, error, context, true);
+        return !verifiedCloseFailure;
+      }
+    });
+  await openApp();
+  throwIfAborted(options.signal ?? null);
+  await waitFrontmost();
+  throwIfAborted(options.signal ?? null);
+  if (!await dismissPopover()) {
+    throw new Error("Codex Intelligence popover could not be dismissed");
+  }
+  return true;
 }
 
 async function currentControlThreadIsFocused(thread, options = {}) {
@@ -8338,11 +8628,21 @@ async function refreshAppearance() {
       try {
         const nextMode = await readSystemAppearance();
         if (nextMode === appearanceMode) return false;
+        const previousImages = new Map(contextImages);
         appearanceMode = nextMode;
         THEME = appearanceMode === "dark" ? DARK_THEME : LIGHT_THEME;
-        renderUsageContexts();
-        renderThreadContexts();
-        renderStaticContexts();
+        const nowMs = Date.now();
+        for (const [context, action] of contexts) {
+          const svg = currentActionSvg(action, context);
+          if (!svg) continue;
+          setImageTransition(
+            context,
+            svg,
+            VISUAL_THEME_TRANSITION_MS,
+            nowMs,
+            previousImages.get(context)
+          );
+        }
         return true;
       } finally {
         activeAppearanceRefresh = null;
@@ -8352,9 +8652,20 @@ async function refreshAppearance() {
   return activeAppearanceRefresh;
 }
 
-function renderUsageContexts() {
+function usageRemainingAt(nowMs = renderTimeMs()) {
+  if (!usageVisualTransition) return usageState.remaining;
+  const progress = easedProgress(
+    usageVisualTransition.startedAtMs,
+    VISUAL_USAGE_TRANSITION_MS,
+    nowMs
+  );
+  return interpolate(usageVisualTransition.from, usageVisualTransition.to, progress);
+}
+
+function renderUsageContexts(nowMs = renderTimeMs()) {
+  const remaining = usageRemainingAt(nowMs);
   for (const [context, action] of contexts) {
-    if (action === ACTIONS.weekly) setImage(context, usageSvg(usageState.remaining, usageState.failed));
+    if (action === ACTIONS.weekly) setImage(context, usageSvg(remaining, usageState.failed), nowMs);
   }
 }
 
@@ -8439,6 +8750,16 @@ async function refreshUsage(feedbackContext, options = {}) {
         const usage = await reader();
         const remaining = remainingPercent(usage?.secondary?.usedPercent);
         if (remaining === null) throw new Error("Codex weekly usage was not returned");
+        const previousRemaining = usageRemainingAt(Date.now());
+        if (Number.isFinite(previousRemaining) && previousRemaining !== remaining) {
+          usageVisualTransition = {
+            from: previousRemaining,
+            to: remaining,
+            startedAtMs: Date.now()
+          };
+        } else {
+          usageVisualTransition = null;
+        }
         usageState = { remaining, failed: false };
         hasLoadedUsageState = true;
         renderUsageContexts();
@@ -8472,15 +8793,15 @@ function renderThreadContexts() {
   }
 }
 
-function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now()) {
+function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now(), transition = false) {
   if (!targetThreadId) return;
   for (const [context, action] of contexts) {
     const slot = THREAD_SLOT_BY_ACTION.get(action);
     const thread = slot === undefined ? null : threadForSlot(slot);
     if (thread?.id !== targetThreadId) continue;
     const svg = threadSvg(thread, slot);
-    contextImages.set(context, svg);
-    sendImage(context, composedContextSvg(context, svg, nowMs));
+    if (transition) setImageTransition(context, svg, VISUAL_STATE_TRANSITION_MS, nowMs);
+    else setImage(context, svg, nowMs);
   }
 }
 
@@ -9232,8 +9553,13 @@ async function openThread(context, slot, options = {}) {
     ?? (() => focusCurrentComposer(context));
   const scheduleRefresh = options.scheduleRefresh
     ?? (() => setTimeout(() => void refreshThreads(), 1000));
+  const productionNavigation = !options.navigateRemote && !options.navigateDeepLink;
+  const shouldPrepareSwitch = productionNavigation
+    || typeof options.prepareTaskSwitch === "function";
+  const prepareTaskSwitch = options.prepareTaskSwitch
+    ?? (() => prepareCodexTaskSwitch(context));
   try {
-    const productionNavigation = !options.navigateRemote && !options.navigateDeepLink;
+    if (shouldPrepareSwitch) await prepareTaskSwitch();
     if (productionNavigation && options.useMicro !== false) {
       const microResult = await codexControlPlane.execute("task-switch", {
         micro: async (bridge, cachedSnapshot) => {
@@ -9335,9 +9661,15 @@ async function openListedSideChat(context, thread, options = {}) {
     ?? (() => focusCurrentComposer(context));
   const scheduleRefresh = options.scheduleRefresh
     ?? (() => setTimeout(() => void refreshThreads(), 1000));
+  const productionNavigation = !options.navigateSideChat && !options.navigateDeepLink;
+  const shouldPrepareSwitch = productionNavigation
+    || typeof options.prepareTaskSwitch === "function";
+  const prepareTaskSwitch = options.prepareTaskSwitch
+    ?? (() => prepareCodexTaskSwitch(context));
   pendingSideChatTarget = null;
   feedback(context, "loading", "사이드챗 열기");
   try {
+    if (shouldPrepareSwitch) await prepareTaskSwitch();
     // Never deep-link the ephemeral conversation itself: that replaces the
     // paired workspace with a Side-Chat-only view. Restore its parent task,
     // activate the exact upper-right tab, and focus that tab's composer.
@@ -9809,6 +10141,7 @@ function registerPlugin() {
       contextDeviceIds.delete(message.context);
       contextImages.delete(message.context);
       contextSentImages.delete(message.context);
+      contextVisualTransitions.delete(message.context);
       imageDeliveryQueue.remove(message.context);
       contextFeedback.delete(message.context);
       permissionAlertedContexts.delete(message.context);
@@ -9869,6 +10202,19 @@ function registerPlugin() {
         && [...contexts.values()].some((action) => action === ACTIONS.reasoning)
         && reasoningControlShouldAnimate()) {
       renderFastModeContexts();
+    }
+    // Text probing stays deliberately conservative, but the visible
+    // transcription breath should use the device's animation budget instead
+    // of inheriting the 100 ms probe cadence.
+    if (voiceStateByContext.size > 0) renderAnimatedVoiceContexts(nowMs);
+    if (
+      contextVisualTransitions.size > 0
+      || contextFeedback.size > 0
+      || permissionIssueTransition
+      || microBridgeIssueTransition
+      || usageVisualTransition
+    ) {
+      renderAnimatedAuxiliaryContexts(nowMs);
     }
   }, 33);
 
@@ -11144,6 +11490,21 @@ async function verifyVoiceSubmissionPolicy() {
   voiceBackendByContext.clear();
   contexts.set(context, ACTIONS.thread1);
 
+  const animatedVoiceContext = "voice-animation-context";
+  contexts.set(animatedVoiceContext, ACTIONS.voice);
+  voiceStateByContext.set(animatedVoiceContext, "transcribing");
+  renderAnimatedVoiceContexts(100);
+  const firstTranscribingFrame = contextImages.get(animatedVoiceContext);
+  renderAnimatedVoiceContexts(133);
+  const secondTranscribingFrame = contextImages.get(animatedVoiceContext);
+  const transcribingAnimationFramesAdvance = Boolean(firstTranscribingFrame)
+    && Boolean(secondTranscribingFrame)
+    && firstTranscribingFrame !== secondTranscribingFrame;
+  contexts.delete(animatedVoiceContext);
+  voiceStateByContext.delete(animatedVoiceContext);
+  contextImages.delete(animatedVoiceContext);
+  contextSentImages.delete(animatedVoiceContext);
+
   const sameTitlePeerId = "00000000-0000-4000-8000-000000000022";
   const sameTitle = "동일 제목 음성 대상";
   const [sameTitleTarget, sameTitlePeer] = annotateKnownTitleAmbiguity([
@@ -11228,8 +11589,26 @@ async function verifyVoiceSubmissionPolicy() {
   }, {
     stateReader: () => alternateEmptyComposer,
     sleep: async () => {},
-    delays: [0, 0, 0]
+    delays: [0, 0]
   });
+  const aggregateEmptyComposer = parseTextInputState(
+    "editable-text-state",
+    "7\t0\teeeeeeeeeeeeeeee"
+  );
+  const crossSourceStates = [null, aggregateEmptyComposer, aggregateEmptyComposer];
+  const acceptedStableCrossSourceReset = await waitForVoiceDraftReset(
+    context,
+    targetThreadId,
+    {
+      ...tracker,
+      lastObserved: transcript
+    },
+    {
+      stateReader: () => crossSourceStates.shift() ?? aggregateEmptyComposer,
+      sleep: async () => {},
+      delays: [0, 0, 0]
+    }
+  );
   const commands = [];
   let verificationAttempts = 0;
   await submitCompletedVoiceTranscription(context, targetThreadId, {
@@ -11855,10 +12234,12 @@ async function verifyVoiceSubmissionPolicy() {
     && !voiceMediaPaused;
 
   const passed = Boolean(baseline && transcript && buttonFocusFallback)
+    && transcribingAnimationFramesAdvance
     && ignoredFocusTypeChange
     && detectedStableTranscript
     && rejectedUnchangedDraft
     && acceptedStableReset
+    && acceptedStableCrossSourceReset
     && retriedUnconfirmedSubmit
     && successRequiresConfirmation
     && fallbackRechecksTarget
@@ -11886,10 +12267,12 @@ async function verifyVoiceSubmissionPolicy() {
     && shutdownSuccessRestoresMedia;
   console.log(JSON.stringify({
     passed,
+    transcribingAnimationFramesAdvance,
     ignoredFocusTypeChange,
     detectedStableTranscript,
     rejectedUnchangedDraft,
     acceptedStableReset,
+    acceptedStableCrossSourceReset,
     retriedUnconfirmedSubmit,
     successRequiresConfirmation,
     fallbackRechecksTarget,
@@ -12498,6 +12881,28 @@ async function verifyInteractionPolicy() {
   const independentCurrentAndRankedActions = threadForAction(ACTIONS.thread1)?.id === localThreadC.id
     && threadForAction(ACTIONS.topThread1)?.id === localThreadA.id
     && threadForAction(ACTIONS.thread2)?.id === localThreadB.id;
+  const preparedSwitchOrder = [];
+  const preparedSwitchResult = await openThread(currentSlotContext, 1, {
+    thread: localThreadB,
+    prepareTaskSwitch: async () => {
+      preparedSwitchOrder.push("dismiss");
+      return true;
+    },
+    navigateDeepLink: async () => {
+      preparedSwitchOrder.push("navigate");
+      return true;
+    },
+    focusThreadComposer: async () => {
+      preparedSwitchOrder.push("focus");
+      return true;
+    },
+    rememberThread: () => true,
+    acknowledgeCompletion: () => {},
+    feedback: () => {},
+    scheduleRefresh: () => {}
+  });
+  const taskSwitchDismissesPopoverFirst = preparedSwitchResult
+    && preparedSwitchOrder.join(",") === "dismiss,navigate,focus";
   primaryThreadId = localThreadA.id;
   primaryThreadRow = localThreadA;
   markUnreadCompletion(localThreadB.id, DEMO_EPOCH_MS, DEMO_EPOCH_MS, { persist: false });
@@ -14699,6 +15104,7 @@ async function verifyInteractionPolicy() {
     && sameTargetSharesNavigation
     && navigationLeaseCleared
     && independentCurrentAndRankedActions
+    && taskSwitchDismissesPopoverFirst
     && failedNavigationKeepsCurrentSlot
     && failedNavigationKeepsUnreadCompletion
     && verifiedNavigationUpdatesCurrentOnly
@@ -14802,6 +15208,7 @@ async function verifyInteractionPolicy() {
     sameTargetSharesNavigation,
     navigationLeaseCleared,
     independentCurrentAndRankedActions,
+    taskSwitchDismissesPopoverFirst,
     failedNavigationKeepsCurrentSlot,
     failedNavigationKeepsUnreadCompletion,
     verifiedNavigationUpdatesCurrentOnly,

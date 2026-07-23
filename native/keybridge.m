@@ -2099,7 +2099,8 @@ static bool command_needs_post_event_access(const char *command) {
   if (strncmp(command, "codex-open-thread", strlen("codex-open-thread")) == 0
       || strncmp(command, "codex-open-side-chat", strlen("codex-open-side-chat")) == 0
       || strncmp(command, "codex-find-thread", strlen("codex-find-thread")) == 0
-      || strncmp(command, "codex-search-thread", strlen("codex-search-thread")) == 0) return true;
+      || strncmp(command, "codex-search-thread", strlen("codex-search-thread")) == 0
+      || strcmp(command, "codex-dismiss-intelligence-popover") == 0) return true;
   return strcmp(command, "voice-down") == 0
     || strcmp(command, "send") == 0
     || strcmp(command, "send-command") == 0
@@ -5415,6 +5416,55 @@ static void close_codex_intelligence_popover_if_opened(AXUIElementRef trigger) {
     tap_key(KEY_ESCAPE, 0);
     usleep(30000);
   }
+}
+
+static bool codex_intelligence_popover_visible_for_scan(
+  const CodexFastModeScan *scan
+) {
+  if (scan == NULL || scan->intelligence_trigger == NULL
+      || scan->intelligence_trigger_count != 1) return false;
+  if (scan->intelligence_trigger_expanded_known) {
+    return scan->intelligence_trigger_expanded;
+  }
+  if (scan->reasoning_slider != NULL || scan->reasoning_control != NULL
+      || scan->on_option_count > 0 || scan->off_option_count > 0) return true;
+  for (int index = 0; index < CODEX_REASONING_EFFORT_COUNT; index += 1) {
+    if (scan->reasoning_option_counts[index] > 0) return true;
+  }
+  return false;
+}
+
+static int dismiss_codex_intelligence_popover(void) {
+  if (!codex_is_frontmost()) return 1;
+  CodexFastModeScan scan = { 0 };
+  if (!copy_codex_fast_mode_scan(true, &scan)) return 1;
+  bool visible = codex_intelligence_popover_visible_for_scan(&scan);
+  release_codex_fast_mode_scan(&scan);
+  if (!visible) {
+    printf("visible=0 dismissed=0 verified=1\n");
+    return 0;
+  }
+
+  // Escape is sent only after an exact composer-anchored Intelligence trigger
+  // proves its own popover is expanded. This cannot close an unrelated Codex
+  // dialog, Side Chat, or task because those controls never enter this scan.
+  tap_key(KEY_ESCAPE, 0);
+  CFAbsoluteTime deadline = CFAbsoluteTimeGetCurrent() + 0.65;
+  do {
+    usleep(35000);
+    CodexFastModeScan candidate = { 0 };
+    if (copy_codex_fast_mode_scan(true, &candidate)) {
+      bool still_visible = codex_intelligence_popover_visible_for_scan(&candidate);
+      release_codex_fast_mode_scan(&candidate);
+      if (!still_visible) {
+        printf("visible=1 dismissed=1 verified=1\n");
+        return 0;
+      }
+    }
+  } while (CFAbsoluteTimeGetCurrent() < deadline);
+
+  printf("visible=1 dismissed=1 verified=0\n");
+  return 1;
 }
 
 static bool copy_codex_fast_mode_scan_with_intelligence_fallback(
@@ -9249,6 +9299,10 @@ int main(int argc, char **argv) {
   if (strcmp(argv[1], "reasoning-effort-set") == 0) {
     if (argc != 3) return 64;
     return set_codex_reasoning_effort(argv[2]);
+  }
+  if (strcmp(argv[1], "codex-dismiss-intelligence-popover") == 0) {
+    if (argc != 2) return 64;
+    return dismiss_codex_intelligence_popover();
   }
   if (strcmp(argv[1], "codex-find-thread") == 0) {
     if (argc < 4) return 64;
