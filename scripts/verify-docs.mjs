@@ -151,11 +151,11 @@ function gifMetadata(buffer) {
 }
 
 const expectedGifMetadata = new Map([
-  ["docs/media/threaddeck-overview.gif", { width: 960, height: 507, frames: 120, delay: 5 }],
-  ["docs/media/task-hold-to-talk.gif", { width: 960, height: 420, frames: 60, delay: 10 }],
-  ["docs/media/voice-hold-to-dictate.gif", { width: 960, height: 420, frames: 52, delay: 10 }],
-  ["docs/media/send-long-press.gif", { width: 960, height: 420, frames: 54, delay: 10 }],
-  ["docs/media/app-launcher-long-press.gif", { width: 960, height: 420, frames: 50, delay: 10 }]
+  ["docs/media/threaddeck-overview.gif", { width: 960, height: 507, frames: 200, delay: 3 }],
+  ["docs/media/task-hold-to-talk.gif", { width: 960, height: 420, frames: 120, delay: 5 }],
+  ["docs/media/voice-hold-to-dictate.gif", { width: 960, height: 420, frames: 104, delay: 5 }],
+  ["docs/media/send-long-press.gif", { width: 960, height: 420, frames: 108, delay: 5 }],
+  ["docs/media/app-launcher-long-press.gif", { width: 960, height: 420, frames: 100, delay: 5 }]
 ]);
 for (const [image, expected] of expectedGifMetadata) {
   const target = path.join(root, image);

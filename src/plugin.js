@@ -10479,9 +10479,12 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   appearanceMode = mode;
   THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
   const resolvedDirectory = path.resolve(outputDirectory);
-  const framesPerSecond = 20;
+  // GIF delays are stored in whole centiseconds. A 30 ms interval therefore
+  // gives the overview an exact 33.3 fps cadence without changing its six
+  // second timeline or relying on browser-specific fractional-delay handling.
+  const frameIntervalMs = 30;
   const durationMs = 6_000;
-  const frameCount = durationMs / 1000 * framesPerSecond;
+  const frameCount = Math.ceil(durationMs / frameIntervalMs);
   fsSync.mkdirSync(resolvedDirectory, { recursive: true });
   for (const entry of fsSync.readdirSync(resolvedDirectory)) {
     if (/^frame-\d{3}\.svg$/.test(entry)) fsSync.unlinkSync(path.join(resolvedDirectory, entry));
@@ -10491,7 +10494,7 @@ function renderDemoAnimation(outputDirectory, mode = "dark") {
   // even though physical keys use the eased runtime transition.
   resetDemoEffects();
   for (let index = 0; index < frameCount; index += 1) {
-    const elapsedMs = Math.round(index / framesPerSecond * 1000);
+    const elapsedMs = index * frameIntervalMs;
     const nowMs = DEMO_EPOCH_MS + elapsedMs;
     const frame = demoPreviewSvg(demoKeySvgs(nowMs, elapsedMs, true));
     fsSync.writeFileSync(path.join(resolvedDirectory, `frame-${String(index).padStart(3, "0")}.svg`), frame);
@@ -10756,7 +10759,7 @@ function renderGestureAnimations(outputDirectory, mode = "dark") {
   appearanceMode = mode;
   THEME = mode === "dark" ? DARK_THEME : LIGHT_THEME;
   const resolvedDirectory = path.resolve(outputDirectory);
-  const framesPerSecond = 10;
+  const frameIntervalMs = 50;
   const scenarios = [
     { name: "task-hold-to-talk", durationMs: 6_000, render: taskHoldGestureFrame },
     { name: "voice-hold-to-dictate", durationMs: 5_200, render: voiceHoldGestureFrame },
@@ -10769,10 +10772,10 @@ function renderGestureAnimations(outputDirectory, mode = "dark") {
     for (const entry of fsSync.readdirSync(scenarioDirectory)) {
       if (/^frame-\d{3}\.svg$/.test(entry)) fsSync.unlinkSync(path.join(scenarioDirectory, entry));
     }
-    const frameCount = Math.ceil(scenario.durationMs / 1000 * framesPerSecond);
+    const frameCount = Math.ceil(scenario.durationMs / frameIntervalMs);
     for (let index = 0; index < frameCount; index += 1) {
       resetDemoEffects();
-      const elapsedMs = Math.round(index / framesPerSecond * 1000);
+      const elapsedMs = index * frameIntervalMs;
       const nowMs = DEMO_EPOCH_MS + elapsedMs;
       fixedRenderTimeMs = nowMs;
       const frame = scenario.render(nowMs, elapsedMs);

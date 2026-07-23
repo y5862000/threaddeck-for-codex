@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Regenerated every README animation from the current renderer at a higher cadence: the six-second overview now uses an exact 30 ms frame interval (200 frames, about 33.3 fps), while the four focused gesture demos run at 20 fps. Each animation eases through its final frames and lands exactly on its first frame, removing the visible cut at the loop boundary. Timelines, Effort interpolation, voice states, queue progress, and completion pulse remain deterministic and release-verified.
+
 ## 0.5.6 — 2026-07-23
 
 - Close only a verified open Codex Model/Effort/Speed popover before a physical task-key switch, then continue through the normal Micro-first task selection and exact destination check. Main, remote, and Side Chat keys no longer fail when the current composer settings menu was left open.

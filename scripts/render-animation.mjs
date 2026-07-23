@@ -70,6 +70,44 @@ async function renderGif(svgDirectory, pngDirectory, outputPath, { width, height
   console.log(`Rendered ${frames.length} frames to ${outputPath}`);
 }
 
+function smootherStep01(value) {
+  const x = Math.max(0, Math.min(1, Number(value) || 0));
+  return x * x * x * (x * (x * 6 - 15) + 10);
+}
+
+function svgDataUri(svg) {
+  return `data:image/svg+xml;base64,${Buffer.from(svg).toString("base64")}`;
+}
+
+function makeLoopSeamless(svgDirectory, { width, height, tailFrames }) {
+  const frames = fs.readdirSync(svgDirectory)
+    .filter((name) => name.endsWith(".svg"))
+    .sort();
+  if (frames.length < 2 || tailFrames < 2 || tailFrames > frames.length) {
+    throw new Error(`Cannot make ${svgDirectory} seamless with ${tailFrames} tail frames.`);
+  }
+  const firstPath = path.join(svgDirectory, frames[0]);
+  const firstSvg = fs.readFileSync(firstPath, "utf8");
+  const tailStart = frames.length - tailFrames;
+  for (let index = tailStart; index < frames.length; index += 1) {
+    const framePath = path.join(svgDirectory, frames[index]);
+    const progress = smootherStep01((index - tailStart) / (tailFrames - 1));
+    if (progress >= 0.9995) {
+      fs.writeFileSync(framePath, firstSvg);
+      continue;
+    }
+    if (progress <= 0.0005) continue;
+    const currentSvg = fs.readFileSync(framePath, "utf8");
+    fs.writeFileSync(framePath, `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
+  <image href="${svgDataUri(currentSvg)}" width="${width}" height="${height}"/>
+  <image href="${svgDataUri(firstSvg)}" width="${width}" height="${height}" opacity="${progress.toFixed(4)}"/>
+</svg>`);
+  }
+  const lastSvg = fs.readFileSync(path.join(svgDirectory, frames.at(-1)), "utf8");
+  if (lastSvg !== firstSvg) throw new Error(`${svgDirectory} does not end on its first frame.`);
+  console.log(`Blended the final ${tailFrames} frames of ${svgDirectory} back to its first frame.`);
+}
+
 function verifyOverviewEffortAnimation(svgDirectory) {
   const frames = fs.readdirSync(svgDirectory)
     .filter((name) => name.endsWith(".svg"))
@@ -87,7 +125,7 @@ function verifyOverviewEffortAnimation(svgDirectory) {
     if (pair[0] === null) {
       // The task card deliberately replaces its track with a completion check
       // near the end of the demo; the dedicated control remains visible.
-      if (values.length < 90 || !Number.isFinite(pair[1])) {
+      if (values.length < Math.floor(frames.length * 0.75) || !Number.isFinite(pair[1])) {
         throw new Error(`${frame} lost an Effort track before the completion scene.`);
       }
       taskCompleted = true;
@@ -123,6 +161,7 @@ try {
     overviewSvgDirectory
   ], { cwd: root, stdio: "inherit" });
   verifyOverviewEffortAnimation(overviewSvgDirectory);
+  makeLoopSeamless(overviewSvgDirectory, { width: 960, height: 507, tailFrames: 24 });
   execFileSync(process.execPath, [
     "src/plugin.js",
     "--language",
@@ -131,10 +170,22 @@ try {
     gestureSvgDirectory
   ], { cwd: root, stdio: "inherit" });
 
+  for (const scenario of [
+    "task-hold-to-talk",
+    "voice-hold-to-dictate",
+    "send-long-press",
+    "app-launcher-long-press"
+  ]) {
+    makeLoopSeamless(
+      path.join(gestureSvgDirectory, scenario),
+      { width: 960, height: 420, tailFrames: 12 }
+    );
+  }
+
   await renderGif(overviewSvgDirectory, overviewPngDirectory, overviewOutputPath, {
     width: 960,
     height: 507,
-    framesPerSecond: 20
+    framesPerSecond: 1000 / 30
   });
 
   const gestures = [
@@ -148,7 +199,7 @@ try {
       path.join(gestureSvgDirectory, scenario),
       path.join(gesturePngDirectory, scenario),
       path.join(mediaDirectory, fileName),
-      { width: 960, height: 420, framesPerSecond: 10 }
+      { width: 960, height: 420, framesPerSecond: 20 }
     );
   }
 } finally {
