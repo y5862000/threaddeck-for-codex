@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.5.7 — 2026-07-23
+
+- Removed automatic Codex termination and relaunch from Micro bridge recovery. A transient renderer or remote-control interruption now leaves the running Codex process untouched, clears stale bridge state, and shows **Restart Codex** until the user chooses to restart it. This release also includes the higher-frame-rate README animations and physical key-press motion prepared after 0.5.6.
+
 - Regenerated every README animation from the current renderer at a higher cadence: the six-second overview now uses an exact 30 ms frame interval (200 frames, about 33.3 fps), while the four focused gesture demos run at 20 fps. Pressed task, Effort, microphone, Send, and launcher keys now sink and shrink around their physical center before a subtle spring return. Each animation also eases through its final frames and lands exactly on its first frame, removing the visible cut at the loop boundary. Timelines, Effort interpolation, voice states, queue progress, and completion pulse remain deterministic and release-verified.
 
 ## 0.5.6 — 2026-07-23

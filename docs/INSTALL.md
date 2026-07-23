@@ -27,7 +27,7 @@ The plugin automatically installs the recommended **ThreadDeck for Codex** Neo p
 
    The switch is listed as **Elgato Stream Deck.app** on current macOS releases. ThreadDeck does not need Screen Recording, Input Monitoring, or Full Disk Access. If the switch was already on but a key still shows an access warning, turn it off and on once, then quit Stream Deck from its menu-bar icon and reopen it.
 
-5. Quit Codex and launch it normally once. ThreadDeck deliberately preserves a Codex process that was already open when the plugin started. After this later user-initiated launch, Codex may relaunch one additional time so ThreadDeck can attach its random loopback Micro bridge.
+5. If the Effort/Fast key says **Restart Codex**, quit Codex and launch it normally once. ThreadDeck never terminates or relaunches Codex automatically; it only reuses a healthy loopback Micro bridge when one is already available.
 6. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings:
 
 | Codex function | Shortcut |
@@ -49,7 +49,7 @@ ThreadDeck does not need Screen Recording or Full Disk Access. The optional quot
 
 ThreadDeck checks Accessibility and keyboard-event access at startup and every 30 seconds. It requests missing macOS permission and keeps a short warning on the keys until the permission is healthy again.
 
-The Effort/Fast key can also show **Restart Codex**. This is not an Accessibility failure: the current Codex generation simply predates the local renderer bridge. Quit and reopen Codex once. If the new normal launch still lacks the bridge, ThreadDeck performs at most one guarded relaunch for that process generation and then waits ten minutes before another recovery attempt. Set `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` before Stream Deck starts to disable that automatic recovery; legacy controls remain available.
+The Effort/Fast key can also show **Restart Codex**. This is not an Accessibility failure: the current Codex process does not expose a healthy local renderer bridge. ThreadDeck leaves the process untouched, so quit and reopen Codex yourself when convenient; legacy controls remain available meanwhile.
 
 From a source checkout, `pnpm run doctor` prints a read-only installation report, including whether the Codex Micro bridge is connected, needs a Codex restart, or is stopped. The doctor never starts, closes, or modifies either application. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
 

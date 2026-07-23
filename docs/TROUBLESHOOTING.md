@@ -19,9 +19,9 @@ The Neo profile is installed with the plugin but is not forced over your current
 
 ## Effort/Fast shows `Restart Codex` or `Check Micro`
 
-ThreadDeck does not interrupt the Codex process that was already open when a new plugin build first starts. Quit and reopen Codex once. If that normal launch lacks the required flags, ThreadDeck waits for a stable process and performs one guarded relaunch on a random `127.0.0.1` port. It does not bind the debugger to the LAN, and it does not repeat an attempted recovery for the same process generation.
+ThreadDeck never terminates or relaunches Codex. If the current process does not expose a healthy loopback bridge, ThreadDeck leaves it untouched and shows **Restart Codex** until you choose to quit and reopen Codex yourself. It never binds the debugger to the LAN.
 
-Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means the renderer endpoint and main `app://` target both responded; `restart Codex` means the current process predates the bridge; `stopped` means Codex is closed. The doctor never launches or closes Codex. Set `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` before Stream Deck starts to disable automatic recovery.
+Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means the renderer endpoint and main `app://` target both responded; `restart Codex` means the current process does not expose a healthy bridge; `stopped` means Codex is closed. Neither the doctor nor ThreadDeck launches or closes Codex.
 
 While the bridge is unavailable, ThreadDeck keeps the verified Accessibility/shortcut adapter. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed through the fallback path because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and the exact key used.
 

@@ -54,7 +54,7 @@ The I/O-free modules under `src/` keep private Codex formats and deterministic p
 | `runtime-info.js` | Stream Deck registration parsing, language selection, and platform capability boundary |
 | `control-plane.js` | Micro-first command routing, read-only health caching, and no-replay fallback semantics |
 | `micro-cdp.js` | Loopback renderer discovery, privacy-bounded read-only snapshots, native Micro commands, PTT, Effort encoder events, and six-slot switching |
-| `micro-bootstrap.js` | First-session preservation, one guarded recovery relaunch, random loopback-port state, and opt-out handling |
+| `micro-bootstrap.js` | Codex process discovery, non-invasive loopback health observation, and local bridge state |
 | `reasoning-options.js` | Read-only Codex desktop configuration/model-cache parsing and the globally visible Effort catalog |
 | `text.js` | Title normalization, NFC/NFD fingerprints, ambient-title filtering, and grapheme-aware layout helpers |
 | `time.js` | UUIDv7 timestamps, recency normalization, duration formatting, and timing labels |
@@ -91,7 +91,7 @@ Mutating Micro activation is lazy: only the first physical control that needs HI
 
 After an `AG00`–`AG05` delivery, ThreadDeck verifies the canonical destination UUID from either the active composer identity or the exact Micro slot marked `selected`. The selected-slot signal is authoritative when the composer DOM is one frame behind; a bounded retry window still rejects an unconfirmed delivery. Only that verified result updates Current Task and acknowledges a persisted unread completion.
 
-`src/micro-bootstrap.js` never interrupts the Codex generation that was already running when ThreadDeck first observes it. After the user later closes and normally reopens Codex, a stable unbridged generation may receive one guarded relaunch with a random loopback port. Attempts are generation-scoped and rate-limited for ten minutes; `THREADDECK_DISABLE_MICRO_BOOTSTRAP=1` disables recovery. Only process-generation, port, health, cooldown, and timestamp data are stored under `~/Library/Application Support/ThreadDeck`.
+`src/micro-bootstrap.js` observes the running Codex generation and reuses a healthy loopback bridge when one is already available. It never sends a termination signal or launches Codex. If bridge health disappears, the current process remains untouched and ThreadDeck displays a manual restart prompt. Only process-generation, port, health, and timestamp data are stored under `~/Library/Application Support/ThreadDeck`.
 
 ### Neo profile
 

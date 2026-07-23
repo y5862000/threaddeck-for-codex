@@ -64,7 +64,7 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 
    On current macOS versions the switch is named **Elgato Stream Deck.app**. No Screen Recording, Input Monitoring, or Full Disk Access permission is required.
 
-3. Quit and reopen Codex once. ThreadDeck preserves the Codex session that was already open during installation; after your next normal launch it may relaunch Codex one time to attach a random `127.0.0.1` renderer bridge.
+3. Quit and reopen Codex once if the Effort/Fast key says **Restart Codex**. ThreadDeck never terminates or relaunches Codex automatically; it only reuses an already available `127.0.0.1` renderer bridge.
 4. Confirm the four Codex shortcuts below so the legacy fallback remains available, then test the microphone key.
 
 The package contains an editable ready-to-use profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).

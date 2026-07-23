@@ -4,7 +4,6 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 
 const {
-  buildCodexLaunchSpec,
   codexAppCandidates,
   createBootstrapPolicy,
   evaluateBootstrapPolicy,
@@ -35,7 +34,7 @@ test("the first unbridged Codex generation is preserved", () => {
   assert.equal(result.policy.preservedInitialGeneration, "41:start:/Applications/ChatGPT.app");
 });
 
-test("a later normal launch receives one guarded recovery restart", () => {
+test("a later unbridged Codex generation is never restarted automatically", () => {
   let result = evaluateBootstrapPolicy(createBootstrapPolicy(1000), {
     nowMs: 1000,
     generation: "41:start:/Applications/ChatGPT.app",
@@ -57,14 +56,14 @@ test("a later normal launch receives one guarded recovery restart", () => {
     generation: "52:new:/Applications/ChatGPT.app",
     bridgeHealthy: false
   }, { stableMs: 100 });
-  assert.equal(result.action.type, "restart");
-  assert.deepEqual(result.policy.recoveryAttempts, ["52:new:/Applications/ChatGPT.app"]);
+  assert.equal(result.action.type, "preserve");
+  assert.equal(result.action.reason, "normal-launch-after-stop");
   const repeated = evaluateBootstrapPolicy(result.policy, {
     nowMs: 2400,
     generation: "52:new:/Applications/ChatGPT.app",
     bridgeHealthy: false
   }, { stableMs: 100 });
-  assert.equal(repeated.action.type, "wait");
+  assert.equal(repeated.action.type, "preserve");
 });
 
 test("Codex main-process parsing ignores helpers and preserves a stable generation", () => {
@@ -85,14 +84,4 @@ test("only an explicit loopback debugging address is accepted", () => {
   assert.equal(parseLoopbackDebugPort(
     "ChatGPT --remote-debugging-address=127.0.0.1 --remote-debugging-port=43123"
   ), 43123);
-});
-
-test("the launch specification binds CDP to loopback", () => {
-  const spec = buildCodexLaunchSpec("/Applications/ChatGPT.app", 43123);
-  assert.equal(spec.command, "/usr/bin/open");
-  assert.deepEqual(spec.args.slice(-2), [
-    "--remote-debugging-address=127.0.0.1",
-    "--remote-debugging-port=43123"
-  ]);
-  assert.equal(spec.args.includes("0.0.0.0"), false);
 });
