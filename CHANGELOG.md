@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.5.10 — 2026-07-25
+
+- Simplified the Codex task picker guidance to “Choose a Codex task for this key.”
+
 ## 0.5.9 — 2026-07-25
 
 - Fixed the grouped action Property Inspector rendering as an empty panel in Stream Deck 7.5. Its host callback is now declared in the global script scope expected by Stream Deck, object-form action metadata is accepted, and a visible loading fallback replaces the formerly hidden panel while the host connects.
