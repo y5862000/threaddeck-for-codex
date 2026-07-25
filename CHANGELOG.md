@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.5.9 — 2026-07-25
+
+- Fixed the grouped action Property Inspector rendering as an empty panel in Stream Deck 7.5. Its host callback is now declared in the global script scope expected by Stream Deck, object-form action metadata is accepted, and a visible loading fallback replaces the formerly hidden panel while the host connects.
+- Rotated the shared action-list icon by 180 degrees so every child action uses the same orientation as the corrected ThreadDeck category icon at both 1× and 2× sizes.
+
 ## 0.5.8 — 2026-07-25
 
 - Reworked the Marketplace action list around five Codex-focused controls. One configurable **Codex task** action now covers Current and Top 1–8, while one configurable **Codex command** action covers New task, Side Chat, and Send through an autosaving Property Inspector.

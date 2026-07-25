@@ -4,6 +4,7 @@ const TASK_ACTION = "com.yechan.threaddeck.thread1";
 const COMMAND_ACTION = "com.yechan.threaddeck.newthread";
 const COPY = {
   en: {
+    loading: "Loading settings…",
     taskLabel: "Task slot",
     currentTask: "Current task",
     taskHelp: "Use one action repeatedly and choose which Codex task each key follows.",
@@ -16,6 +17,7 @@ const COPY = {
     saved: "Saved"
   },
   ko: {
+    loading: "설정을 불러오는 중…",
     taskLabel: "작업 위치",
     currentTask: "현재 작업",
     taskHelp: "같은 액션을 여러 번 배치한 뒤 각 버튼이 표시할 Codex 작업을 고르세요.",
@@ -37,6 +39,7 @@ let statusTimer = null;
 let settingsPending = false;
 
 function parseJson(value, fallback = {}) {
+  if (value && typeof value === "object") return value;
   try {
     return JSON.parse(value);
   } catch {
@@ -88,10 +91,12 @@ function setSettings(nextSettings) {
 }
 
 function initializeControls() {
+  const loadingPanel = document.getElementById("settings-loading");
   const taskPanel = document.getElementById("task-settings");
   const commandPanel = document.getElementById("command-settings");
   taskPanel.hidden = action !== TASK_ACTION;
   commandPanel.hidden = action !== COMMAND_ACTION;
+  loadingPanel.hidden = true;
 
   const taskSource = document.getElementById("task-source");
   const command = document.getElementById("command");
@@ -112,7 +117,7 @@ function initializeControls() {
   main.setAttribute("aria-busy", "false");
 }
 
-window.connectElgatoStreamDeckSocket = function connectElgatoStreamDeckSocket(
+function connectElgatoStreamDeckSocket(
   port,
   uuid,
   registerEvent,
@@ -132,4 +137,4 @@ window.connectElgatoStreamDeckSocket = function connectElgatoStreamDeckSocket(
     socket.send(JSON.stringify({ event: registerEvent, uuid }));
     if (settingsPending) setSettings(settings);
   });
-};
+}
