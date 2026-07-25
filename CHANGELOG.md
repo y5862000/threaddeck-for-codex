@@ -4,6 +4,12 @@
 
 ## Unreleased
 
+## 0.5.8 — 2026-07-25
+
+- Reworked the Marketplace action list around five Codex-focused controls. One configurable **Codex task** action now covers Current and Top 1–8, while one configurable **Codex command** action covers New task, Side Chat, and Send through an autosaving Property Inspector.
+- Reduced the recommended Neo profile from three pages to two. The manual media, volume, app-launcher, and app-switch page is no longer shipped; dictation keeps its private pause/resume safety behavior without exposing unrelated media controls.
+- Kept the previous task-slot, Side Chat, Send, and Fast UUIDs hidden for existing profiles, while new profiles use the grouped actions and update their key image immediately when settings change.
+
 ## 0.5.7 — 2026-07-23
 
 - Removed automatic Codex termination and relaunch from Micro bridge recovery. A transient renderer or remote-control interruption now leaves the running Codex process untouched, clears stale bridge state, and shows **Restart Codex** until the user chooses to restart it. This release also includes the higher-frame-rate README animations and physical key-press motion prepared after 0.5.6.

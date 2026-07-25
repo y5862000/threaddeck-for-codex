@@ -2,7 +2,7 @@
 
 > [Korean profile guide](PROFILE.ko.md)
 
-ThreadDeck ships one editable, three-page profile designed for the eight-key **Stream Deck Neo**. Its name in the Stream Deck profile menu is **ThreadDeck for Codex**.
+ThreadDeck ships one editable, two-page Codex profile designed for the eight-key **Stream Deck Neo**. Its name in the Stream Deck profile menu is **ThreadDeck for Codex**.
 
 ![Recommended ThreadDeck for Codex dashboard on Stream Deck Neo](media/neo-preview.png)
 
@@ -23,25 +23,20 @@ The release pipeline also exports `threaddeck-for-codex-neo.streamDeckProfile` a
 
 This is the recommended everyday page: monitor the task selected in Codex, set the next response's Effort/Fast state, dictate, and send without changing pages.
 
+The three top-row workflow keys are copies of the same **Codex command** action, configured as New task, Side Chat, and Send. The Current task key uses the configurable **Codex task** action.
+
 ## Page 2 — Tasks
 
 | Top Task 1 | Top Task 2 | Top Task 3 | Top Task 4 |
 |---|---|---|---|
 | Top Task 5 | Top Task 6 | Top Task 7 | Previous page |
 
-`Top Task 8` remains available in the ThreadDeck action list for custom layouts. The separate Current Task action is deliberately kept on the Dashboard.
-
-## Page 3 — Media and apps
-
-| Previous track | Rewind | Play/Pause | Codex |
-|---|---|---|---|
-| Stream Deck | Music | Chrome | Previous page |
-
-The four app launchers are Elgato's editable **Open Application** actions. Change or remove them in Stream Deck if your preferred apps differ. ThreadDeck-owned media and page keys continue to receive the coordinated completion effect.
+Every task key on this page is another copy of the same **Codex task** action with Top 1–7 selected in its Property Inspector. Add another copy and choose Top 8 for a custom layout.
 
 ## Customize safely
 
 - Duplicate the profile in Stream Deck before making a large rearrangement.
-- Keep at least one Previous/Next Page action if you retain multiple pages.
+- Select a key to change its Task slot or Command in the autosaving Property Inspector.
+- Keep the bundled Previous Page key if you retain both pages.
 - The profile source is hardware-UUID-free and lives under [`profiles/source/unpacked`](../profiles/source/unpacked).
 - The release audit verifies the Neo model and every recommended key coordinate before publishing.

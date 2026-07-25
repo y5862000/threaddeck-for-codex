@@ -38,7 +38,9 @@
             "Version": "0.3.0.0"
           },
           "Resources": null,
-          "Settings": {},
+          "Settings": {
+            "taskSource": "current"
+          },
           "State": 0,
           "States": [
             {
@@ -64,7 +66,9 @@
             "Version": "0.3.0.0"
           },
           "Resources": null,
-          "Settings": {},
+          "Settings": {
+            "command": "new-task"
+          },
           "State": 0,
           "States": [
             {
@@ -109,14 +113,16 @@
         "2,0": {
           "ActionID": "8ca31b17-9b6f-4bbb-98b6-b27ee95dd986",
           "LinkedTitle": false,
-          "Name": "Codex Side Chat",
+          "Name": "Codex Command · Side Chat",
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
             "Version": "0.3.0.0"
           },
           "Resources": null,
-          "Settings": {},
+          "Settings": {
+            "command": "side-chat"
+          },
           "State": 0,
           "States": [
             {
@@ -130,7 +136,7 @@
               "TitleColor": "#ffffff"
             }
           ],
-          "UUID": "com.yechan.threaddeck.sidechat"
+          "UUID": "com.yechan.threaddeck.newthread"
         },
         "2,1": {
           "ActionID": "00fd9b90-04fd-493e-961a-d17180deecb0",
@@ -162,14 +168,16 @@
         "3,0": {
           "ActionID": "62ca2819-453c-4d5a-8f42-448cc6747d40",
           "LinkedTitle": false,
-          "Name": "Codex Send",
+          "Name": "Codex Command · Send",
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
             "Version": "0.3.0.0"
           },
           "Resources": null,
-          "Settings": {},
+          "Settings": {
+            "command": "send"
+          },
           "State": 0,
           "States": [
             {
@@ -184,7 +192,7 @@
               "TitleColor": "#ffffff"
             }
           ],
-          "UUID": "com.yechan.threaddeck.send"
+          "UUID": "com.yechan.threaddeck.newthread"
         },
         "3,1": {
           "ActionID": "7dfe31ec-81a0-4c0d-979f-d6ab278f098f",
@@ -198,7 +206,7 @@
           "Resources": null,
           "Settings": {
             "currentPage": 0,
-            "pageCount": 3
+            "pageCount": 2
           },
           "State": 0,
           "States": [

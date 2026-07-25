@@ -39,7 +39,8 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 - **Reliable switching** — open local tasks directly and activate the correct computer for an explicitly pinned remote task without moving or clicking the mouse pointer.
 - **Hardware dictation** — hold a task key to speak and auto-submit a follow-up, or use the dedicated microphone to leave a draft for review.
 - **Completion feedback** — after a fresh final-turn end is confirmed with no queued continuation, every visible ThreadDeck-owned key acknowledges the first completion frame. The matching task then keeps a slower green pulse until that exact task is successfully opened or viewed frontmost in Codex. Queue edits and dequeue-to-execution transitions never count as completion.
-- **Workflow controls** — change the current model's reasoning effort, toggle Codex Fast mode, create a task or Side Chat, send, switch apps, change pages, control media, and optionally show a weekly quota ring.
+- **Workflow controls** — change the current model's reasoning effort, toggle Codex Fast mode, create a task or Side Chat, send, change pages, and optionally show a weekly quota ring.
+- **Five focused actions** — choose Current or Top 1–8 from one **Codex task** action, and New task, Side Chat, or Send from one **Codex command** action in the autosaving Property Inspector.
 - **Micro-first reliability** — Effort, Fast, Side Chat, push-to-talk, Send, New Task, and the six native Micro task slots use Codex's own internal commands first. Accessibility and shortcuts remain a verified fallback for the eight-task dashboard and unsupported builds.
 
 ## Install in 60 seconds
@@ -82,25 +83,22 @@ With the Micro bridge connected, these actions use Codex's native internal comma
 
 `Hold` and `push-to-talk` are deliberately different:
 
-- A **task key** or **Send key** waits for a threshold before arming its alternate action.
+- A **task key** or a Codex command configured as **Send** waits for a threshold before arming its alternate action.
 - The **microphone key** starts recording immediately and must stay pressed while you speak.
-- Every other **ThreadDeck-owned** supplied key has one action only. The four Elgato-owned app launchers in the Media page are the exception: tap to open or focus the app, and long-press to quit it.
+- Settings in the Property Inspector save immediately; there is no separate Save button.
 
 | Key | Press behavior | Hold or release behavior |
 |---|---|---|
-| Current task | Opens the task selected in Codex's active window | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
-| Top Task 1–8 | Starts opening that position in the sorted local, pinned-remote, and Side Chat list | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Codex task: Current | Opens the task selected in Codex's active window | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
+| Codex task: Top 1–8 | Starts opening the configured position in the sorted local, pinned-remote, and Side Chat list | Hold at least **0.55 s** to start dictation in that task; release to transcribe, auto-submit, and verify the draft cleared |
 | Microphone | Starts dictation in the verified current composer and pauses supported audio-producing media apps | For a brand-new Side Chat, can use its verified right-side composer before a task UUID exists; keep held while speaking, then release to leave a draft **without submitting** and resume media |
-| Send | Verifies the current composer; release before 0.6 s to send Return | Waits for an in-progress task or Side Chat switch; at **0.6 s** the key turns blue, then release to send Command+Return |
-| App launcher | Tap to open or bring the configured app forward | Long-press to quit that app; the threshold and native artwork are managed by Stream Deck |
+| Codex command: Send | Verifies the current composer; release before 0.6 s to send Return | Waits for an in-progress task or Side Chat switch; at **0.6 s** the key turns blue, then release to send Command+Return |
 | Weekly quota | — | Release to refresh CodexBar immediately |
-| New task / Side Chat | — | New Task mirrors Current Task's scope: project tasks create inside that project, standalone tasks stay outside projects. Until Codex assigns an ID, Current Task points to a provisional `New task` composer. ThreadDeck uses native `NEW` when context-aware creation is available, with `⇧⌘O` / `⌥⌘O` fallbacks; Side Chat uses native `PARTY` or `⌥⌘S` and keeps the same protected provisional-composer behavior |
+| Codex command: New task / Side Chat | — | New Task mirrors Current Task's scope: project tasks create inside that project, standalone tasks stay outside projects. Until Codex assigns an ID, Current Task points to a provisional `New task` composer. ThreadDeck uses native `NEW` when context-aware creation is available, with `⇧⌘O` / `⌥⌘O` fallbacks; Side Chat uses native `PARTY` or `⌥⌘S` and keeps the same protected provisional-composer behavior |
 | Reasoning + Fast | Release before 0.6 s to move the next-run level (`LIGHT`–`ULTRA`); the track begins a smooth 320 ms transition immediately from the first tap | Rapid taps are folded into the last ping-pong position. Ordinary visible levels settle for only 90 ms and use the same internal composer command as the Micro encoder. `Max`, `Ultra`, or a level skipped by the encoder waits for the 1.1-second input pause, opens the exact `Advanced` action, scans the live account/model list, and selects only the requested level. Direct Codex changes are mirrored with the same animation. An exact Ultra warning selects only `Use Full access`, never `Continue`. At **0.6 s**, the key toggles next-run Fast mode immediately through Codex's native command. When Fast is verified, the level name remains exactly centered and its bolt sits immediately to the left so a pressing finger does not cover it |
-| Dedicated Fast mode | Release to toggle Fast mode in the verified current composer | Uses Codex's native `FAST` command first. A filled green bolt means Fast and an outlined neutral bolt means standard; a pending task or Side Chat switch is resolved first |
-| App switcher / media | Runs immediately on press | No alternate hold action |
-| Previous / next page | — | Release to cycle through the three ThreadDeck pages |
+| Previous page | — | Release to cycle through the two ThreadDeck pages |
 
-The Dashboard's Current Task key follows the task selected in Codex's active window, including a task you select directly in the app. The read-only Micro snapshot is the first source for active task, next-run Effort, Fast state, theme, and six native slot identities; renderer keys such as `local:<UUID>` are normalized to the exact ThreadDeck task while the raw key is retained for native switching. The existing local state and Accessibility observer extend this to eight task cards, remote tasks, queues, goals, and Side Chats. Send, microphone, Effort, Fast, and Side Chat re-confirm that same current task immediately before acting. A newly opened New Task or Side Chat retains a navigation lease only until Codex exposes its real identity or the renderer reports that the user selected another task manually; an exact manual selection immediately wins. A transient or ambiguous read keeps the last verified identity instead of guessing. **Top Task 1** remains independent from Current Task for custom profiles.
+The Dashboard's Codex task key is configured as Current and follows the task selected in Codex's active window, including a task you select directly in the app. The same action can instead be configured as Top 1–8 for another key. The read-only Micro snapshot is the first source for active task, next-run Effort, Fast state, theme, and six native slot identities; renderer keys such as `local:<UUID>` are normalized to the exact ThreadDeck task while the raw key is retained for native switching. The existing local state and Accessibility observer extend this to eight task cards, remote tasks, queues, goals, and Side Chats. Send, microphone, Effort, Fast, and Side Chat re-confirm that same current task immediately before acting. A newly opened New Task or Side Chat retains a navigation lease only until Codex exposes its real identity or the renderer reports that the user selected another task manually; an exact manual selection immediately wins. A transient or ambiguous read keeps the last verified identity instead of guessing.
 
 Reasoning and speed have two deliberate timelines. A working task card keeps the exact Effort and Fast/standard setting captured when that turn started; changing the Codex composer or ThreadDeck's combined control does not rewrite an answer already in progress. The combined control instead shows the live setting for the **next run**, including a setting changed directly in Codex. Both tracks animate smoothly when their own trustworthy value changes: the control follows the next-run composer immediately, while a task header moves only when new turn metadata reaches that card. Codex's current queue stores the follow-up content and starts it later through the live composer, so a queued follow-up uses the setting present when it actually begins. Once dequeued, its new turn metadata becomes the task-card header. The amber `+N` remains a queue count rather than pretending every queued item has its own frozen setting.
 
@@ -160,13 +158,10 @@ Remote summary timestamps are used for ordering, never as invented completion ti
 
 <p align="center"><img src="docs/media/neo-preview.png" width="680" alt="Recommended ThreadDeck for Codex profile on Stream Deck Neo"></p>
 
-The bundled recommended Stream Deck Neo profile has three pages and can be rearranged in Stream Deck. Release builds also export a standalone recovery or manual-import copy; see the [visual layout and import guidance](docs/PROFILE.md).
+The bundled recommended Stream Deck Neo profile has two Codex-only pages and can be rearranged in Stream Deck. Release builds also export a standalone recovery or manual-import copy; see the [visual layout and import guidance](docs/PROFILE.md).
 
-1. **Dashboard** — quota, New Task, Side Chat, and Send on the top row; Current Task, combined reasoning/Fast, microphone, and back navigation on the bottom row. The combined control occupies `1,1`, and Current Task remains at `0,1`. The dedicated Fast action remains available for custom layouts.
-2. **Tasks** — Top Task 1–7 and back navigation. Top Task 8 and the independent Current Task action are available in the action list for custom layouts.
-3. **Media** — previous track, rewind, play/pause, four app launchers, and back navigation. Forward page, next track, seek, mute, and volume actions are also available.
-
-Elgato-owned app-launch keys keep their native artwork, support their configured long-press-to-quit behavior, and do not receive ThreadDeck's completion overlay. ThreadDeck page-navigation keys do.
+1. **Dashboard** — quota and three configured Codex command keys on the top row; a Current-configured Codex task, combined reasoning/Fast, microphone, and back navigation on the bottom row.
+2. **Tasks** — seven copies of the same Codex task action configured as Top 1–7, plus back navigation. Add another copy and choose Top 8 in its Property Inspector for a custom layout.
 
 ## Optional weekly quota ring
 
@@ -209,7 +204,6 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 | Microphone release does not send | This is expected for the dedicated microphone; it leaves a draft. Use a task-key hold for auto-submit or press Send afterward |
 | Task-key hold does not record | Hold past 0.55 s until the speaking state appears; keep Codex available, grant microphone permission, and check `⌃⇧D` |
 | Send hold takes the short path | Keep holding until the key turns blue before releasing |
-| An app closes from the Media page | The bundled Elgato app launchers use long-press to quit; tap briefly when you only want to open or focus |
 | Remote task is missing | Open that computer once in Codex, then explicitly pin the task |
 | Remote task reports a duplicate | Give the tasks distinct titles or leave only one pinned |
 | `State unavailable` appears | Update to the latest release and restart Codex and Stream Deck; transient reads keep the last good list and retry automatically |

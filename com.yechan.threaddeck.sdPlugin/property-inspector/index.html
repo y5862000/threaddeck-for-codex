@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>ThreadDeck settings</title>
+    <link rel="stylesheet" href="property-inspector.css">
+  </head>
+  <body>
+    <main id="settings" aria-busy="true">
+      <section id="task-settings" class="setting-group" hidden>
+        <label for="task-source" data-copy="taskLabel">Task slot</label>
+        <select id="task-source" data-setting="taskSource">
+          <option value="current" data-copy="currentTask">Current task</option>
+          <option value="top1">Top task 1</option>
+          <option value="top2">Top task 2</option>
+          <option value="top3">Top task 3</option>
+          <option value="top4">Top task 4</option>
+          <option value="top5">Top task 5</option>
+          <option value="top6">Top task 6</option>
+          <option value="top7">Top task 7</option>
+          <option value="top8">Top task 8</option>
+        </select>
+        <p data-copy="taskHelp">Use one action repeatedly and choose which Codex task each key follows.</p>
+      </section>
+
+      <section id="command-settings" class="setting-group" hidden>
+        <label for="command" data-copy="commandLabel">Command</label>
+        <select id="command" data-setting="command">
+          <option value="new-task" data-copy="newTask">New task</option>
+          <option value="side-chat" data-copy="sideChat">Side Chat</option>
+          <option value="send" data-copy="send">Send</option>
+        </select>
+        <p data-copy="commandHelp">Send uses Return on a tap and Command+Return after the key turns blue.</p>
+      </section>
+
+      <footer>
+        <span id="save-status" role="status" aria-live="polite"></span>
+        <a href="https://github.com/y5862000/threaddeck-for-codex/blob/main/docs/TROUBLESHOOTING.md"
+           target="_blank"
+           rel="noreferrer"
+           data-copy="help">Help</a>
+      </footer>
+    </main>
+    <script src="property-inspector.js"></script>
+  </body>
+</html>

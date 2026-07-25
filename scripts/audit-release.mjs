@@ -28,7 +28,7 @@ const forbiddenText = [
 ];
 
 const textExtensions = new Set([
-  ".c", ".h", ".js", ".json", ".m", ".md", ".sh", ".svg", ".txt", ".xml", ".yaml", ".yml"
+  ".c", ".css", ".h", ".html", ".js", ".json", ".m", ".md", ".sh", ".svg", ".txt", ".xml", ".yaml", ".yml"
 ]);
 
 const failures = [];
@@ -55,6 +55,37 @@ function visit(target) {
 
 for (const target of checkedRoots) visit(target);
 
+const pluginManifestPath = path.join(root, "com.yechan.threaddeck.sdPlugin/manifest.json");
+const pluginManifest = JSON.parse(fs.readFileSync(pluginManifestPath, "utf8"));
+const visibleActionUuids = pluginManifest.Actions
+  .filter((action) => action.VisibleInActionsList !== false)
+  .map((action) => action.UUID);
+const expectedVisibleActionUuids = [
+  "com.yechan.threaddeck.weekly",
+  "com.yechan.threaddeck.thread1",
+  "com.yechan.threaddeck.newthread",
+  "com.yechan.threaddeck.voice",
+  "com.yechan.threaddeck.reasoning"
+];
+if (JSON.stringify(visibleActionUuids) !== JSON.stringify(expectedVisibleActionUuids)) {
+  failures.push("Marketplace action list is not the five-action Codex-focused layout");
+}
+for (const uuid of [
+  "com.yechan.threaddeck.thread1",
+  "com.yechan.threaddeck.newthread"
+]) {
+  const action = pluginManifest.Actions.find((candidate) => candidate.UUID === uuid);
+  if (action?.PropertyInspectorPath !== "property-inspector/index.html") {
+    failures.push(`${uuid} has no grouped-action Property Inspector`);
+  }
+}
+if (pluginManifest.Actions.some((action) => (
+  action.UUID === "com.yechan.threaddeck.appswitch"
+  || action.UUID.startsWith("com.yechan.threaddeck.media.")
+))) {
+  failures.push("Marketplace manifest still exposes app-switch or manual media controls");
+}
+
 const profileManifest = path.join(
   root,
   "profiles/source/unpacked/BD0CCFE2-385C-472C-A7A9-57205644D475.sdProfile/manifest.json"
@@ -62,43 +93,36 @@ const profileManifest = path.join(
 const profile = JSON.parse(fs.readFileSync(profileManifest, "utf8"));
 if (profile.Device?.UUID) failures.push("profile source still contains a hardware UUID");
 if (profile.Device?.Model !== "20GBJ9901") failures.push("profile source is not targeted at Stream Deck Neo");
+if (profile.Pages?.Pages?.length !== 2) failures.push("recommended profile is not the two-page Codex layout");
 
 const expectedProfileActions = {
   THREADDECK: {
-    "0,0": "com.yechan.threaddeck.weekly",
-    "1,0": "com.yechan.threaddeck.newthread",
-    "2,0": "com.yechan.threaddeck.sidechat",
-    "3,0": "com.yechan.threaddeck.send",
-    "0,1": "com.yechan.threaddeck.thread1",
-    "1,1": "com.yechan.threaddeck.reasoning",
-    "2,1": "com.yechan.threaddeck.voice",
-    "3,1": "com.yechan.threaddeck.page.previous"
+    "0,0": { uuid: "com.yechan.threaddeck.weekly" },
+    "1,0": { uuid: "com.yechan.threaddeck.newthread", settings: { command: "new-task" } },
+    "2,0": { uuid: "com.yechan.threaddeck.newthread", settings: { command: "side-chat" } },
+    "3,0": { uuid: "com.yechan.threaddeck.newthread", settings: { command: "send" } },
+    "0,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "current" } },
+    "1,1": { uuid: "com.yechan.threaddeck.reasoning" },
+    "2,1": { uuid: "com.yechan.threaddeck.voice" },
+    "3,1": { uuid: "com.yechan.threaddeck.page.previous", settings: { currentPage: 0, pageCount: 2 } }
   },
   THREADS: {
-    "0,0": "com.yechan.threaddeck.thread.top1",
-    "1,0": "com.yechan.threaddeck.thread2",
-    "2,0": "com.yechan.threaddeck.thread3",
-    "3,0": "com.yechan.threaddeck.thread4",
-    "0,1": "com.yechan.threaddeck.thread5",
-    "1,1": "com.yechan.threaddeck.thread6",
-    "2,1": "com.yechan.threaddeck.thread7",
-    "3,1": "com.yechan.threaddeck.page.previous"
-  },
-  MEDIA: {
-    "0,0": "com.yechan.threaddeck.media.previous",
-    "1,0": "com.yechan.threaddeck.media.rewind",
-    "2,0": "com.yechan.threaddeck.media.playpause",
-    "3,0": "com.elgato.streamdeck.system.openapp",
-    "0,1": "com.elgato.streamdeck.system.openapp",
-    "1,1": "com.elgato.streamdeck.system.openapp",
-    "2,1": "com.elgato.streamdeck.system.openapp",
-    "3,1": "com.yechan.threaddeck.page.previous"
+    "0,0": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top1" } },
+    "1,0": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top2" } },
+    "2,0": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top3" } },
+    "3,0": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top4" } },
+    "0,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top5" } },
+    "1,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top6" } },
+    "2,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top7" } },
+    "3,1": { uuid: "com.yechan.threaddeck.page.previous", settings: { currentPage: 1, pageCount: 2 } }
   }
 };
 const profilePagesRoot = path.join(path.dirname(profileManifest), "Profiles");
-const profilePages = fs.readdirSync(profilePagesRoot).map((entry) => {
+const profilePages = fs.readdirSync(profilePagesRoot).flatMap((entry) => {
   const pageManifest = path.join(profilePagesRoot, entry, "manifest.json");
-  return JSON.parse(fs.readFileSync(pageManifest, "utf8"));
+  return fs.existsSync(pageManifest)
+    ? [JSON.parse(fs.readFileSync(pageManifest, "utf8"))]
+    : [];
 });
 for (const [pageName, expectedActions] of Object.entries(expectedProfileActions)) {
   const page = profilePages.find((candidate) => candidate.Name === pageName);
@@ -107,11 +131,21 @@ for (const [pageName, expectedActions] of Object.entries(expectedProfileActions)
     failures.push(`recommended profile is missing ${pageName}`);
     continue;
   }
-  for (const [coordinate, actionUuid] of Object.entries(expectedActions)) {
-    if (actions[coordinate]?.UUID !== actionUuid) {
-      failures.push(`recommended profile ${pageName} ${coordinate} is not ${actionUuid}`);
+  for (const [coordinate, expected] of Object.entries(expectedActions)) {
+    const action = actions[coordinate];
+    if (action?.UUID !== expected.uuid) {
+      failures.push(`recommended profile ${pageName} ${coordinate} is not ${expected.uuid}`);
+      continue;
+    }
+    for (const [key, value] of Object.entries(expected.settings ?? {})) {
+      if (action.Settings?.[key] !== value) {
+        failures.push(`recommended profile ${pageName} ${coordinate} setting ${key} is not ${value}`);
+      }
     }
   }
+}
+if (profilePages.some((page) => page.Name === "MEDIA")) {
+  failures.push("recommended profile still contains a MEDIA page");
 }
 
 if (failures.length > 0) {

@@ -59,7 +59,7 @@ const {
 const {
   ACTIONS,
   CURRENT_THREAD_SLOT,
-  MEDIA_COMMAND_BY_ACTION,
+  DEFAULT_PROFILE_PAGE_COUNT,
   PAGE_DIRECTION_BY_ACTION,
   RANKED_THREAD_ACTIONS,
   THREAD_ACTIONS,
@@ -68,14 +68,19 @@ const {
   THREAD_SLOT_BY_ACTION
 } = require("../src/config");
 const {
+  codexCommandFromSettings,
+  taskSlotFromSettings,
+  taskSourceFromSettings
+} = require("../src/action-settings");
+const {
   inferThreadDeckPage,
   resolveProfilePageTarget
 } = require("../src/profile-navigation");
 
 test("configuration exposes a complete and internally consistent action contract", () => {
   const actionValues = Object.values(ACTIONS);
-  assert.equal(actionValues.length, 27);
-  assert.equal(new Set(actionValues).size, 27);
+  assert.equal(actionValues.length, 17);
+  assert.equal(new Set(actionValues).size, 17);
   assert.equal(ACTIONS.fastMode, "com.yechan.threaddeck.fastmode");
   assert.equal(ACTIONS.reasoning, "com.yechan.threaddeck.reasoning");
   assert.equal(ACTIONS.topThread1, "com.yechan.threaddeck.thread.top1");
@@ -101,11 +106,9 @@ test("configuration exposes a complete and internally consistent action contract
     ]
   );
 
-  assert.equal(MEDIA_COMMAND_BY_ACTION.get(ACTIONS.mediaPrevious), "media-previous");
-  assert.equal(MEDIA_COMMAND_BY_ACTION.get(ACTIONS.mediaPlayPause), "media-play-pause");
-  assert.equal(MEDIA_COMMAND_BY_ACTION.get(ACTIONS.mediaVolumeUp), "media-volume-up");
+  assert.equal(DEFAULT_PROFILE_PAGE_COUNT, 2);
   assert.equal(PAGE_DIRECTION_BY_ACTION.get(ACTIONS.pagePrevious), -1);
-  assert.equal(PAGE_DIRECTION_BY_ACTION.get(ACTIONS.pageNext), 1);
+  assert.equal(PAGE_DIRECTION_BY_ACTION.size, 1);
 
   assert.equal(Object.isFrozen(THREAD_REFRESH_ERROR_STATE), true);
   assert.deepEqual(THREAD_REFRESH_ERROR_STATE, {
@@ -119,10 +122,22 @@ test("configuration exposes a complete and internally consistent action contract
   }, TypeError);
 });
 
+test("grouped action settings normalize task slots and Codex commands", () => {
+  assert.equal(taskSourceFromSettings({}), "current");
+  assert.equal(taskSlotFromSettings({}), CURRENT_THREAD_SLOT);
+  assert.equal(taskSourceFromSettings({ taskSource: "TOP8" }), "top8");
+  assert.equal(taskSlotFromSettings({ taskSource: "top8" }), 7);
+  assert.equal(taskSourceFromSettings({ taskSource: "top9" }), "current");
+
+  assert.equal(codexCommandFromSettings({}), "new-task");
+  assert.equal(codexCommandFromSettings({ command: "SIDE-CHAT" }), "side-chat");
+  assert.equal(codexCommandFromSettings({ command: "send" }), "send");
+  assert.equal(codexCommandFromSettings({ command: "volume-up" }), "new-task");
+});
+
 test("profile navigation infers the visible page when a newly placed key has no settings", () => {
   assert.equal(inferThreadDeckPage([ACTIONS.weekly, ACTIONS.reasoning]), 0);
   assert.equal(inferThreadDeckPage([ACTIONS.topThread1, ACTIONS.thread4]), 1);
-  assert.equal(inferThreadDeckPage([ACTIONS.mediaPlayPause, ACTIONS.mediaNext]), 2);
 
   assert.deepEqual(
     resolveProfilePageTarget(
@@ -130,15 +145,7 @@ test("profile navigation infers the visible page when a newly placed key has no 
       {},
       [ACTIONS.topThread1, ACTIONS.thread4, ACTIONS.pagePrevious]
     ),
-    { currentPage: 1, pageCount: 3, page: 0, source: "visible-actions" }
-  );
-  assert.deepEqual(
-    resolveProfilePageTarget(
-      ACTIONS.pageNext,
-      {},
-      [ACTIONS.topThread1, ACTIONS.thread4, ACTIONS.pageNext]
-    ),
-    { currentPage: 1, pageCount: 3, page: 2, source: "visible-actions" }
+    { currentPage: 1, pageCount: 2, page: 0, source: "visible-actions" }
   );
 });
 
@@ -146,16 +153,16 @@ test("profile navigation prefers valid settings and fails closed on an ambiguous
   assert.deepEqual(
     resolveProfilePageTarget(
       ACTIONS.pagePrevious,
-      { currentPage: "2", pageCount: "3" },
+      { currentPage: "1", pageCount: "2" },
       [ACTIONS.weekly]
     ),
-    { currentPage: 2, pageCount: 3, page: 1, source: "settings" }
+    { currentPage: 1, pageCount: 2, page: 0, source: "settings" }
   );
   assert.equal(
     resolveProfilePageTarget(
       ACTIONS.pagePrevious,
       {},
-      [ACTIONS.weekly, ACTIONS.mediaPlayPause]
+      [ACTIONS.weekly, ACTIONS.topThread1]
     ),
     null
   );

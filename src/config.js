@@ -15,19 +15,9 @@ const ACTIONS = {
   newThread: "com.yechan.threaddeck.newthread",
   voice: "com.yechan.threaddeck.voice",
   send: "com.yechan.threaddeck.send",
-  appSwitch: "com.yechan.threaddeck.appswitch",
   fastMode: "com.yechan.threaddeck.fastmode",
   reasoning: "com.yechan.threaddeck.reasoning",
-  mediaPrevious: "com.yechan.threaddeck.media.previous",
-  mediaRewind: "com.yechan.threaddeck.media.rewind",
-  mediaPlayPause: "com.yechan.threaddeck.media.playpause",
-  mediaForward: "com.yechan.threaddeck.media.forward",
-  mediaMute: "com.yechan.threaddeck.media.mute",
-  mediaVolumeDown: "com.yechan.threaddeck.media.volumedown",
-  mediaVolumeUp: "com.yechan.threaddeck.media.volumeup",
-  mediaNext: "com.yechan.threaddeck.media.next",
-  pagePrevious: "com.yechan.threaddeck.page.previous",
-  pageNext: "com.yechan.threaddeck.page.next"
+  pagePrevious: "com.yechan.threaddeck.page.previous"
 };
 
 const RANKED_THREAD_ACTIONS = [
@@ -98,22 +88,11 @@ const THREAD_SLOT_BY_ACTION = new Map([
   [ACTIONS.thread1, CURRENT_THREAD_SLOT],
   ...RANKED_THREAD_ACTIONS.map((action, index) => [action, index])
 ]);
-const MEDIA_COMMAND_BY_ACTION = new Map([
-  [ACTIONS.mediaPrevious, "media-previous"],
-  [ACTIONS.mediaRewind, "media-rewind"],
-  [ACTIONS.mediaPlayPause, "media-play-pause"],
-  [ACTIONS.mediaForward, "media-forward"],
-  [ACTIONS.mediaMute, "media-mute"],
-  [ACTIONS.mediaVolumeDown, "media-volume-down"],
-  [ACTIONS.mediaVolumeUp, "media-volume-up"],
-  [ACTIONS.mediaNext, "media-next"]
-]);
 const PAGE_DIRECTION_BY_ACTION = new Map([
-  [ACTIONS.pagePrevious, -1],
-  [ACTIONS.pageNext, 1]
+  [ACTIONS.pagePrevious, -1]
 ]);
 const DISTRIBUTED_PROFILE_NAME = "profiles/threaddeck-neo";
-const DEFAULT_PROFILE_PAGE_COUNT = 3;
+const DEFAULT_PROFILE_PAGE_COUNT = 2;
 
 module.exports = {
   ACTIONS,
@@ -129,7 +108,6 @@ module.exports = {
   GLOBAL_COMPLETION_GROUP_COUNT,
   GLOBAL_COMPLETION_PULSE_DURATION_MS,
   FAST_MODE_LONG_PRESS_MS,
-  MEDIA_COMMAND_BY_ACTION,
   PAGE_DIRECTION_BY_ACTION,
   QUEUE_ZERO_CONFIRM_MS,
   RANKED_THREAD_ACTIONS,

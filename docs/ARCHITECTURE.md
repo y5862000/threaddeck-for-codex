@@ -76,7 +76,7 @@ It:
 - emits Codex shortcuts and Return;
 - holds and releases push-to-talk modifiers across Stream Deck key-down/key-up events;
 - attaches an explicit Latin `D` to push-to-talk events while retaining the physical key code, making the shortcut independent of the active keyboard input source;
-- sends app-switch and media-key events;
+- sends media-key events only as a guarded fallback for dictation pause/resume;
 - resolves each active Core Audio process to its GUI owner without an app allowlist and verifies semantic pause/play controls;
 - pauses those controls directly, uses the normal macOS media command only as a fallback, and records only bundle identifiers in a ten-minute local lease so release resumes the exact apps without retaining PIDs or media text;
 - traverses the visible Codex accessibility tree once for the target UUID and normalized title fingerprints, activates only identity-safe pressable results, rejects title-only ambiguity in strict mode, verifies both the safety-critical frontmost task and the passive current task from the active Codex window header, and counts localized queue-action buttons without returning message text.
@@ -97,9 +97,9 @@ After an `AG00`–`AG05` delivery, ThreadDeck verifies the canonical destination
 
 The editable profile source lives under `profiles/source/unpacked`. `scripts/build-profile.sh` creates the `.streamDeckProfile` archive referenced by the plugin manifest. Hardware UUIDs are removed before publication so importing the profile does not bind it to the author's device.
 
-ThreadDeck owns the bundled previous-page actions and exposes a next-page action. They use Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while those keys participate in plugin-rendered completion overlays. Elgato-owned app-launch actions remain native and do not receive ThreadDeck overlays.
+ThreadDeck owns the hidden previous-page action used by its two-page profile. It uses Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while the key participates in plugin-rendered completion overlays.
 
-The Dashboard keeps Current Task at keypad position `0,1` and the combined Effort/Fast control at `1,1`. New Task, Side Chat, Send, microphone, quota, and back navigation fill the remaining slots. The dedicated Fast and app-switch actions remain available in the action list for custom profiles.
+The Dashboard keeps a Current-configured Codex task at keypad position `0,1` and the combined Effort/Fast control at `1,1`. Three copies of the grouped Codex command action are configured as New Task, Side Chat, and Send. The second page reuses the grouped Codex task action for Top 1–7. Both grouped actions persist their selection through an autosaving Property Inspector.
 
 ### Language and platform boundary
 

@@ -25,7 +25,7 @@ Run `pnpm run doctor` from a source checkout for a read-only report. `connected`
 
 While the bridge is unavailable, ThreadDeck keeps the verified Accessibility/shortcut adapter. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed through the fallback path because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and the exact key used.
 
-## No shortcut, media, or remote-switch action works
+## No shortcut or remote-switch action works
 
 ThreadDeck checks its permission and legacy-control layers independently at startup and every 30 seconds:
 
@@ -63,10 +63,6 @@ Both actions happen on release:
 
 If it never turns blue, remove and re-add the Send action or reinstall the latest plugin build.
 
-## An app closes from the Media page
-
-The four bundled app launchers use Elgato's Open Application action with long-press set to **Quit**. Tap briefly to open or focus Stream Deck, Music, Chrome, or Codex. Holding the launcher invokes Stream Deck's configured quit action. You can replace the app or change that long-press setting in Stream Deck.
-
 ## Task cards are empty
 
 Open Codex Desktop and create at least one task. Local pinned and recent user tasks should fill the list. If a Codex update changed its local database format, include only version information and a privacy-sanitized Stream Deck plugin log in an issue.
@@ -101,7 +97,7 @@ Update to the latest release. ThreadDeck retries short transient reads and keeps
 
 ## Only the completed task key pulses
 
-Update to the latest build. The first completion frame is sent to every visible ThreadDeck-owned key before later frames are grouped. Elgato-owned actions such as the four app launchers on the Media page keep native rendering and cannot receive the overlay.
+Update to the latest build. The first completion frame is sent to every visible ThreadDeck-owned key before later frames are grouped.
 
 ## The queue badge does not appear
 

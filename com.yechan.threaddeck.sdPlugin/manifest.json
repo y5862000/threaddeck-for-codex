@@ -22,14 +22,15 @@
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Current Codex task",
+      "Name": "Codex task",
+      "PropertyInspectorPath": "property-inspector/index.html",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Follows the task in Codex's active window. Tap to open it, or hold for 0.55 seconds, speak, and release to dictate and submit a follow-up.",
+      "Tooltip": "Choose Current or Top 1–8 in the Property Inspector. Tap to open it, or hold for 0.55 seconds to dictate and submit a follow-up.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.thread1"
     },
@@ -38,158 +39,15 @@
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Top Codex task 1",
+      "Name": "Codex command",
+      "PropertyInspectorPath": "property-inspector/index.html",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Tap to open the first sorted Codex task. Hold for 0.55 seconds, speak, and release to dictate and submit a follow-up. This action is independent from Current Codex task.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread.top1"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 2",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the second sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread2"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 3",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the third sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread3"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 4",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the fourth sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread4"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 5",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the fifth sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread5"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 6",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the sixth sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread6"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 7",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the seventh sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread7"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Top Codex task 8",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Tap to open the eighth sorted Codex task, or hold to dictate and submit a follow-up.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.thread8"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Codex Side Chat",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Opens Side Chat with Option+Command+S and verifies that the new chat owns focus before voice, send, Fast mode, or effort actions continue.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.sidechat"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "New Codex task",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Opens a new Codex task outside the selected project.",
+      "Tooltip": "Choose New task, Side Chat, or Send in the Property Inspector.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.newthread"
     },
@@ -205,57 +63,9 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Starts dictation in the current composer while held and pauses supported media. Release to leave a draft without submitting it.",
+      "Tooltip": "Starts dictation in the current Codex composer while held. Release to leave a draft without submitting it.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.voice"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Send to Codex",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Release quickly to send Return. Hold until the key turns blue, then release to send Command+Return.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.send"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Switch app",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Switches to the next macOS app with Command+Tab.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.appswitch"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Codex Fast mode",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Toggles Fast mode for the current Codex task and shows only the verified state.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.fastmode"
     },
     {
       "Controllers": [
@@ -278,128 +88,187 @@
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Previous track",
+      "Name": "Top Codex task 1",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Moves to the previous media track.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.previous"
+      "UUID": "com.yechan.threaddeck.thread.top1",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Rewind media",
+      "Name": "Top Codex task 2",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Rewinds the current media.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.rewind"
+      "UUID": "com.yechan.threaddeck.thread2",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Play / pause media",
+      "Name": "Top Codex task 3",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Plays or pauses the current media.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.playpause"
+      "UUID": "com.yechan.threaddeck.thread3",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Fast-forward media",
+      "Name": "Top Codex task 4",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Fast-forwards the current media.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.forward"
+      "UUID": "com.yechan.threaddeck.thread4",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Mute media",
+      "Name": "Top Codex task 5",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Toggles system audio mute.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.mute"
+      "UUID": "com.yechan.threaddeck.thread5",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Volume down",
+      "Name": "Top Codex task 6",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Lowers system audio volume.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.volumedown"
+      "UUID": "com.yechan.threaddeck.thread6",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Volume up",
+      "Name": "Top Codex task 7",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Raises system audio volume.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.volumeup"
+      "UUID": "com.yechan.threaddeck.thread7",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
         "Keypad"
       ],
       "Icon": "images/action",
-      "Name": "Next track",
+      "Name": "Top Codex task 8",
       "States": [
         {
           "Image": "images/key",
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Moves to the next media track.",
+      "Tooltip": "Legacy task slot retained for existing profiles.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.media.next"
+      "UUID": "com.yechan.threaddeck.thread8",
+      "VisibleInActionsList": false
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Codex Side Chat",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "Legacy command retained for existing profiles.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.sidechat",
+      "VisibleInActionsList": false
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Send to Codex",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "Legacy command retained for existing profiles.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.send",
+      "VisibleInActionsList": false
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Codex Fast mode",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "Legacy Fast mode action retained for existing profiles.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.fastmode",
+      "VisibleInActionsList": false
     },
     {
       "Controllers": [
@@ -413,32 +282,17 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Moves to the previous page in the ThreadDeck profile.",
+      "Tooltip": "Internal navigation for the recommended ThreadDeck profile.",
       "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.page.previous"
-    },
-    {
-      "Controllers": [
-        "Keypad"
-      ],
-      "Icon": "images/action",
-      "Name": "Next page",
-      "States": [
-        {
-          "Image": "images/key",
-          "ShowTitle": false
-        }
-      ],
-      "Tooltip": "Moves to the next page in the ThreadDeck profile.",
-      "UserTitleEnabled": false,
-      "UUID": "com.yechan.threaddeck.page.next"
+      "UUID": "com.yechan.threaddeck.page.previous",
+      "VisibleInActionsList": false
     }
   ],
   "Author": "ThreadDeck",
   "Category": "ThreadDeck for Codex",
   "CategoryIcon": "images/category",
   "CodePath": "bin/plugin.js",
-  "Description": "A bilingual Stream Deck Neo dashboard for monitoring, switching, and dictating into Codex Desktop tasks on macOS.",
+  "Description": "A bilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS.",
   "Icon": "images/plugin",
   "Name": "ThreadDeck for Codex",
   "Nodejs": {
@@ -465,6 +319,6 @@
   },
   "UUID": "com.yechan.threaddeck",
   "URL": "https://github.com/y5862000/threaddeck-for-codex",
-  "Version": "0.5.7.0",
+  "Version": "0.5.8.0",
   "SupportURL": "https://github.com/y5862000/threaddeck-for-codex/blob/main/docs/TROUBLESHOOTING.md"
 }

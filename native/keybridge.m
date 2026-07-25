@@ -1525,12 +1525,6 @@ static bool codex_audio_input_is_running(void) {
   return codex_audio_input_state() == VOICE_AUDIO_ACTIVE;
 }
 
-static void app_switch(void) {
-  post_key(KEY_COMMAND, true, kCGEventFlagMaskCommand);
-  tap_key(KEY_TAB, kCGEventFlagMaskCommand);
-  post_key(KEY_COMMAND, false, 0);
-}
-
 static void new_thread(void) {
   post_key(KEY_COMMAND, true, kCGEventFlagMaskCommand);
   post_key(KEY_OPTION, true, kCGEventFlagMaskCommand | kCGEventFlagMaskAlternate);
@@ -2104,20 +2098,11 @@ static bool command_needs_post_event_access(const char *command) {
   return strcmp(command, "voice-down") == 0
     || strcmp(command, "send") == 0
     || strcmp(command, "send-command") == 0
-    || strcmp(command, "app-switch") == 0
     || strcmp(command, "new-thread") == 0
     || strcmp(command, "new-project-thread") == 0
     || strcmp(command, "side-chat") == 0
-    || strcmp(command, "media-previous") == 0
-    || strcmp(command, "media-rewind") == 0
     || strcmp(command, "media-pause-if-playing") == 0
-    || strcmp(command, "media-resume-paused") == 0
-    || strcmp(command, "media-play-pause") == 0
-    || strcmp(command, "media-forward") == 0
-    || strcmp(command, "media-mute") == 0
-    || strcmp(command, "media-volume-down") == 0
-    || strcmp(command, "media-volume-up") == 0
-    || strcmp(command, "media-next") == 0;
+    || strcmp(command, "media-resume-paused") == 0;
 }
 
 static int command_permission_gate(const char *command) {
@@ -9452,20 +9437,11 @@ int main(int argc, char **argv) {
   else if (strcmp(argv[1], "voice-up") == 0) return voice_up() ? 0 : 1;
   else if (strcmp(argv[1], "send") == 0) tap_key(KEY_RETURN, 0);
   else if (strcmp(argv[1], "send-command") == 0) command_return();
-  else if (strcmp(argv[1], "app-switch") == 0) app_switch();
   else if (strcmp(argv[1], "new-thread") == 0) new_thread();
   else if (strcmp(argv[1], "new-project-thread") == 0) new_project_thread();
   else if (strcmp(argv[1], "side-chat") == 0) side_chat();
-  else if (strcmp(argv[1], "media-previous") == 0) tap_media_key(MEDIA_PREVIOUS);
-  else if (strcmp(argv[1], "media-rewind") == 0) tap_media_key(MEDIA_REWIND);
   else if (strcmp(argv[1], "media-pause-if-playing") == 0) return pause_media_if_playing();
   else if (strcmp(argv[1], "media-resume-paused") == 0) return resume_media_paused_for_voice();
-  else if (strcmp(argv[1], "media-play-pause") == 0) tap_media_key(MEDIA_PLAY_PAUSE);
-  else if (strcmp(argv[1], "media-forward") == 0) tap_media_key(MEDIA_FAST_FORWARD);
-  else if (strcmp(argv[1], "media-mute") == 0) tap_media_key(MEDIA_MUTE);
-  else if (strcmp(argv[1], "media-volume-down") == 0) tap_media_key(MEDIA_SOUND_DOWN);
-  else if (strcmp(argv[1], "media-volume-up") == 0) tap_media_key(MEDIA_SOUND_UP);
-  else if (strcmp(argv[1], "media-next") == 0) tap_media_key(MEDIA_NEXT);
   else if (strcmp(argv[1], "audio-processes") == 0) {
     print_running_audio_processes(kAudioProcessPropertyIsRunningOutput);
   }

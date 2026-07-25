@@ -97,6 +97,10 @@ const {
 } = require("./permission-health");
 const { resolveProfilePageTarget } = require("./profile-navigation");
 const {
+  codexCommandFromSettings,
+  taskSlotFromSettings
+} = require("./action-settings");
+const {
   CodexControlPlane,
   definiteMicroFallback,
   verifyAfterMicroDelivery
@@ -133,7 +137,6 @@ const {
   GLOBAL_COMPLETION_FRAME_INTERVAL_MS,
   GLOBAL_COMPLETION_GROUP_COUNT,
   GLOBAL_COMPLETION_PULSE_DURATION_MS,
-  MEDIA_COMMAND_BY_ACTION,
   PAGE_DIRECTION_BY_ACTION,
   QUEUE_ZERO_CONFIRM_MS,
   SEND_LONG_PRESS_MS,
@@ -247,6 +250,7 @@ const RUNTIME_TRACE_FIELDS = new Set([
 const CURRENT_THREAD_AWARE_ACTIONS = new Set([
   ACTIONS.thread1,
   ACTIONS.sideChat,
+  ACTIONS.newThread,
   ACTIONS.voice,
   ACTIONS.send,
   ACTIONS.fastMode,
@@ -381,6 +385,7 @@ const runtimeTraceEnabled = !snapshotMode
 const liveImageDeliveryEnabled = process.env.THREADDECK_SAFE_DISPLAY !== "1";
 
 const contexts = new Map();
+const actionSettingsByContext = new Map();
 const contextDeviceIds = new Map();
 const frameDeviceInfoById = new Map(
   registrationDevices(registrationInfo).map((device) => [device.id, device])
@@ -790,6 +795,35 @@ function threadForSlot(slot) {
 function threadForAction(action) {
   const slot = THREAD_SLOT_BY_ACTION.get(action);
   return slot === undefined ? null : threadForSlot(slot);
+}
+
+function settingsForContext(context) {
+  return actionSettingsByContext.get(context) ?? {};
+}
+
+function threadSlotForContext(context, action = contexts.get(context)) {
+  if (action === ACTIONS.thread1) {
+    return taskSlotFromSettings(settingsForContext(context));
+  }
+  return THREAD_SLOT_BY_ACTION.get(action);
+}
+
+function threadForContext(context) {
+  const slot = threadSlotForContext(context);
+  return slot === undefined ? null : threadForSlot(slot);
+}
+
+function codexCommandForContext(context, action = contexts.get(context)) {
+  if (action === ACTIONS.sideChat) return "side-chat";
+  if (action === ACTIONS.send) return "send";
+  if (action === ACTIONS.newThread) {
+    return codexCommandFromSettings(settingsForContext(context));
+  }
+  return null;
+}
+
+function contextIsSendControl(context) {
+  return codexCommandForContext(context) === "send";
 }
 
 function combinedVisibleThreads(currentThread = currentThreadForDisplay(), rankedThreads = threadSlots) {
@@ -1518,7 +1552,7 @@ function globalCompletionChrome(effect) {
 }
 
 function contextThreadId(context) {
-  return threadForAction(contexts.get(context))?.id ?? null;
+  return threadForContext(context)?.id ?? null;
 }
 
 function applyGlobalCompletion(svg, effect) {
@@ -1820,8 +1854,9 @@ function cancelSendPress(context, restoreImage = false) {
   sendLongPressTimers.delete(context);
   sendPressStartedAt.delete(context);
   sendLongPressArmedContexts.delete(context);
-  if (restoreImage && contexts.get(context) === ACTIONS.send) {
-    setImageTransition(context, sendSvg(false));
+  if (restoreImage && contextIsSendControl(context)) {
+    const svg = staticActionSvg(contexts.get(context), context);
+    if (svg) setImageTransition(context, svg);
   }
 }
 
@@ -1829,7 +1864,7 @@ function beginSendPress(context) {
   if (sendPressStartedAt.has(context) || activeSendDispatchByContext.has(context)) return;
   sendPressStartedAt.set(context, Date.now());
   const timer = setTimeout(() => {
-    if (!sendPressStartedAt.has(context) || contexts.get(context) !== ACTIONS.send) return;
+    if (!sendPressStartedAt.has(context) || !contextIsSendControl(context)) return;
     sendLongPressArmedContexts.add(context);
     setImageTransition(context, sendSvg(true));
   }, SEND_LONG_PRESS_MS);
@@ -1864,7 +1899,7 @@ function endSendPress(context, options = {}) {
       quiet: true,
       refreshFastMode: false
     });
-    if (contexts.get(context) !== ACTIONS.send) return false;
+    if (!contextIsSendControl(context)) return false;
     if (productionControl) {
       const command = longPress ? "send-command" : "send";
       const result = await codexControlPlane.execute("submit", {
@@ -2104,11 +2139,6 @@ function endThreadPress(context) {
     result: state.voiceStarted ? "recording" : state.armed ? "cancelled-before-start" : "tap",
     held: false
   });
-}
-
-function appSwitchSvg() {
-  return shell(THEME.text, `
-    <path d="M34 72H101M78 49L101 72L78 95M111 48V96" fill="none" stroke="${THEME.text}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>`);
 }
 
 function fastModeSvg(
@@ -2378,31 +2408,16 @@ function pageNavigationSvg(action) {
     <path d="M${railX} 43V101" fill="none" stroke="${THEME.text}" stroke-width="7" stroke-linecap="round"/>`);
 }
 
-function mediaActionSvg(action) {
-  let icon = "";
-  if (action === ACTIONS.mediaPrevious) {
-    icon = `<rect x="34" y="43" width="7" height="58" rx="3.5" fill="${THEME.text}"/><path d="M103 43L45 72L103 101Z" fill="${THEME.text}"/>`;
-  } else if (action === ACTIONS.mediaRewind) {
-    icon = `<path d="M72 43L30 72L72 101ZM114 43L72 72L114 101Z" fill="${THEME.text}"/>`;
-  } else if (action === ACTIONS.mediaPlayPause) {
-    icon = `<path d="M30 43L78 72L30 101Z" fill="${THEME.text}"/><rect x="88" y="43" width="9" height="58" rx="4.5" fill="${THEME.text}"/><rect x="105" y="43" width="9" height="58" rx="4.5" fill="${THEME.text}"/>`;
-  } else if (action === ACTIONS.mediaForward) {
-    icon = `<path d="M30 43L72 72L30 101ZM72 43L114 72L72 101Z" fill="${THEME.text}"/>`;
-  } else if (action === ACTIONS.mediaMute) {
-    icon = `<path d="M29 60H50L74 40V104L50 84H29Z" fill="${THEME.text}"/><path d="M84 57L114 87M114 57L84 87" fill="none" stroke="${THEME.text}" stroke-width="6" stroke-linecap="round"/>`;
-  } else if (action === ACTIONS.mediaVolumeDown) {
-    icon = `<path d="M34 60H54L78 40V104L54 84H34Z" fill="${THEME.text}"/><path d="M89 58C99 65 99 79 89 86" fill="none" stroke="${THEME.text}" stroke-width="6" stroke-linecap="round"/>`;
-  } else if (action === ACTIONS.mediaVolumeUp) {
-    icon = `<path d="M25 60H46L70 40V104L46 84H25Z" fill="${THEME.text}"/><path d="M82 57C93 65 93 79 82 87M96 44C116 59 116 85 96 100" fill="none" stroke="${THEME.text}" stroke-width="5.8" stroke-linecap="round"/>`;
-  } else if (action === ACTIONS.mediaNext) {
-    icon = `<path d="M41 43L99 72L41 101Z" fill="${THEME.text}"/><rect x="103" y="43" width="7" height="58" rx="3.5" fill="${THEME.text}"/>`;
-  }
-  return icon ? shell(THEME.text, icon) : null;
-}
-
 function staticActionSvg(action, context = null) {
   const controlThreadId = currentControlThreadId();
-  if (action === ACTIONS.newThread) return newThreadSvg();
+  if (action === ACTIONS.newThread) {
+    const command = context ? codexCommandForContext(context, action) : "new-task";
+    if (command === "side-chat") return sideChatSvg();
+    if (command === "send") {
+      return sendSvg(context ? sendLongPressArmedContexts.has(context) : false);
+    }
+    return newThreadSvg();
+  }
   if (action === ACTIONS.voice) {
     const state = context
       ? voiceHeldContexts.has(context) ? "recording" : voiceStateByContext.get(context) ?? "idle"
@@ -2410,7 +2425,6 @@ function staticActionSvg(action, context = null) {
     return voiceSvg(state);
   }
   if (action === ACTIONS.send) return sendSvg(context ? sendLongPressArmedContexts.has(context) : false);
-  if (action === ACTIONS.appSwitch) return appSwitchSvg();
   if (action === ACTIONS.fastMode) {
     return fastModeSvg(
       fastModeState,
@@ -2437,14 +2451,15 @@ function staticActionSvg(action, context = null) {
     );
   }
   if (action === ACTIONS.sideChat) return sideChatSvg();
-  if (MEDIA_COMMAND_BY_ACTION.has(action)) return mediaActionSvg(action);
   if (PAGE_DIRECTION_BY_ACTION.has(action)) return pageNavigationSvg(action);
   return null;
 }
 
 function currentActionSvg(action, context = null) {
   if (action === ACTIONS.weekly) return usageSvg(usageRemainingAt(), usageState.failed);
-  const slot = THREAD_SLOT_BY_ACTION.get(action);
+  const slot = context === null
+    ? THREAD_SLOT_BY_ACTION.get(action)
+    : threadSlotForContext(context, action);
   if (slot !== undefined) return threadSvg(displayedThreadSlot(slot), slot);
   return staticActionSvg(action, context);
 }
@@ -2972,7 +2987,7 @@ function textInputStateSync() {
 
 function contextSupportsVoice(context) {
   const action = contexts.get(context);
-  return action === ACTIONS.voice || THREAD_SLOT_BY_ACTION.has(action);
+  return action === ACTIONS.voice || threadSlotForContext(context, action) !== undefined;
 }
 
 function renderVoiceContextState(context, state, nowMs = Date.now(), transition = false) {
@@ -8788,7 +8803,7 @@ async function refreshUsage(feedbackContext, options = {}) {
 
 function renderThreadContexts() {
   for (const [context, action] of contexts) {
-    const slot = THREAD_SLOT_BY_ACTION.get(action);
+    const slot = threadSlotForContext(context, action);
     if (slot !== undefined) setImage(context, threadSvg(displayedThreadSlot(slot), slot));
   }
 }
@@ -8796,7 +8811,7 @@ function renderThreadContexts() {
 function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now(), transition = false) {
   if (!targetThreadId) return;
   for (const [context, action] of contexts) {
-    const slot = THREAD_SLOT_BY_ACTION.get(action);
+    const slot = threadSlotForContext(context, action);
     const thread = slot === undefined ? null : threadForSlot(slot);
     if (thread?.id !== targetThreadId) continue;
     const svg = threadSvg(thread, slot);
@@ -8839,7 +8854,7 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
   const visibleThreadIds = new Set();
   const expiredDismissFadeThreadIds = new Set();
   for (const [context, action] of contexts) {
-    const slot = THREAD_SLOT_BY_ACTION.get(action);
+    const slot = threadSlotForContext(context, action);
     const thread = slot === undefined ? null : threadForSlot(slot);
     if (slot === undefined) continue;
     if (thread?.id) visibleThreadIds.add(thread.id);
@@ -10083,29 +10098,45 @@ function registerPlugin() {
       runtimeTrace("image-delivery-policy", { phase: "disconnected", result: "reset" });
     }
 
-    if (["willAppear", "willDisappear", "keyDown", "keyUp"].includes(message.event)) {
+    if (["willAppear", "willDisappear", "keyDown", "keyUp", "didReceiveSettings"].includes(message.event)) {
       runtimeTrace("streamdeck-event", {
         phase: message.event,
         result: String(message.action ?? "unknown").split(".").pop()
       });
     }
 
-    if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
+    if (message.event === "didReceiveSettings" && contexts.has(message.context)) {
+      const wasSendControl = contextIsSendControl(message.context);
+      actionSettingsByContext.set(message.context, message.payload?.settings ?? {});
+      if (wasSendControl && !contextIsSendControl(message.context)) {
+        cancelSendPress(message.context, false);
+      }
+      const action = contexts.get(message.context);
+      const slot = threadSlotForContext(message.context, action);
+      if (slot !== undefined) {
+        setImage(message.context, threadSvg(displayedThreadSlot(slot), slot));
+        void refreshThreads();
+      } else {
+        const svg = staticActionSvg(action, message.context);
+        if (svg) setImage(message.context, svg);
+      }
+    } else if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
       contexts.set(message.context, message.action);
+      actionSettingsByContext.set(message.context, message.payload?.settings ?? {});
       if (message.device) contextDeviceIds.set(message.context, message.device);
       if (!hasLoadedUsageState) void refreshUsage();
       // Completion monitoring must have a baseline even when the active page
-      // contains only usage, media, or navigation actions.
+      // contains only quota, commands, or navigation actions.
       if (!hasLoadedThreadState) void refreshThreads();
       if (message.action === ACTIONS.weekly) {
         // Stream Deck restores the last dynamic key image before a plugin has
         // reconnected. Replace it synchronously so stale usage never flashes.
         setImage(message.context, usageSvg(usageState.remaining, usageState.failed));
         void refreshUsage();
-      } else if (THREAD_SLOT_BY_ACTION.has(message.action)) {
+      } else if (threadSlotForContext(message.context, message.action) !== undefined) {
         // Replace Stream Deck's persisted image with this process's current
         // last-good state. On first startup this is the neutral placeholder.
-        const slot = THREAD_SLOT_BY_ACTION.get(message.action);
+        const slot = threadSlotForContext(message.context, message.action);
         setImage(message.context, threadSvg(displayedThreadSlot(slot), slot));
         void refreshThreads();
       } else {
@@ -10138,6 +10169,7 @@ function registerPlugin() {
       voiceStateByContext.delete(message.context);
       voiceSessionIdByContext.delete(message.context);
       contexts.delete(message.context);
+      actionSettingsByContext.delete(message.context);
       contextDeviceIds.delete(message.context);
       contextImages.delete(message.context);
       contextSentImages.delete(message.context);
@@ -10147,39 +10179,39 @@ function registerPlugin() {
       permissionAlertedContexts.delete(message.context);
       microBridgeAlertedContexts.delete(message.context);
     } else if (message.event === "keyDown" && contexts.has(message.context)) {
+      if (message.payload?.settings) {
+        actionSettingsByContext.set(message.context, message.payload.settings);
+      }
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice && !voiceHeldContexts.has(message.context)) {
         beginCurrentVoicePress(message.context);
-      } else if (action === ACTIONS.send) {
+      } else if (contextIsSendControl(message.context)) {
         beginSendPress(message.context);
       } else if (action === ACTIONS.fastMode) {
         beginFastModePress(message.context);
       } else if (action === ACTIONS.reasoning) {
         beginFastModePress(message.context);
-      } else if (THREAD_SLOT_BY_ACTION.has(action)) {
-        beginThreadPress(message.context, THREAD_SLOT_BY_ACTION.get(action));
-      } else if (action === ACTIONS.appSwitch) {
-        runKeyBridge("app-switch", message.context);
-      } else if (MEDIA_COMMAND_BY_ACTION.has(action)) {
-        runKeyBridge(MEDIA_COMMAND_BY_ACTION.get(action), message.context);
+      } else if (threadSlotForContext(message.context, action) !== undefined) {
+        beginThreadPress(message.context, threadSlotForContext(message.context, action));
       }
     } else if (message.event === "keyUp" && contexts.has(message.context)) {
+      if (message.payload?.settings) {
+        actionSettingsByContext.set(message.context, message.payload.settings);
+      }
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice) {
         endCurrentVoicePress(message.context);
-      } else if (action === ACTIONS.send) {
+      } else if (contextIsSendControl(message.context)) {
         void endSendPress(message.context);
-      } else if (THREAD_SLOT_BY_ACTION.has(action)) {
+      } else if (threadSlotForContext(message.context, action) !== undefined) {
         endThreadPress(message.context);
-      } else if (action === ACTIONS.appSwitch || MEDIA_COMMAND_BY_ACTION.has(action)) {
-        // These are dispatched on keyDown so their response feels immediate.
       } else if (PAGE_DIRECTION_BY_ACTION.has(action)) {
         switchProfilePage(message.context, message.device, action, message.payload?.settings);
       } else if (action === ACTIONS.weekly) {
         void refreshUsage(message.context);
-      } else if (action === ACTIONS.newThread) {
+      } else if (codexCommandForContext(message.context, action) === "new-task") {
         void openNewThread(message.context);
-      } else if (action === ACTIONS.sideChat) {
+      } else if (codexCommandForContext(message.context, action) === "side-chat") {
         void openSideChat(message.context);
       } else if (action === ACTIONS.fastMode) {
         void endFastModePress(message.context);
@@ -10190,12 +10222,16 @@ function registerPlugin() {
   });
 
   setInterval(() => {
-    if ([...contexts.values()].some((action) => THREAD_SLOT_BY_ACTION.has(action))) renderThreadContexts();
+    if ([...contexts].some(([context, action]) => (
+      threadSlotForContext(context, action) !== undefined
+    ))) renderThreadContexts();
   }, 1000);
 
   setInterval(() => {
     const nowMs = Date.now();
-    if (!globalCompletionPulseState(nowMs) && [...contexts.values()].some((action) => THREAD_SLOT_BY_ACTION.has(action))) {
+    if (!globalCompletionPulseState(nowMs) && [...contexts].some(([context, action]) => (
+      threadSlotForContext(context, action) !== undefined
+    ))) {
       renderAnimatedThreadContexts(nowMs);
     }
     if (!globalCompletionPulseState(nowMs)
@@ -11123,7 +11159,6 @@ function verifyCompletionFanout() {
     ACTIONS.reasoning,
     ACTIONS.voice,
     ACTIONS.send,
-    ACTIONS.appSwitch,
     ACTIONS.pagePrevious
   ];
   const messages = [];
@@ -11134,6 +11169,7 @@ function verifyCompletionFanout() {
     }
   };
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   actions.forEach((action, index) => contexts.set(`completion-context-${index}`, action));
@@ -11229,6 +11265,7 @@ async function verifyThreadRefreshResilience() {
   const startupCurrentContext = "refresh-startup-current";
   const startupReasoningContext = "refresh-startup-reasoning";
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   contexts.set(startupCurrentContext, ACTIONS.thread1);
@@ -11267,6 +11304,7 @@ async function verifyThreadRefreshResilience() {
     && currentThreadForDisplay()?.id === stableThread.id;
 
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   contexts.set(context, ACTIONS.thread1);
@@ -11476,6 +11514,7 @@ async function verifyUsageCachePolicy() {
   const weeklyContext = "usage-cache-weekly";
   socket = { readyState: WebSocket.OPEN, send() {} };
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   activeUsageRefresh = null;
@@ -11550,6 +11589,7 @@ async function verifyVoiceSubmissionPolicy() {
   );
   socket = { readyState: WebSocket.OPEN, send() {} };
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   voiceTranscriptionByContext.clear();
@@ -12932,6 +12972,7 @@ async function verifyInteractionPolicy() {
 
   socket = { readyState: WebSocket.OPEN, send() {} };
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   contextFeedback.clear();
@@ -15411,6 +15452,7 @@ async function verifyInteractionPolicy() {
   voiceMediaPaused = false;
   voiceMediaTransitionTail = Promise.resolve();
   contexts.clear();
+  actionSettingsByContext.clear();
   contextImages.clear();
   contextSentImages.clear();
   contextFeedback.clear();
