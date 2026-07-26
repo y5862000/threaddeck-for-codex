@@ -75,6 +75,36 @@ test("read-only health snapshots are cached for later routing", async () => {
   assert.equal(plane.health().backend, "micro");
 });
 
+test("an unavailable bootstrap pins commands to legacy until Micro reconnects", async () => {
+  const calls = [];
+  let disconnects = 0;
+  const plane = new CodexControlPlane({
+    micro: {
+      disconnect() {
+        disconnects += 1;
+      }
+    }
+  });
+  plane.setMicroAvailable(false, "no-loopback-bridge");
+  const fallback = await plane.execute("fast", {
+    micro: async () => calls.push("micro-disabled"),
+    legacy: async () => calls.push("legacy")
+  });
+  assert.deepEqual(calls, ["legacy"]);
+  assert.equal(fallback.backend, "legacy");
+  assert.equal(plane.health().reason, "no-loopback-bridge");
+  assert.equal(disconnects, 1);
+  assert.equal(await plane.refreshReadOnly({ force: true }), null);
+
+  plane.setMicroAvailable(true);
+  const restored = await plane.execute("fast", {
+    micro: async () => calls.push("micro-restored"),
+    legacy: async () => calls.push("legacy-again")
+  });
+  assert.deepEqual(calls, ["legacy", "micro-restored"]);
+  assert.equal(restored.backend, "micro");
+});
+
 test("fallback classifier rejects any possibly delivered command", () => {
   assert.equal(definiteMicroFallback(microError("MICRO_UNAVAILABLE", "none")), true);
   assert.equal(definiteMicroFallback(microError("MICRO_UNAVAILABLE", "unknown")), false);

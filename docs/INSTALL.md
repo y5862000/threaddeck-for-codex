@@ -27,8 +27,7 @@ The plugin automatically installs the recommended **ThreadDeck for Codex** Neo p
 
    The switch is listed as **Elgato Stream Deck.app** on current macOS releases. ThreadDeck does not need Screen Recording, Input Monitoring, or Full Disk Access. If the switch was already on but a key still shows an access warning, turn it off and on once, then quit Stream Deck from its menu-bar icon and reopen it.
 
-5. If the Effort/Fast key says **Restart Codex**, quit Codex and launch it normally once. ThreadDeck never terminates or relaunches Codex automatically; it only reuses a healthy loopback Micro bridge when one is already available.
-6. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings:
+5. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings. ThreadDeck does not require a Codex restart when the optional Micro renderer bridge is absent; it routes controls through the verified Accessibility adapter immediately and keeps checking for a healthy process-owned loopback endpoint.
 
 | Codex function | Shortcut |
 |---|---:|
@@ -37,7 +36,7 @@ The plugin automatically installs the recommended **ThreadDeck for Codex** Neo p
 | New standalone task | `Option+Command+O` (`⌥⌘O`) |
 | Open Side Chat | `Option+Command+S` (`⌥⌘S`) |
 
-7. Hold the microphone key, speak, and release. Codex may request microphone permission on first use.
+6. Hold the microphone key, speak, and release. Codex may request microphone permission on first use.
 
 If **ThreadDeck for Codex** already appears in the profile menu, do not import the standalone profile unless you want a duplicate. An older profile named **Codex Neo** is a separate experimental copy and can be removed after you confirm the maintained profile works.
 
@@ -49,9 +48,9 @@ ThreadDeck does not need Screen Recording or Full Disk Access. The optional quot
 
 ThreadDeck checks Accessibility and keyboard-event access at startup and every 30 seconds. It requests missing macOS permission and keeps a short warning on the keys until the permission is healthy again.
 
-The Effort/Fast key can also show **Restart Codex**. This is not an Accessibility failure: the current Codex process does not expose a healthy local renderer bridge. ThreadDeck leaves the process untouched, so quit and reopen Codex yourself when convenient; legacy controls remain available meanwhile.
+The Effort/Fast key can briefly show **Connecting** while an existing loopback endpoint is being rechecked. If the endpoint stays unavailable, ThreadDeck removes the bridge notice and uses the verified Accessibility adapter without restarting Codex. A later healthy endpoint is detected and promoted automatically.
 
-From a source checkout, `pnpm run doctor` prints a read-only installation report, including whether the Codex Micro bridge is connected, needs a Codex restart, or is stopped. The doctor never starts, closes, or modifies either application. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
+From a source checkout, `pnpm run doctor` prints a read-only installation report, including whether the Codex Micro bridge is connected, reconnecting, using fallback, or stopped. The doctor never starts, closes, or modifies either application. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
 
 ## Update or remove
 

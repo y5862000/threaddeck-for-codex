@@ -10,7 +10,7 @@ ThreadDeck은 로컬에서만 작동합니다. 텔레메트리, 분석 도구, �
 - 선택 기능인 한도 링은 별도로 설치한 `codexbar` 명령을 실행하고 JSON 출력만 읽습니다.
 - 우선 제어 어댑터는 임의의 Chrome DevTools Protocol 포트를 `127.0.0.1`에만 명시적으로 바인딩하고 endpoint와 메인 `app://` 렌더러를 검증합니다. 읽기 전용 스냅샷은 현재 작업 ID, 다음 응답 Effort, Fast, 테마, 개인정보를 제한한 Micro 슬롯 6개, 기능 불리언만 반환하며 프롬프트·응답·대기 메시지·받아쓰기 원문은 이 경계를 넘지 않습니다.
 - 물리 동작은 해당 렌더러를 통해 Codex 내부 Micro 명령·HID·누르는 동안 말하기 이벤트를 보낼 수 있습니다. Micro 기능 override는 필요한 첫 동작 직전에 현재 렌더러 메모리에만 설치되고 프로세스와 함께 사라집니다. 앱 파일이나 Codex 설정에 쓰거나 override를 영구 저장하지 않습니다.
-- `~/Library/Application Support/ThreadDeck/codex-micro-bootstrap-v1.json`과 `codex-micro-bridge.json`에는 프로세스 세대, 루프백 포트, 상태, 숫자 시각만 저장합니다. ThreadDeck은 Codex를 자동으로 종료하거나 재실행하지 않습니다. 루프백 브리지를 사용할 수 없으면 실행 중인 프로세스를 그대로 두고 사용자에게 Codex 재실행을 안내합니다.
+- `~/Library/Application Support/ThreadDeck/codex-micro-bootstrap-v1.json`과 `codex-micro-bridge.json`에는 프로세스 세대, 루프백 포트, 상태, 숫자 시각만 저장합니다. ThreadDeck은 Codex를 자동으로 종료하거나 재실행하지 않습니다. 현재 Codex 프로세스가 직접 소유한 루프백 listener만 확인해 검증된 브리지가 있으면 다시 연결하고, 없으면 Codex 재실행을 요구하지 않은 채 검증된 손쉬운 사용 어댑터를 사용합니다. 이후 정상 브리지가 나타나면 자동으로 승격합니다.
 - 키보드·미디어 동작은 작은 네이티브 헬퍼가 보내며, Stream Deck에 macOS 손쉬운 사용 권한이 필요합니다. Marketplace 패키지는 배포 파일을 불변으로 유지합니다. ThreadDeck은 번들 헬퍼 바이트를 검증하고 `~/Library/Application Support/ThreadDeck/bin` 아래에 내용 해시 기반 실행 복사본을 만든 뒤 그 정확한 복사본만 실행합니다.
 - 작업 전환과 작성창 컨트롤은 정확한 손쉬운 사용 포커스와 키보드 활성화만 사용합니다. Codex가 노출하면 헬퍼 내부에서 대상 작업 UUID를 먼저 일치시키고 개인정보 안전 제목 지문을 보조로 사용하며, 이미 알려진 같은 제목은 UUID 일치를 요구합니다. 헬퍼는 마우스 이동이나 좌표 클릭을 합성하지 않습니다.
 - 같은 헬퍼가 화면에 보이는 Codex 대기 동작 버튼을 셉니다. 현재 창 제목과 버튼 라벨의 FNV-1a 지문 및 개수만 출력하며, 대기 메시지 원문은 무시되고 헬퍼 밖으로 나오지 않습니다.

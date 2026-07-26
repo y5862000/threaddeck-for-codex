@@ -1027,7 +1027,6 @@ function permissionIssueOverlaySvg(svg, issue, opacity = 1) {
 }
 
 function microBridgeIssueLabel(issue) {
-  if (issue === "restart-needed") return t("micro.restartCodex");
   if (issue === "connecting") return t("micro.connecting");
   return t("micro.checkBridge");
 }
@@ -2509,10 +2508,20 @@ function setMicroBridgeIssue(nextIssue) {
   renderMicroBridgeIssueContexts();
   for (const [context, action] of contexts) {
     if (!isMicroControlAction(action)) continue;
-    if (["restart-needed", "error"].includes(nextIssue)) alertMicroBridgeContext(context);
+    if (nextIssue === "error") alertMicroBridgeContext(context);
     else if (previousIssue && !nextIssue) sendContextResult(context, "showOk");
   }
   return true;
+}
+
+function settleMicroBridgeIssue(nextIssue) {
+  if (setMicroBridgeIssue(nextIssue)) return true;
+  // Stream Deck can restore the prior plugin process's last image before the
+  // replacement process finishes registration. Even when our logical issue is
+  // already null, overwrite that persisted frame so a retired Restart Codex
+  // overlay cannot survive until the user changes pages.
+  renderMicroBridgeIssueContexts();
+  return false;
 }
 
 function handleMicroBootstrapStatus(status) {
@@ -2522,26 +2531,31 @@ function handleMicroBootstrapStatus(status) {
     reason: String(microBootstrapStatus.detail ?? "").slice(0, 48)
   });
   if (microBootstrapStatus.state === "connected") {
-    setMicroBridgeIssue(null);
+    codexControlPlane.setMicroAvailable(true);
+    settleMicroBridgeIssue(null);
     codexMicroBridge.disconnect();
     void refreshMicroReadOnly({ force: true, quiet: true });
     return;
   }
-  if (microBootstrapStatus.state === "restart-needed") {
-    setMicroBridgeIssue("restart-needed");
+  if (microBootstrapStatus.state === "fallback"
+      || microBootstrapStatus.state === "stopped") {
+    codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
+    settleMicroBridgeIssue(null);
     return;
   }
-  if (microBootstrapStatus.state === "recovering"
-      || (microBootstrapStatus.state === "waiting"
-        && ["confirm-unbridged", "recovery-startup"].includes(microBootstrapStatus.detail))) {
+  if (microBootstrapStatus.state === "waiting"
+      && microBootstrapStatus.detail === "bridge-reconnecting") {
+    codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
     setMicroBridgeIssue("connecting");
     return;
   }
   if (microBootstrapStatus.state === "error") {
+    codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
     setMicroBridgeIssue("error");
     return;
   }
-  setMicroBridgeIssue(null);
+  codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
+  settleMicroBridgeIssue(null);
 }
 
 function alertPermissionContext(context) {
@@ -10038,9 +10052,9 @@ function registerPlugin() {
         result: `${policy.profile}:${policy.aggregateFps}`
       });
     }
-    // The watcher never launches Codex and preserves the Codex generation that
-    // was already open when ThreadDeck first gained this backend. A later
-    // normal Codex launch can be recovered once with a loopback-only bridge.
+    // The watcher never launches or terminates Codex. It reuses a verified
+    // process-owned loopback endpoint when present and otherwise pins the
+    // control plane to the legacy adapter until a later poll finds Micro.
     void codexMicroBootstrap.start();
     // Prime the only synchronous permission check before the first hardware
     // press. This keeps first-use remote switching and push-to-talk responsive.
@@ -10049,10 +10063,6 @@ function registerPlugin() {
     // configuration and model cache. Prime them before the first Effort tap so
     // every hardware press can paint its next level immediately.
     void refreshReasoningOptionCatalog();
-    // Read-only renderer discovery never activates a Micro device or changes
-    // Codex state. It lets the first current-task control use the exact active
-    // conversation when Codex was launched with the optional loopback bridge.
-    void refreshMicroReadOnly({ force: true, quiet: true });
     // CodexBar takes several seconds on a cold request. Prime the cache while
     // the current Stream Deck page is rendering so the usage page can appear
     // with a value immediately.

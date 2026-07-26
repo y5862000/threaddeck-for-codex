@@ -7,9 +7,8 @@
 1. Update Codex Desktop, Stream Deck, and ThreadDeck to the latest versions you intend to test.
 2. In **System Settings → Privacy & Security → Accessibility**, enable **Stream Deck**.
 3. Quit Stream Deck completely and reopen it after changing Accessibility permission.
-4. After installing ThreadDeck, quit and reopen Codex once so the Micro renderer bridge can attach.
-5. Confirm Codex has microphone permission and **Start dictation** is `Control+Shift+D` for the fallback path.
-6. Keep Codex open with a composer visible while testing voice actions.
+4. Confirm Codex has microphone permission and **Start dictation** is `Control+Shift+D` for the fallback path.
+5. Keep Codex open with a composer visible while testing voice actions.
 
 ThreadDeck does not require Screen Recording or Full Disk Access.
 
@@ -17,13 +16,13 @@ ThreadDeck does not require Screen Recording or Full Disk Access.
 
 The Neo profile is installed with the plugin but is not forced over your current profile. Choose **ThreadDeck for Codex** from the profile selector at the top of the Stream Deck app. If it is missing, reinstall the latest `.streamDeckPlugin` package and restart Stream Deck.
 
-## Effort/Fast shows `Restart Codex` or `Check Micro`
+## Effort/Fast shows `Connecting` or `Check Micro`
 
-ThreadDeck never terminates or relaunches Codex. If the current process does not expose a healthy loopback bridge, ThreadDeck leaves it untouched and shows **Restart Codex** until you choose to quit and reopen Codex yourself. It never binds the debugger to the LAN.
+ThreadDeck never terminates or relaunches Codex. It first retries every loopback listener owned by the existing Codex process, including a healthy endpoint whose port is no longer visible in the launch arguments. During that bounded retry the key can show **Connecting**. If no endpoint responds, ThreadDeck silently pins commands to the verified Accessibility adapter instead of asking for a restart. It never scans arbitrary ports or binds a debugger to the LAN.
 
-Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means the renderer endpoint and main `app://` target both responded; `restart Codex` means the current process does not expose a healthy bridge; `stopped` means Codex is closed. Neither the doctor nor ThreadDeck launches or closes Codex.
+Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means the renderer endpoint and main `app://` target both responded; `fallback` means commands use the Accessibility adapter; `stopped` means Codex is closed. Neither the doctor nor ThreadDeck launches or closes Codex.
 
-While the bridge is unavailable, ThreadDeck keeps the verified Accessibility/shortcut adapter. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed through the fallback path because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and the exact key used.
+While the bridge is unavailable, ThreadDeck keeps the verified Accessibility/shortcut adapter and periodically checks for Micro again. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed through the fallback path because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and the exact key used.
 
 ## No shortcut or remote-switch action works
 
@@ -93,7 +92,7 @@ ThreadDeck does not treat cached summary timestamps as completion events. If it 
 
 ## `Could not read status` flashes or replaces the list
 
-Update to the latest release. ThreadDeck retries short transient reads and keeps the last good task list. A startup error is shown only after three consecutive failures before any valid list has loaded. If the message persists, restart Codex and Stream Deck and report their versions without real task titles.
+Update to the latest release. ThreadDeck retries short transient reads and keeps the last good task list. A startup error is shown only after three consecutive failures before any valid list has loaded. Keep Codex open; if the message persists, restart Stream Deck and report both app versions without real task titles.
 
 ## Only the completed task key pulses
 

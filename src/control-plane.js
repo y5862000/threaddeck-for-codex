@@ -35,6 +35,7 @@ class CodexControlPlane {
     this.now = options.now ?? Date.now;
     this.unavailableCooldownMs = options.unavailableCooldownMs ?? 3000;
     this.microUnavailableUntilMs = 0;
+    this.microAvailable = Boolean(this.micro);
     this.lastSnapshot = null;
     this.lastHealth = {
       backend: "legacy",
@@ -45,10 +46,26 @@ class CodexControlPlane {
   }
 
   shouldTryMicro() {
-    return Boolean(this.micro) && this.now() >= this.microUnavailableUntilMs;
+    return Boolean(this.micro)
+      && this.microAvailable
+      && this.now() >= this.microUnavailableUntilMs;
+  }
+
+  setMicroAvailable(available, reason = null) {
+    this.microAvailable = Boolean(available) && Boolean(this.micro);
+    this.microUnavailableUntilMs = this.microAvailable ? 0 : Number.POSITIVE_INFINITY;
+    if (!this.microAvailable) this.micro?.disconnect?.();
+    this.lastHealth = {
+      backend: this.microAvailable ? "micro" : "legacy",
+      connected: false,
+      checkedAtMs: this.now(),
+      reason: reason ?? (this.microAvailable ? "MICRO_RECONNECTING" : "MICRO_UNAVAILABLE")
+    };
+    return this.microAvailable;
   }
 
   noteMicroSuccess(snapshot = null) {
+    this.microAvailable = true;
     if (snapshot) this.lastSnapshot = snapshot;
     this.microUnavailableUntilMs = 0;
     this.lastHealth = {
@@ -78,6 +95,7 @@ class CodexControlPlane {
   }
 
   async refreshReadOnly(options = {}) {
+    if (!this.microAvailable) return null;
     if (!this.shouldTryMicro() && options.force !== true) return null;
     try {
       const snapshot = await this.micro.refreshReadOnly();

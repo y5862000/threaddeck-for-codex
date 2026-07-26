@@ -91,7 +91,7 @@ Mutating Micro activation is lazy: only the first physical control that needs HI
 
 After an `AG00`–`AG05` delivery, ThreadDeck verifies the canonical destination UUID from either the active composer identity or the exact Micro slot marked `selected`. The selected-slot signal is authoritative when the composer DOM is one frame behind; a bounded retry window still rejects an unconfirmed delivery. Only that verified result updates Current Task and acknowledges a persisted unread completion.
 
-`src/micro-bootstrap.js` observes the running Codex generation and reuses a healthy loopback bridge when one is already available. It never sends a termination signal or launches Codex. If bridge health disappears, the current process remains untouched and ThreadDeck displays a manual restart prompt. Only process-generation, port, health, and timestamp data are stored under `~/Library/Application Support/ThreadDeck`.
+`src/micro-bootstrap.js` observes the running Codex generation and reuses a healthy loopback bridge when one is already available. It validates the explicit launch port first, then rechecks only loopback listeners owned by that exact Codex PID so an endpoint can recover even when its port is absent from the command line. It never sends a termination signal, launches Codex, or scans arbitrary ports. If bridge health disappears, the current process remains untouched, commands are pinned to the verified Accessibility adapter, and later polls automatically promote a recovered Micro endpoint. Only process-generation, port, health, and timestamp data are stored under `~/Library/Application Support/ThreadDeck`.
 
 ### Neo profile
 

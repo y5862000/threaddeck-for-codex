@@ -21,6 +21,8 @@ const BRIDGE_STATE_PATH = path.join(STATE_ROOT, "codex-micro-bridge.json");
 const DEFAULT_POLL_MS = 2500;
 const DEFAULT_STARTUP_GRACE_MS = 30_000;
 const DEFAULT_UNBRIDGED_STABLE_MS = 8000;
+const DEFAULT_BRIDGE_RECONNECT_GRACE_MS = 15_000;
+const DEFAULT_LISTENER_RESCAN_MS = 30_000;
 
 function createBootstrapPolicy(nowMs = Date.now()) {
   return {
@@ -41,10 +43,18 @@ function normalizeBootstrapPolicy(value, nowMs = Date.now()) {
   const fallback = createBootstrapPolicy(nowMs);
   if (!value || typeof value !== "object" || value.version !== 1) return fallback;
   return {
-    ...fallback,
-    ...value,
+    version: 1,
+    initialized: value.initialized === true,
     startupGraceUntilMs: nowMs + DEFAULT_STARTUP_GRACE_MS,
+    lastGeneration: typeof value.lastGeneration === "string" ? value.lastGeneration : null,
+    preservedInitialGeneration: typeof value.preservedInitialGeneration === "string"
+      ? value.preservedInitialGeneration
+      : null,
     stoppedSinceMs: null,
+    normalLaunchGeneration: typeof value.normalLaunchGeneration === "string"
+      ? value.normalLaunchGeneration
+      : null,
+    hadHealthyBridge: value.hadHealthyBridge === true,
     unbridgedGeneration: null,
     unbridgedSinceMs: null
   };
@@ -183,6 +193,19 @@ function parseLoopbackDebugPort(command) {
   return Number.isInteger(port) && port > 0 && port <= 65535 ? port : null;
 }
 
+function parseLoopbackListenerPorts(output) {
+  const ports = [];
+  for (const rawLine of String(output ?? "").split("\n")) {
+    const line = rawLine.trim();
+    const match = line.match(/^n(?:127\.0\.0\.1|\[::1\]|localhost):(\d+)$/i);
+    const port = Number(match?.[1]);
+    if (Number.isInteger(port) && port > 0 && port <= 65535 && !ports.includes(port)) {
+      ports.push(port);
+    }
+  }
+  return ports;
+}
+
 function codexAppCandidates(searchOutput, homeDirectory = os.homedir()) {
   return [...new Set([
     ...String(searchOutput ?? "").split("\n").map((value) => value.trim()),
@@ -224,12 +247,19 @@ class CodexMicroBootstrap {
     this.policyPath = options.policyPath ?? POLICY_PATH;
     this.bridgeStatePath = options.bridgeStatePath ?? BRIDGE_STATE_PATH;
     this.pollMs = options.pollMs ?? DEFAULT_POLL_MS;
+    this.bridgeReconnectGraceMs = options.bridgeReconnectGraceMs
+      ?? DEFAULT_BRIDGE_RECONNECT_GRACE_MS;
+    this.listenerRescanMs = options.listenerRescanMs ?? DEFAULT_LISTENER_RESCAN_MS;
     this.onStatus = options.onStatus ?? (() => {});
     this.policy = null;
     this.timer = null;
     this.activeTick = null;
     this.closed = false;
     this.lastStatusKey = "";
+    this.unhealthyBridgeSinceMs = null;
+    this.listenerScanGeneration = null;
+    this.listenerScanAtMs = 0;
+    this.listenerPorts = [];
   }
 
   status(state, detail = null, extra = {}) {
@@ -272,7 +302,8 @@ class CodexMicroBootstrap {
     try {
       const appPath = await this.discoverAppPath();
       const main = await this.findMainProcess(appPath);
-      const port = await this.healthyDebugPort(main);
+      const candidatePorts = await this.debugPortCandidates(main);
+      const port = await this.healthyDebugPort(main, candidatePorts);
       const decision = evaluateBootstrapPolicy(this.policy ?? createBootstrapPolicy(this.now()), {
         nowMs: this.now(),
         generation: main?.generation ?? null,
@@ -281,6 +312,7 @@ class CodexMicroBootstrap {
       this.policy = decision.policy;
       await atomicWriteJson(this.policyPath, this.policy);
       if (port != null) {
+        this.unhealthyBridgeSinceMs = null;
         await atomicWriteJson(this.bridgeStatePath, {
           port,
           updatedAt: new Date(this.now()).toISOString(),
@@ -288,12 +320,25 @@ class CodexMicroBootstrap {
         });
         return this.status("connected", decision.action.reason, { port });
       }
-      await this.removeStaleBridgeState();
-      if (decision.action.type === "preserve") {
-        return this.status("restart-needed", decision.action.reason);
+      if (!main) {
+        this.unhealthyBridgeSinceMs = null;
+        await this.removeStaleBridgeState();
+        return this.status("stopped", decision.action.reason);
       }
-      if (!main) return this.status("stopped", decision.action.reason);
-      return this.status("waiting", decision.action.reason);
+      if (candidatePorts.length === 0) {
+        this.unhealthyBridgeSinceMs = null;
+        await this.removeStaleBridgeState();
+        return this.status("fallback", "no-loopback-bridge");
+      }
+      this.unhealthyBridgeSinceMs ??= this.now();
+      const unhealthyForMs = this.now() - this.unhealthyBridgeSinceMs;
+      if (unhealthyForMs < this.bridgeReconnectGraceMs) {
+        return this.status("waiting", "bridge-reconnecting", {
+          port: candidatePorts[0]
+        });
+      }
+      await this.removeStaleBridgeState();
+      return this.status("fallback", "bridge-unhealthy");
     } catch (error) {
       return this.status("error", error?.message ?? "Micro bootstrap failed");
     }
@@ -337,27 +382,55 @@ class CodexMicroBootstrap {
     return parseCodexMainProcess(result?.stdout ?? result ?? "", appPath);
   }
 
-  async healthyDebugPort(main) {
-    const port = parseLoopbackDebugPort(main?.command);
-    if (!port || typeof this.fetch !== "function") return null;
-    try {
-      const [version, targets] = await Promise.all([
-        this.fetch(`http://127.0.0.1:${port}/json/version`, {
-          signal: AbortSignal.timeout(750)
-        }),
-        this.fetch(`http://127.0.0.1:${port}/json/list`, {
-          signal: AbortSignal.timeout(750)
-        })
-      ]);
-      if (!version.ok || !targets.ok) return null;
-      const rows = await targets.json();
-      return Array.isArray(rows)
-        && rows.some((target) => target?.type === "page" && target?.url?.startsWith("app://"))
-        ? port
-        : null;
-    } catch {
-      return null;
+  async debugPortCandidates(main) {
+    if (!main?.pid) return [];
+    const commandPort = parseLoopbackDebugPort(main.command);
+    const nowMs = this.now();
+    if (this.listenerScanGeneration !== main.generation
+        || nowMs - this.listenerScanAtMs >= this.listenerRescanMs) {
+      this.listenerScanGeneration = main.generation;
+      this.listenerScanAtMs = nowMs;
+      try {
+        const result = await this.execFile("/usr/sbin/lsof", [
+          "-nP",
+          "-a",
+          "-p", String(main.pid),
+          "-iTCP",
+          "-sTCP:LISTEN",
+          "-Fn"
+        ], { timeout: 2500, maxBuffer: 128 * 1024 });
+        this.listenerPorts = parseLoopbackListenerPorts(result?.stdout ?? result ?? "");
+      } catch {
+        this.listenerPorts = [];
+      }
     }
+    return [...new Set([commandPort, ...this.listenerPorts].filter(Boolean))];
+  }
+
+  async healthyDebugPort(main, candidatePorts = null) {
+    if (!main || typeof this.fetch !== "function") return null;
+    const ports = candidatePorts ?? await this.debugPortCandidates(main);
+    for (const port of ports) {
+      try {
+        const [version, targets] = await Promise.all([
+          this.fetch(`http://127.0.0.1:${port}/json/version`, {
+            signal: AbortSignal.timeout(750)
+          }),
+          this.fetch(`http://127.0.0.1:${port}/json/list`, {
+            signal: AbortSignal.timeout(750)
+          })
+        ]);
+        if (!version.ok || !targets.ok) continue;
+        const rows = await targets.json();
+        if (Array.isArray(rows)
+            && rows.some((target) => target?.type === "page"
+              && target?.url?.startsWith("app://"))) return port;
+      } catch {
+        // A renderer reload can briefly close the endpoint. The bounded
+        // reconnect grace above keeps the state file while later polls retry.
+      }
+    }
+    return null;
   }
 
   async removeStaleBridgeState() {
@@ -370,6 +443,7 @@ class CodexMicroBootstrap {
 module.exports = {
   BRIDGE_STATE_PATH,
   CodexMicroBootstrap,
+  DEFAULT_BRIDGE_RECONNECT_GRACE_MS,
   DEFAULT_UNBRIDGED_STABLE_MS,
   POLICY_PATH,
   codexAppCandidates,
@@ -377,5 +451,6 @@ module.exports = {
   evaluateBootstrapPolicy,
   normalizeBootstrapPolicy,
   parseCodexMainProcess,
+  parseLoopbackListenerPorts,
   parseLoopbackDebugPort
 };

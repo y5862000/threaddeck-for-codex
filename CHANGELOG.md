@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.5.11 — 2026-07-26
+
+- Replaced the blocking **Restart Codex** Micro-bridge state with live recovery. ThreadDeck now discovers only loopback listeners owned by the exact Codex process, retries a verified bridge through short renderer reloads, immediately pins controls to the verified Accessibility adapter when no bridge exists, and promotes Micro automatically if it later becomes available. Codex is neither restarted nor brought forward for this recovery.
+- Overwrites Stream Deck's persisted Effort image after control-plane recovery even when the logical warning is already clear, so a retired **Restart Codex** overlay cannot survive a plugin reload until the user changes pages.
+
 ## 0.5.10 — 2026-07-25
 
 - Simplified the Codex task picker guidance to “Choose a Codex task for this key.”

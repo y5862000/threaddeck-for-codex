@@ -52,36 +52,49 @@ if [[ -z "$codex_app_path" ]]; then
     fi
   done
 fi
+codex_process_pid=""
 codex_process_command=""
 if [[ -n "$codex_app_path" ]]; then
-  while read -r process_ppid process_command; do
+  while read -r process_pid process_ppid process_command; do
     if [[ "$process_ppid" == "1" && "$process_command" == "$codex_app_path/Contents/MacOS/"* ]]; then
+      codex_process_pid="$process_pid"
       codex_process_command="$process_command"
       break
     fi
-  done < <(/bin/ps -axo ppid=,command= 2>/dev/null)
+  done < <(/bin/ps -axo pid=,ppid=,command= 2>/dev/null)
 fi
 
 micro_bridge_state="$USER_HOME/Library/Application Support/ThreadDeck/codex-micro-bridge.json"
 micro_port=""
+micro_candidate_ports=()
 if [[ -n "$codex_process_command"
       && "$codex_process_command" == *"--remote-debugging-address=127.0.0.1"* ]]; then
-  micro_port="$(print -r -- "$codex_process_command" \
+  command_port="$(print -r -- "$codex_process_command" \
     | /usr/bin/sed -E 's/.*--remote-debugging-port(=| )([0-9]+).*/\2/')"
+  [[ "$command_port" == <-> ]] && micro_candidate_ports+=("$command_port")
 fi
-if [[ "$micro_port" == <-> ]]; then
-  version_ready="$(/usr/bin/curl --max-time 1 -fsS "http://127.0.0.1:$micro_port/json/version" 2>/dev/null)"
-  targets_ready="$(/usr/bin/curl --max-time 1 -fsS "http://127.0.0.1:$micro_port/json/list" 2>/dev/null)"
+if [[ "$codex_process_pid" == <-> && -x /usr/sbin/lsof ]]; then
+  while IFS= read -r listener; do
+    listener_port="$(print -r -- "$listener" \
+      | /usr/bin/sed -nE 's/^n(127\.0\.0\.1|\[::1\]|localhost):([0-9]+)$/\2/p')"
+    [[ "$listener_port" == <-> ]] && micro_candidate_ports+=("$listener_port")
+  done < <(/usr/sbin/lsof -nP -a -p "$codex_process_pid" -iTCP -sTCP:LISTEN -Fn 2>/dev/null)
+fi
+for candidate_port in "${micro_candidate_ports[@]}"; do
+  version_ready="$(/usr/bin/curl --max-time 1 -fsS "http://127.0.0.1:$candidate_port/json/version" 2>/dev/null)"
+  targets_ready="$(/usr/bin/curl --max-time 1 -fsS "http://127.0.0.1:$candidate_port/json/list" 2>/dev/null)"
   if [[ "$version_ready" == *"webSocketDebuggerUrl"*
-        && "$targets_ready" == *'"url": "app://'* ]]; then
-    pass "Codex Micro bridge is connected on loopback"
-  else
-    warn "Codex has loopback flags, but the Micro bridge is not ready yet"
+        && "$targets_ready" == *'app://'* ]]; then
+    micro_port="$candidate_port"
+    break
   fi
+done
+if [[ "$micro_port" == <-> ]]; then
+  pass "Codex Micro bridge is connected on process-owned loopback port $micro_port"
 elif [[ -n "$codex_process_command" ]]; then
-  warn "Codex Micro bridge is not attached; quit and reopen Codex once after installing ThreadDeck"
+  pass "Codex is running without Micro; ThreadDeck uses its verified Accessibility fallback without a restart"
 else
-  warn "Codex is not running; ThreadDeck will prepare the Micro bridge on the next launch"
+  warn "Codex is not running; ThreadDeck will use the best available control adapter when it opens"
 fi
 if [[ -f "$micro_bridge_state" && "$micro_port" != <-> ]]; then
   warn "A stale Micro bridge state file exists; ThreadDeck will replace it automatically"

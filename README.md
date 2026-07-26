@@ -65,8 +65,7 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 
    On current macOS versions the switch is named **Elgato Stream Deck.app**. No Screen Recording, Input Monitoring, or Full Disk Access permission is required.
 
-3. Quit and reopen Codex once if the Effort/Fast key says **Restart Codex**. ThreadDeck never terminates or relaunches Codex automatically; it only reuses an already available `127.0.0.1` renderer bridge.
-4. Confirm the four Codex shortcuts below so the legacy fallback remains available, then test the microphone key.
+3. Confirm the four Codex shortcuts below so the verified fallback remains available, then test the microphone key. A missing Micro renderer bridge no longer requires a Codex restart: ThreadDeck immediately uses the Accessibility adapter and keeps probing for a process-owned `127.0.0.1` endpoint in the background.
 
 The package contains an editable ready-to-use profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
 
@@ -198,7 +197,7 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 | Symptom | First check |
 |---|---|
 | No key actions work | Follow the key warning: `Allow access` means Accessibility, `Input access` means event posting, `Check Codex` means confirmed Codex-operation failures, and `Check media` means active playback could not be safely controlled. ThreadDeck rechecks permissions every 30 seconds and clears operation warnings after a verified recovery. |
-| Effort/Fast shows `Restart Codex` | Quit and reopen Codex once. ThreadDeck will preserve the current installation-time session, then attach the loopback Micro bridge after a later normal launch. Legacy controls remain available meanwhile. |
+| Effort/Fast briefly shows `Connecting` | Keep using the deck. ThreadDeck retries the existing process-owned loopback endpoint, then silently uses the verified Accessibility adapter if it stays unavailable; no Codex restart is required. |
 | Music or browser audio keeps playing during dictation | Update to the latest build. ThreadDeck now resolves any active Core Audio process to its GUI owner and uses verified semantic controls; Apple Music plus Chrome and Safari YouTube were physically tested. |
 | Korean input source blocks dictation | Confirm Codex Start dictation is `⌃⇧D`; ThreadDeck sends a Latin `D` independently of the active layout |
 | Microphone release does not send | This is expected for the dedicated microphone; it leaves a draft. Use a task-key hold for auto-submit or press Send afterward |
@@ -206,7 +205,7 @@ ThreadDeck never writes to Codex database or session files, but a physical key p
 | Send hold takes the short path | Keep holding until the key turns blue before releasing |
 | Remote task is missing | Open that computer once in Codex, then explicitly pin the task |
 | Remote task reports a duplicate | Give the tasks distinct titles or leave only one pinned |
-| `State unavailable` appears | Update to the latest release and restart Codex and Stream Deck; transient reads keep the last good list and retry automatically |
+| `State unavailable` appears | Update to the latest release and keep Codex open while ThreadDeck retries with the last good list; if it persists, restart Stream Deck and report the two app versions |
 | Weekly quota is unavailable | Run `codexbar usage --format json` and enable Codex in CodexBar |
 
 See the full [Troubleshooting guide](docs/TROUBLESHOOTING.md) if the first check does not solve it.
