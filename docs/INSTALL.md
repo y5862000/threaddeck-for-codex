@@ -27,7 +27,7 @@ The plugin automatically installs the recommended **ThreadDeck for Codex** Neo p
 
    The switch is listed as **Elgato Stream Deck.app** on current macOS releases. ThreadDeck does not need Screen Recording, Input Monitoring, or Full Disk Access. If the switch was already on but a key still shows an access warning, turn it off and on once, then quit Stream Deck from its menu-bar icon and reopen it.
 
-5. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings. ThreadDeck does not require a Codex restart when the optional Micro renderer bridge is absent; it routes controls through the verified Accessibility adapter immediately and keeps checking for a healthy process-owned loopback endpoint.
+5. In **Codex → Settings → Keyboard Shortcuts**, set or confirm the fallback bindings. ThreadDeck does not require a special Codex launch or restart when a persistent Micro renderer endpoint is absent. It prepares a private command socket against the exact running Codex process at plugin startup, while passive monitoring and fallback remain on the local/Accessibility adapters.
 
 | Codex function | Shortcut |
 |---|---:|
@@ -48,9 +48,9 @@ ThreadDeck does not need Screen Recording or Full Disk Access. The optional quot
 
 ThreadDeck checks Accessibility and keyboard-event access at startup and every 30 seconds. It requests missing macOS permission and keeps a short warning on the keys until the permission is healthy again.
 
-The Effort/Fast key can briefly show **Connecting** while an existing loopback endpoint is being rechecked. If the endpoint stays unavailable, ThreadDeck removes the bridge notice and uses the verified Accessibility adapter without restarting Codex. A later healthy endpoint is detected and promoted automatically.
+ThreadDeck reuses a healthy process-owned renderer endpoint when one already exists. Otherwise plugin startup briefly opens a command-only loopback inspector on the exact Codex PID, installs an authenticated mode-`0600` Unix-domain socket in process memory, and closes the inspector before the first native-control press. Buttons reuse the prepared socket without reconnecting. If another process owns the local bootstrap port or the running Codex build does not expose the expected renderer, ThreadDeck fails closed and uses the verified fallback only where replay is safe. It never restarts or foregrounds Codex for this connection.
 
-From a source checkout, `pnpm run doctor` prints a read-only installation report, including whether the Codex Micro bridge is connected, reconnecting, using fallback, or stopped. The doctor never starts, closes, or modifies either application. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
+From a source checkout, `pnpm run doctor` prints a read-only installation report, including whether a persistent Codex renderer bridge is connected or commands will use the short-lived exact-process path. The doctor never opens that path and never starts, closes, or modifies either application. For user-facing fixes, see [Troubleshooting](TROUBLESHOOTING.md).
 
 ## Update or remove
 

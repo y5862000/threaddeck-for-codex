@@ -2534,22 +2534,43 @@ function handleMicroBootstrapStatus(status) {
     codexControlPlane.setMicroAvailable(true);
     settleMicroBridgeIssue(null);
     codexMicroBridge.disconnect();
+    codexMicroBridge.stopCommandBridge();
     void refreshMicroReadOnly({ force: true, quiet: true });
     return;
   }
-  if (microBootstrapStatus.state === "fallback"
-      || microBootstrapStatus.state === "stopped") {
+  if (microBootstrapStatus.state === "fallback") {
+    codexMicroBridge.disconnect();
+    codexControlPlane.setMicroCommandAvailable(true, "prepared-local-bridge");
+    void codexMicroBridge.prepareCommandBridge().catch((error) => {
+      runtimeTrace("micro-command-bridge", {
+        phase: "prepare-failed",
+        result: String(error?.code ?? error?.message ?? "unknown").slice(0, 64)
+      });
+    });
+    settleMicroBridgeIssue(null);
+    return;
+  }
+  if (microBootstrapStatus.state === "stopped") {
+    codexMicroBridge.stopCommandBridge();
     codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
     settleMicroBridgeIssue(null);
     return;
   }
   if (microBootstrapStatus.state === "waiting"
       && microBootstrapStatus.detail === "bridge-reconnecting") {
-    codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
-    setMicroBridgeIssue("connecting");
+    codexMicroBridge.disconnect();
+    codexControlPlane.setMicroCommandAvailable(true, "prepared-local-bridge");
+    void codexMicroBridge.prepareCommandBridge().catch((error) => {
+      runtimeTrace("micro-command-bridge", {
+        phase: "reprepare-failed",
+        result: String(error?.code ?? error?.message ?? "unknown").slice(0, 64)
+      });
+    });
+    settleMicroBridgeIssue(null);
     return;
   }
   if (microBootstrapStatus.state === "error") {
+    codexMicroBridge.stopCommandBridge();
     codexControlPlane.setMicroAvailable(false, microBootstrapStatus.detail);
     setMicroBridgeIssue("error");
     return;
@@ -5971,7 +5992,7 @@ function toggleFastMode(context, options = {}) {
 
 function performReasoningEffortChange(context, options = {}) {
   const productionNativeAction = !options.stepEffort;
-  const bridgeCapability = "reasoning-effort-step";
+  const bridgeCapability = "reasoning-effort-set";
   const synchronizeCurrent = options.synchronizeCurrent
     ?? (productionNativeAction
       ? synchronizeCurrentCodexThread
@@ -6039,9 +6060,6 @@ function performReasoningEffortChange(context, options = {}) {
         };
       const plannedDirection = executionPlan.direction ?? direction;
       const plannedTapCount = executionPlan.count ?? tapCount;
-      const needsAdvancedFallback = ["exact", "power-exact"].includes(
-        executionPlan.mode
-      );
       if (productionNativeAction && executionPlan.mode === "unavailable") {
         throw new Error("Requested Codex model and effort combination is unavailable");
       }
@@ -6054,7 +6072,6 @@ function performReasoningEffortChange(context, options = {}) {
         });
         return true;
       }
-      let microNeedsExactCorrection = false;
       if (productionNativeAction
           && options.useMicro !== false
           && ["power", "power-exact"].includes(executionPlan.mode)) {
@@ -6082,150 +6099,74 @@ function performReasoningEffortChange(context, options = {}) {
             }, "Power selection verification");
           }
         }, { quiet: true });
-        if (powerResult.backend !== "micro" || !powerResult.ok) {
+        if (powerResult.backend === "micro" && !powerResult.ok) {
           showFeedback(context, "error", "변경 확인", 1600);
           return false;
         }
-        const snapshot = powerResult.value;
-        applyMicroReadOnlySnapshot(snapshot, { promote: false });
-        if (executionPlan.mode === "power-exact") {
-          microNeedsExactCorrection = true;
-          runtimeTrace("control-plane", {
-            strategy: "micro+advanced",
-            result: "model-selected"
-          });
-        } else {
-          const confirmedModel = normalizedReasoningModel(snapshot.model);
-          const confirmedEffort = normalizedReasoningEffort(snapshot.reasoningEffort);
-          const selections = reasoningSelectionOptionsForThread(threadId);
-          const selectionIndex = reasoningSelectionIndex(
-            selections,
-            confirmedModel,
-            confirmedEffort
-          );
-          fastModeState = {
-            ...fastModeStateFromThread(thread, fastModeState),
-            threadId,
-            model: confirmedModel,
-            enabled: typeof snapshot.fastEnabled === "boolean"
-              ? snapshot.fastEnabled
-              : fastModeState.enabled,
-            available: typeof snapshot.fastEnabled === "boolean"
-              ? true
-              : fastModeState.available,
-            reasoningEffort: confirmedEffort,
-            composerFocused: true,
-            failed: false
-          };
-          reasoningDirectionByThreadId.set(
-            threadId,
-            selectionIndex === selections.length - 1
-              ? "down"
-              : selectionIndex === 0
-                ? "up"
-                : plannedDirection
-          );
-          applyFocusedComposerState(thread, fastModeState);
-          clearFeedback(context);
-          runtimeTrace("control-plane", {
-            strategy: "micro-power",
-            result: "success"
-          });
-          return true;
-        }
-      }
-      if (productionNativeAction
-          && options.useMicro !== false
-          && executionPlan.mode === "micro") {
-        const microResult = await codexControlPlane.execute("reasoning-effort-step", {
-          micro: async (bridge) => {
-            await bridge.adjustReasoning(
-              plannedDirection === "down" ? "decrease" : "increase",
-              plannedTapCount,
-              { confirmUltra: false }
-            );
-            return verifyAfterMicroDelivery(async () => {
-              await sleepWithSignal(140);
-              const snapshot = await bridge.refreshReadOnly();
-              if (!isProvisionalComposerThread(thread)
-                  && microSnapshotActiveThreadId(snapshot) !== threadId) {
-                throw new Error("Effort changed outside the verified current task");
-              }
-              return snapshot;
-            }, "Effort verification");
-          }
-        }, { quiet: true });
-        if (microResult.backend === "micro") {
-          if (!microResult.ok) {
-            showFeedback(context, "error", "변경 확인", 1600);
-            return false;
-          }
-          const snapshot = microResult.value;
-          const visualEffort = normalizedReasoningEffort(
-            reasoningVisualOverrideByThreadId.get(threadId)?.effort
-          );
-          const confirmedEffort = normalizedReasoningEffort(snapshot?.reasoningEffort)
-            ?? visualEffort;
-          if (!confirmedEffort) {
-            showFeedback(context, "error", "변경 확인", 1600);
-            return false;
-          }
-          if (expectedEffort && confirmedEffort !== expectedEffort) {
-            // The physical Micro's compact encoder intentionally omits some
-            // Advanced-only levels on certain models. Because the renderer
-            // snapshot gives us the exact post-knob state, it is safe to
-            // correct that verified mismatch once through Codex's complete
-            // Advanced option list instead of replaying another encoder tick.
-            microNeedsExactCorrection = true;
-            applyMicroReadOnlySnapshot(snapshot, { promote: false });
+        if (powerResult.backend === "micro") {
+          const snapshot = powerResult.value;
+          applyMicroReadOnlySnapshot(snapshot, { promote: false });
+          if (executionPlan.mode === "power-exact") {
             runtimeTrace("control-plane", {
               strategy: "micro+advanced",
-              result: "target-skipped"
+              result: "model-selected"
             });
           } else {
-            const availableEfforts = reasoningEffortOptionsForThread(threadId);
-            if (availableEfforts.length >= 2) {
-              rememberReasoningEffortOptions(threadId, availableEfforts);
-            }
+            const confirmedModel = normalizedReasoningModel(snapshot.model);
+            const confirmedEffort = normalizedReasoningEffort(snapshot.reasoningEffort);
+            const selections = reasoningSelectionOptionsForThread(threadId);
+            const selectionIndex = reasoningSelectionIndex(
+              selections,
+              confirmedModel,
+              confirmedEffort
+            );
             fastModeState = {
               ...fastModeStateFromThread(thread, fastModeState),
               threadId,
-              model: normalizedReasoningModel(snapshot?.model)
-                ?? fastModeState.model,
-              enabled: typeof snapshot?.fastEnabled === "boolean"
+              model: confirmedModel,
+              enabled: typeof snapshot.fastEnabled === "boolean"
                 ? snapshot.fastEnabled
                 : fastModeState.enabled,
-              available: typeof snapshot?.fastEnabled === "boolean"
+              available: typeof snapshot.fastEnabled === "boolean"
                 ? true
                 : fastModeState.available,
               reasoningEffort: confirmedEffort,
               composerFocused: true,
               failed: false
             };
-            const effortIndex = availableEfforts.indexOf(confirmedEffort);
-            const nextDirection = effortIndex === availableEfforts.length - 1
-              ? "down"
-              : effortIndex === 0
-                ? "up"
-                : plannedDirection;
-            reasoningDirectionByThreadId.set(threadId, nextDirection);
-            if (snapshot) applyMicroReadOnlySnapshot(snapshot, { promote: false });
+            reasoningDirectionByThreadId.set(
+              threadId,
+              selectionIndex === selections.length - 1
+                ? "down"
+                : selectionIndex === 0
+                  ? "up"
+                  : plannedDirection
+            );
             applyFocusedComposerState(thread, fastModeState);
             clearFeedback(context);
-            runtimeTrace("control-plane", { strategy: "micro", result: "success" });
+            runtimeTrace("control-plane", {
+              strategy: "micro-power",
+              result: "success"
+            });
             return true;
           }
-        }
-        if (microResult.ambiguous) {
-          showFeedback(context, "error", "변경 확인", 1600);
-          return false;
+        } else if (executionPlan.targetModel
+            && currentModel
+            && executionPlan.targetModel !== currentModel) {
+          // Accessibility can select an exact effort but cannot atomically
+          // change the model. Do not silently apply the requested effort to a
+          // different model when the exact renderer controller is offline.
+          throw new Error("Exact Codex model selection is unavailable");
+        } else {
+          runtimeTrace("control-plane", {
+            strategy: "advanced",
+            result: "micro-unavailable"
+          });
         }
       }
       if (productionNativeAction
           && !ensureCommandPermissions(bridgeCapability, context)) return false;
-      const exactTargetEffort = productionNativeAction
-          && expectedEffort
-          && (needsAdvancedFallback || microNeedsExactCorrection)
+      const exactTargetEffort = productionNativeAction && expectedEffort
         ? expectedEffort
         : null;
       const focusTargetComposer = options.focusTargetComposer
@@ -6251,10 +6192,10 @@ function performReasoningEffortChange(context, options = {}) {
           ["reasoning-effort-set", effort],
           { timeout: 7000, maxBuffer: 4096 }
         ));
-      // Ordinary levels use Codex's native Micro encoder. Max, Ultra, or a
-      // verified encoder skip takes the exact Advanced route after the input
-      // burst settles, scans this user's full list, and selects only the final
-      // target once.
+      // Production never replays the physical Micro encoder: its compact axis
+      // can omit user-visible levels and therefore cannot guarantee the final
+      // target. When the exact Micro power controller is unavailable, scan the
+      // complete Advanced list and select only the final requested effort.
       const rendererUltraConfirmation = exactTargetEffort === "ultra"
           && productionNativeAction
         ? codexControlPlane.execute("reasoning-ultra-confirm", {
@@ -6412,12 +6353,8 @@ function reasoningEffortExecutionPlan(
   const currentIndex = options.indexOf(currentEffort);
   const targetIndex = options.indexOf(targetEffort);
   if (currentIndex < 0 || targetIndex < 0) return fallback;
-  if (reasoningEffortNeedsAdvancedFallback(currentEffort)
-      || reasoningEffortNeedsAdvancedFallback(targetEffort)) {
-    return { ...fallback, mode: "exact" };
-  }
   return {
-    mode: "micro",
+    mode: "exact",
     direction: targetIndex < currentIndex ? "down" : "up",
     count: Math.abs(targetIndex - currentIndex),
     targetEffort
@@ -6437,15 +6374,6 @@ function reasoningSelectionExecutionPlan(
   const targetModel = normalizedReasoningModel(targetModelValue);
   const currentEffort = normalizedReasoningEffort(currentEffortValue);
   const targetEffort = normalizedReasoningEffort(targetEffortValue);
-  if (!currentModel || !targetModel || currentModel === targetModel) {
-    return reasoningEffortExecutionPlan(
-      currentEffort,
-      targetEffort,
-      reasoningEffortOptionsForThread(threadId),
-      fallbackDirection,
-      fallbackCount
-    );
-  }
   if (currentEffort === targetEffort && currentModel === targetModel) {
     return {
       mode: "none",
@@ -6459,16 +6387,7 @@ function reasoningSelectionExecutionPlan(
   const target = selections.find((selection) => (
     selection.model === targetModel && selection.effort === targetEffort
   ));
-  if (!target) {
-    return {
-      mode: "unavailable",
-      direction: fallbackDirection,
-      count: 0,
-      targetModel,
-      targetEffort
-    };
-  }
-  if (target.compact) {
+  if (target?.compact) {
     return {
       mode: "power",
       direction: fallbackDirection,
@@ -6476,6 +6395,24 @@ function reasoningSelectionExecutionPlan(
       targetModel,
       targetEffort,
       powerTarget: target
+    };
+  }
+  if (!target) {
+    return reasoningEffortExecutionPlan(
+      currentEffort,
+      targetEffort,
+      reasoningEffortOptionsForThread(threadId),
+      fallbackDirection,
+      fallbackCount
+    );
+  }
+  if (currentModel === targetModel) {
+    return {
+      mode: "exact",
+      direction: fallbackDirection,
+      count: Math.max(1, Math.min(64, Math.trunc(fallbackCount ?? 1))),
+      targetModel,
+      targetEffort
     };
   }
   const targetRank = REASONING_EFFORT_ORDER.indexOf(targetEffort);
@@ -10053,8 +9990,10 @@ function registerPlugin() {
       });
     }
     // The watcher never launches or terminates Codex. It reuses a verified
-    // process-owned loopback endpoint when present and otherwise pins the
-    // control plane to the legacy adapter until a later poll finds Micro.
+    // process-owned renderer endpoint when present. Without one, startup uses
+    // a short-lived exact-PID inspector only to prepare a private command
+    // socket; button presses reuse it while passive reads stay on the existing
+    // local/Accessibility observers.
     void codexMicroBootstrap.start();
     // Prime the only synchronous permission check before the first hardware
     // press. This keeps first-use remote switching and push-to-talk responsive.
@@ -13928,6 +13867,15 @@ async function verifyInteractionPolicy() {
       "down",
       1
     );
+    const solHighPlan = reasoningSelectionExecutionPlan(
+      "gpt-5.6-sol",
+      "medium",
+      "gpt-5.6-sol",
+      "high",
+      localThreadB.id,
+      "up",
+      1
+    );
     const maxPlan = reasoningSelectionExecutionPlan(
       "gpt-5.6-terra",
       "low",
@@ -13968,6 +13916,8 @@ async function verifyInteractionPolicy() {
       && upFromTerraLight.effort === "low"
       && terraPlan.mode === "power"
       && terraPlan.powerTarget?.id === "gpt-5.6-terra:low"
+      && solHighPlan.mode === "power"
+      && solHighPlan.powerTarget?.id === "gpt-5.6-sol:high"
       && maxPlan.mode === "power-exact"
       && maxPlan.powerTarget?.id === "gpt-5.6-sol:xhigh"
       && terraVisual.includes(">TERRA LIGHT</text>")
@@ -14010,7 +13960,7 @@ async function verifyInteractionPolicy() {
       "up",
       1
     );
-    return lighter.mode === "micro"
+    return lighter.mode === "exact"
       && lighter.direction === "down"
       && lighter.count === 3
       && roundTrip.mode === "none"

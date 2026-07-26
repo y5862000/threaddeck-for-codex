@@ -53,10 +53,11 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" side-chat-tab-selftest
 "$BRIDGE" command-palette-selftest
 "$BRIDGE" media-bundle-selftest
-node - "$ROOT_DIR/native/keybridge.m" "$ROOT_DIR/src/plugin.js" <<'NODE'
+node - "$ROOT_DIR/native/keybridge.m" "$ROOT_DIR/src/plugin.js" "$ROOT_DIR/src/micro-prepared-bridge.js" <<'NODE'
 const fs = require("node:fs");
 const source = fs.readFileSync(process.argv[2], "utf8");
 const pluginSource = fs.readFileSync(process.argv[3], "utf8");
+const preparedBridgeSource = fs.readFileSync(process.argv[4], "utf8");
 
 function functionBody(name) {
   const start = source.indexOf(`static int ${name}(void)`);
@@ -168,12 +169,19 @@ if (effortUpdateStart < 0 || effortUpdateEnd < 0) {
   throw new Error("Missing JavaScript reasoning update transaction");
 }
 const effortUpdateBody = pluginSource.slice(effortUpdateStart, effortUpdateEnd);
-if (!effortUpdateBody.includes('["reasoning-effort-step", stepDirection, String(count)]')
-    || !effortUpdateBody.includes('["reasoning-effort-set", effort]')
-    || !effortUpdateBody.includes("needsAdvancedFallback || microNeedsExactCorrection")
+if (!effortUpdateBody.includes('["reasoning-effort-set", effort]')
+    || !effortUpdateBody.includes('bridge.setPowerSelection(powerTarget.model, powerTarget.effort)')
+    || effortUpdateBody.includes("bridge.adjustReasoning(")
+    || !effortUpdateBody.includes("? await setExactEffort(exactTargetEffort)")
     || !effortUpdateBody.includes("confirmed?.availableEfforts")
     || !effortUpdateBody.includes("confirmedEffort !== exactTargetEffort")) {
-  throw new Error("Reasoning updates must use Micro steps normally and exact Advanced correction only for a verified target");
+  throw new Error("Reasoning updates must select an exact Micro power target or one exact Advanced option without encoder replay");
+}
+if (!pluginSource.includes('setMicroCommandAvailable(true, "prepared-local-bridge")')
+    || !pluginSource.includes("codexMicroBridge.prepareCommandBridge()")
+    || !preparedBridgeSource.includes("fs.chmodSync(config.socketPath, 0o600)")
+    || !preparedBridgeSource.includes("request.token !== config.token")) {
+  throw new Error("Micro fallback must prepare an authenticated local command socket before the first button press");
 }
 const ultraConfirmationBody = functionBodyFromSignature(
   "static CodexUltraConfirmationResult confirm_codex_ultra_full_access_warning("

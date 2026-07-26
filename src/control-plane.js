@@ -36,6 +36,7 @@ class CodexControlPlane {
     this.unavailableCooldownMs = options.unavailableCooldownMs ?? 3000;
     this.microUnavailableUntilMs = 0;
     this.microAvailable = Boolean(this.micro);
+    this.microReadAvailable = Boolean(this.micro);
     this.lastSnapshot = null;
     this.lastHealth = {
       backend: "legacy",
@@ -45,14 +46,15 @@ class CodexControlPlane {
     };
   }
 
-  shouldTryMicro() {
+  shouldTryMicro(options = {}) {
     return Boolean(this.micro)
-      && this.microAvailable
+      && (options.readOnly === true ? this.microReadAvailable : this.microAvailable)
       && this.now() >= this.microUnavailableUntilMs;
   }
 
   setMicroAvailable(available, reason = null) {
     this.microAvailable = Boolean(available) && Boolean(this.micro);
+    this.microReadAvailable = this.microAvailable;
     this.microUnavailableUntilMs = this.microAvailable ? 0 : Number.POSITIVE_INFINITY;
     if (!this.microAvailable) this.micro?.disconnect?.();
     this.lastHealth = {
@@ -64,9 +66,28 @@ class CodexControlPlane {
     return this.microAvailable;
   }
 
+  setMicroCommandAvailable(available, reason = null) {
+    this.microAvailable = Boolean(available) && Boolean(this.micro);
+    this.microReadAvailable = false;
+    this.microUnavailableUntilMs = this.microAvailable ? 0 : Number.POSITIVE_INFINITY;
+    if (!this.microAvailable) this.micro?.disconnect?.();
+    this.lastHealth = {
+      backend: this.microAvailable ? "micro" : "legacy",
+      connected: false,
+      checkedAtMs: this.now(),
+      reason: reason ?? (this.microAvailable
+        ? "MICRO_COMMAND_ONLY"
+        : "MICRO_UNAVAILABLE")
+    };
+    return this.microAvailable;
+  }
+
   noteMicroSuccess(snapshot = null) {
     this.microAvailable = true;
-    if (snapshot) this.lastSnapshot = snapshot;
+    if (snapshot) {
+      this.microReadAvailable = true;
+      this.lastSnapshot = snapshot;
+    }
     this.microUnavailableUntilMs = 0;
     this.lastHealth = {
       backend: "micro",
@@ -95,8 +116,8 @@ class CodexControlPlane {
   }
 
   async refreshReadOnly(options = {}) {
-    if (!this.microAvailable) return null;
-    if (!this.shouldTryMicro() && options.force !== true) return null;
+    if (!this.microReadAvailable) return null;
+    if (!this.shouldTryMicro({ readOnly: true }) && options.force !== true) return null;
     try {
       const snapshot = await this.micro.refreshReadOnly();
       this.noteMicroSuccess(snapshot);

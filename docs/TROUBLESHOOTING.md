@@ -16,13 +16,13 @@ ThreadDeck does not require Screen Recording or Full Disk Access.
 
 The Neo profile is installed with the plugin but is not forced over your current profile. Choose **ThreadDeck for Codex** from the profile selector at the top of the Stream Deck app. If it is missing, reinstall the latest `.streamDeckPlugin` package and restart Stream Deck.
 
-## Effort/Fast shows `Connecting` or `Check Micro`
+## A Micro-native control does not respond
 
-ThreadDeck never terminates or relaunches Codex. It first retries every loopback listener owned by the existing Codex process, including a healthy endpoint whose port is no longer visible in the launch arguments. During that bounded retry the key can show **Connecting**. If no endpoint responds, ThreadDeck silently pins commands to the verified Accessibility adapter instead of asking for a restart. It never scans arbitrary ports or binds a debugger to the LAN.
+ThreadDeck never terminates, relaunches, or foregrounds Codex to connect. It first reuses a healthy loopback renderer endpoint owned by the exact existing Codex process. If none exists, plugin startup opens Node's loopback inspector only on that exact main PID, verifies that the same PID owns port 9229, prepares an authenticated mode-`0600` Unix-domain socket for the main `app://` renderer, and closes an inspector it opened before the first press. Physical commands reuse that socket; passive polling never uses it.
 
-Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means the renderer endpoint and main `app://` target both responded; `fallback` means commands use the Accessibility adapter; `stopped` means Codex is closed. Neither the doctor nor ThreadDeck launches or closes Codex.
+Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means a persistent renderer endpoint and main `app://` target both responded; no persistent bridge means plugin startup can prepare the exact-process command socket. `stopped` means Codex is closed. The doctor never opens the bootstrap inspector and neither component starts or closes Codex.
 
-While the bridge is unavailable, ThreadDeck keeps the verified Accessibility/shortcut adapter and periodically checks for Micro again. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed through the fallback path because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and the exact key used.
+If another process already owns port 9229, ThreadDeck refuses to attach to it and uses the verified Accessibility/shortcut adapter where a fallback is safe. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and exact key used.
 
 ## No shortcut or remote-switch action works
 

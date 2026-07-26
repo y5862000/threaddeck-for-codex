@@ -164,3 +164,31 @@ test("an unbridged running Codex enters fallback without a restart prompt", asyn
   assert.equal(statuses.at(-1).state, "fallback");
   await fs.rm(directory, { recursive: true, force: true });
 });
+
+test("an unbridged Codex generation change re-emits fallback for bridge preparation", async () => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), "threaddeck-bootstrap-generation-"));
+  const statuses = [];
+  let generation = "740:start:/Applications/ChatGPT.app";
+  const bootstrap = new CodexMicroBootstrap({
+    policyPath: path.join(directory, "policy.json"),
+    bridgeStatePath: path.join(directory, "bridge.json"),
+    onStatus: (status) => statuses.push(status)
+  });
+  bootstrap.discoverAppPath = async () => "/Applications/ChatGPT.app";
+  bootstrap.findMainProcess = async () => ({
+    pid: Number(generation.split(":")[0]),
+    generation,
+    command: "/Applications/ChatGPT.app/Contents/MacOS/ChatGPT"
+  });
+  bootstrap.debugPortCandidates = async () => [];
+  bootstrap.healthyDebugPort = async () => null;
+  bootstrap.policy = createBootstrapPolicy(1000);
+  await bootstrap.performTick();
+  await bootstrap.performTick();
+  assert.equal(statuses.length, 1);
+  generation = "840:next:/Applications/ChatGPT.app";
+  await bootstrap.performTick();
+  assert.equal(statuses.length, 2);
+  assert.equal(statuses.at(-1).generation, generation);
+  await fs.rm(directory, { recursive: true, force: true });
+});

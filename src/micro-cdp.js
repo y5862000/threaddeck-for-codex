@@ -13,6 +13,9 @@ const os = require("node:os");
 const path = require("node:path");
 const { promisify } = require("node:util");
 
+const { CodexMainInspectorEvaluator } = require("./micro-main-inspector");
+const { CodexPreparedRendererBridge } = require("./micro-prepared-bridge");
+
 const execFileAsync = promisify(execFile);
 const DEFAULT_STATE_PATH = path.join(
   os.homedir(),
@@ -30,10 +33,6 @@ const DEVICE_STATE = Object.freeze({
   }
 });
 const MICRO_FEATURE_GATE = "3207467860";
-const REASONING_ENCODER_KEYS = Object.freeze({
-  decrease: "ENC_CW",
-  increase: "ENC_CC"
-});
 const CODEX_THREAD_UUID_PATTERN = /([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i;
 const CODEX_EXACT_THREAD_UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 const OFFICIAL_KEYCAP_IDS = new Set([
@@ -626,122 +625,6 @@ function runKeycapExpression(keycapId) {
   })()`;
 }
 
-function runReasoningEncoderExpression(direction, count = 1, options = {}) {
-  const powerSelectionDirection = direction === "decrease"
-    ? "decrease"
-    : direction === "increase" ? "increase" : null;
-  if (!powerSelectionDirection) {
-    throw new TypeError(`Unknown reasoning direction: ${direction}`);
-  }
-  const repeat = Math.max(1, Math.min(64, Math.trunc(count)));
-  const confirmUltra = options.confirmUltra === true;
-  return `(async () => {
-    ${ASSET_URLS_SOURCE}
-    const moduleUrl = (prefix) => urls.find((value) => value.includes('/assets/' + prefix));
-    const commandsUrl = moduleUrl('run-command-');
-    const bridgeUrl = moduleUrl('codex-micro-bridge-');
-    let commandRunner = null;
-    if (commandsUrl) {
-      const commands = await import(commandsUrl);
-      commandRunner = Object.values(commands).find((candidate) => typeof candidate === 'function' && Function.prototype.toString.call(candidate).includes('codex_micro')) ?? commands.i ?? null;
-    }
-    if (!commandRunner && bridgeUrl) {
-      const bridgeSource = await (await fetch(bridgeUrl)).text();
-      const runnerMatch = bridgeSource.match(/([A-Za-z_$][\\w$]*)\\(\\s*[A-Za-z_$][\\w$]*\\??\\.command\\s*,["'\\x60]codex_micro_hid["'\\x60]\\)/);
-      const runnerLocal = runnerMatch?.[1];
-      const importPattern = /import\\s*\\{([^}]*)\\}\\s*from\\s*["']([^"']+)["']/g;
-      let importMatch;
-      while (runnerLocal && (importMatch = importPattern.exec(bridgeSource))) {
-        for (const specifier of importMatch[1].split(',')) {
-          const parts = specifier.trim().split(/\\s+as\\s+/);
-          const exportName = parts[0];
-          const localName = parts[1] ?? parts[0];
-          if (localName !== runnerLocal) continue;
-          const namespace = await import(new URL(importMatch[2], bridgeUrl).href);
-          if (typeof namespace[exportName] === 'function') commandRunner = namespace[exportName];
-          break;
-        }
-        if (commandRunner) break;
-      }
-    }
-    if (typeof commandRunner !== 'function') {
-      return { deliveredCount: 0, requestedCount: ${repeat}, error: 'Codex command runner is unavailable.' };
-    }
-    let deliveredCount = 0;
-    let error = null;
-    for (let index = 0; index < ${repeat}; index += 1) {
-      try {
-        const handled = commandRunner(
-          'composer.openModelPicker',
-          'codex_micro_encoder',
-          {
-            modelPicker: {
-              menuView: 'simple',
-              powerSelectionDirection: ${JSON.stringify(powerSelectionDirection)}
-            }
-          }
-        );
-        if (handled === false) {
-          error = 'Codex reasoning command is not active in the current view.';
-          break;
-        }
-        deliveredCount += 1;
-        if (index + 1 < ${repeat}) await new Promise((resolve) => setTimeout(resolve, 90));
-      } catch (caught) {
-        error = String(caught?.message ?? caught ?? 'Codex reasoning command failed.');
-        break;
-      }
-    }
-    let ultraConfirmed = false;
-    if (${confirmUltra} && deliveredCount > 0) {
-      try {
-        const normalize = (value) => String(value ?? '').replace(/\\s+/g, ' ').trim().toLowerCase();
-        const deadline = Date.now() + 900;
-        while (Date.now() < deadline && !ultraConfirmed) {
-          const dialogs = [...document.querySelectorAll('[role="dialog"]')]
-            .filter((dialog) => dialog.getClientRects().length > 0);
-          for (const dialog of dialogs) {
-            const text = normalize(dialog.innerText || dialog.textContent);
-            const exactWarning = (
-              (text.includes('use ultra with full access?')
-                && text.includes('extended reasoning')
-                && text.includes('without asking'))
-              || (text.includes('ultra')
-                && text.includes('전체 액세스')
-                && text.includes('확장')
-                && text.includes('묻지 않'))
-            );
-            if (!exactWarning) continue;
-            const buttons = [...dialog.querySelectorAll('button')]
-              .filter((button) => button.getClientRects().length > 0 && !button.disabled);
-            const fullAccessButtons = buttons.filter((button) => [
-              'use full access',
-              '전체 액세스 사용',
-              '전체 접근 권한 사용'
-            ].includes(normalize(button.innerText || button.textContent || button.getAttribute('aria-label'))));
-            const continueButtons = buttons.filter((button) => [
-              'continue',
-              '계속',
-              '계속하기'
-            ].includes(normalize(button.innerText || button.textContent || button.getAttribute('aria-label'))));
-            if (fullAccessButtons.length !== 1 || continueButtons.length !== 1) {
-              throw new Error('Ultra confirmation controls are ambiguous.');
-            }
-            fullAccessButtons[0].click();
-            ultraConfirmed = true;
-            break;
-          }
-          if (!ultraConfirmed) await new Promise((resolve) => setTimeout(resolve, 30));
-        }
-        if (ultraConfirmed) await new Promise((resolve) => setTimeout(resolve, 120));
-      } catch (caught) {
-        error = String(caught?.message ?? caught ?? 'Ultra confirmation failed.');
-      }
-    }
-    return { deliveredCount, requestedCount: ${repeat}, ultraConfirmed, error };
-  })()`;
-}
-
 function runPowerSelectionExpression(modelValue, effortValue) {
   const model = normalizeMicroModel(modelValue);
   const reasoningEffort = typeof effortValue === "string"
@@ -1163,8 +1046,19 @@ class CodexMicroBridge {
     this.readFile = options.readFile ?? fs.readFile;
     this.statePath = options.statePath ?? DEFAULT_STATE_PATH;
     this.platform = options.platform ?? process.platform;
+    this.mainInspector = options.mainInspector ?? new CodexMainInspectorEvaluator({
+      execFile: this.execFile,
+      fetch: this.fetch,
+      WebSocket: this.WebSocket,
+      platform: this.platform
+    });
+    this.preparedBridge = options.preparedBridge ?? new CodexPreparedRendererBridge({
+      mainInspector: this.mainInspector,
+      log: this.log
+    });
     this.socket = null;
     this.connecting = null;
+    this.onDemandAttached = false;
     this.nextId = 0;
     this.pending = new Map();
     this.lastSnapshot = null;
@@ -1259,41 +1153,6 @@ class CodexMicroBridge {
       ));
     } catch (error) {
       throw this.normalizeError(error, active ? "push-to-talk start" : "push-to-talk stop");
-    }
-  }
-
-  async adjustReasoning(direction, count = 1, options = {}) {
-    if (!REASONING_ENCODER_KEYS[direction]) {
-      throw new MicroBridgeError(`Unknown reasoning direction: ${direction}`, {
-        code: "MICRO_CAPABILITY_UNAVAILABLE",
-        delivery: "none"
-      });
-    }
-    try {
-      await this.ensureConnected();
-      await this.activateRuntime();
-      const requestedCount = Math.max(1, Math.min(64, Math.trunc(count)));
-      const result = await this.evaluate(
-        runReasoningEncoderExpression(direction, requestedCount, options),
-        { timeoutMs: 3600 + requestedCount * 140 }
-      );
-      const deliveredCount = Math.max(0, Math.trunc(result?.deliveredCount ?? 0));
-      if (result?.error || deliveredCount !== requestedCount) {
-        throw new MicroBridgeError(
-          result?.error
-            ? `Codex Micro reasoning adjustment stopped: ${result.error}`
-            : `Codex Micro reasoning adjustment delivered ${deliveredCount}/${requestedCount} steps.`,
-          {
-            code: deliveredCount > 0
-              ? "MICRO_PARTIAL_DELIVERY"
-              : "MICRO_CAPABILITY_UNAVAILABLE",
-            delivery: deliveredCount > 0 ? "unknown" : "none"
-          }
-        );
-      }
-      return result;
-    } catch (error) {
-      throw this.normalizeError(error, "reasoning adjustment");
     }
   }
 
@@ -1410,13 +1269,36 @@ class CodexMicroBridge {
 
   async ensureConnected() {
     if (this.socket?.readyState === this.WebSocket?.OPEN) return;
+    if (this.preparedBridge.isReady()) {
+      this.onDemandAttached = true;
+      return;
+    }
     if (this.connecting) return this.connecting;
-    this.connecting = this.connect();
+    this.connecting = (async () => {
+      try {
+        await this.connect();
+      } catch (error) {
+        if (error?.delivery !== "none" || !await this.preparedBridge.canAttach()) throw error;
+        await this.prepareCommandBridge();
+      }
+    })();
     try {
       await this.connecting;
     } finally {
       this.connecting = null;
     }
+  }
+
+  async prepareCommandBridge() {
+    if (this.socket?.readyState === this.WebSocket?.OPEN) return true;
+    await this.preparedBridge.prepare();
+    this.onDemandAttached = true;
+    return true;
+  }
+
+  stopCommandBridge() {
+    this.onDemandAttached = false;
+    void this.preparedBridge.close();
   }
 
   async connect() {
@@ -1455,13 +1337,20 @@ class CodexMicroBridge {
     socket.addEventListener("close", () => this.disconnect(socket));
     socket.addEventListener("error", () => this.disconnect(socket));
     this.socket = socket;
+    this.onDemandAttached = false;
+    if (this.preparedBridge.isReady()) void this.preparedBridge.close();
     this.log(`Codex Micro renderer bridge connected on loopback port ${port}.`);
   }
 
   async evaluate(expression, options = {}) {
     const socket = this.socket;
     if (!socket || socket.readyState !== this.WebSocket.OPEN) {
-      throw microUnavailable("Codex Micro renderer bridge is not connected.");
+      if (!this.preparedBridge.isReady()) {
+        throw microUnavailable("Codex Micro renderer bridge is not connected.");
+      }
+      const id = ++this.nextId;
+      const retained = retainEvaluationPromise(expression, `${this.evaluationNamespace}-${id}`);
+      return this.preparedBridge.evaluate(retained, options);
     }
     const id = ++this.nextId;
     const retained = retainEvaluationPromise(expression, `${this.evaluationNamespace}-${id}`);
@@ -1532,6 +1421,7 @@ class CodexMicroBridge {
     if (expected && this.socket !== expected) return;
     const socket = this.socket;
     this.socket = null;
+    this.onDemandAttached = this.preparedBridge.isReady();
     this.runtimeActivated = false;
     if (socket && [this.WebSocket?.OPEN, this.WebSocket?.CONNECTING].includes(socket.readyState)) {
       try {
@@ -1549,6 +1439,7 @@ class CodexMicroBridge {
 
   close() {
     this.disconnect();
+    void this.preparedBridge.close();
   }
 
   normalizeError(error, operation) {
@@ -1627,7 +1518,6 @@ module.exports = {
   MICRO_FEATURE_GATE,
   DEFAULT_STATE_PATH,
   MicroBridgeError,
-  REASONING_ENCODER_KEYS,
   confirmedMicroThreadSnapshot,
   fastEnabledFromIntelligenceTrigger,
   isLoopbackWebSocketUrl,
@@ -1636,7 +1526,6 @@ module.exports = {
   normalizeMicroPowerSelections,
   parseDebugPortFromCommand,
   retainEvaluationPromise,
-  runReasoningEncoderExpression,
   runPowerSelectionExpression,
   runSideChatFocusExpression,
   runUltraWarningConfirmationExpression,

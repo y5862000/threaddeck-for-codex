@@ -17,7 +17,6 @@ const {
   parseDebugPortFromCommand,
   retainEvaluationPromise,
   runPowerSelectionExpression,
-  runReasoningEncoderExpression,
   runSideChatFocusExpression,
   runUltraWarningConfirmationExpression,
   runKeycapExpression,
@@ -209,19 +208,51 @@ test("keeps each awaited renderer evaluation reachable", () => {
   assert.match(expression, /Promise\.resolve\(42\)/);
 });
 
+test("prepares a local command bridge without requiring a renderer launch port", async () => {
+  let evaluated = "";
+  let ready = false;
+  const preparedBridge = {
+    isReady() {
+      return ready;
+    },
+    async canAttach() {
+      return true;
+    },
+    async prepare() {
+      ready = true;
+    },
+    async evaluate(expression) {
+      evaluated = expression;
+      return { delivered: true };
+    },
+    async close() {
+      ready = false;
+    }
+  };
+  const bridge = new CodexMicroBridge({ preparedBridge });
+  bridge.connect = async () => {
+    throw new MicroBridgeError("no launch bridge", {
+      code: "MICRO_UNAVAILABLE",
+      delivery: "none"
+    });
+  };
+  await bridge.ensureConnected();
+  assert.equal(bridge.onDemandAttached, true);
+  assert.deepEqual(await bridge.evaluate("Promise.resolve({ delivered: true })"), {
+    delivered: true
+  });
+  assert.match(evaluated, /__threadDeckPendingEvaluations/);
+});
+
 test("all generated renderer entrypoints remain syntactically valid", () => {
   assertRendererExpressionParses(READ_ONLY_SNAPSHOT_EXPRESSION);
   assertRendererExpressionParses(ACTIVATE_RUNTIME_EXPRESSION);
   assertRendererExpressionParses(runKeycapExpression("FAST"));
   assertRendererExpressionParses(runPowerSelectionExpression("gpt-5.6-terra", "low"));
-  assertRendererExpressionParses(runReasoningEncoderExpression("increase", 3));
   assertRendererExpressionParses(runSideChatFocusExpression(
     "019f6bcb-ad00-7bf2-96a4-7a35f3709515"
   ));
   assertRendererExpressionParses(runUltraWarningConfirmationExpression());
-  assert.match(runReasoningEncoderExpression("decrease"), /composer\.openModelPicker/);
-  assert.match(runReasoningEncoderExpression("decrease"), /codex_micro_encoder/);
-  assert.match(runReasoningEncoderExpression("decrease"), /powerSelectionDirection: "decrease"/);
   assert.match(runPowerSelectionExpression("gpt-5.6-terra", "low"), /onSelectPower/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /3207467860/);
   assert.match(ACTIVATE_RUNTIME_EXPRESSION, /codex-micro-device-state-changed/);
@@ -384,30 +415,6 @@ test("an ambiguous keycap failure is never replayed during activation", async ()
   };
   await assert.rejects(() => bridge.runKeycap("PARTY"), /timeout/);
   assert.equal(activations, 0);
-});
-
-test("reasoning adjustment uses the native Micro encoder command and detects partial delivery", async () => {
-  const bridge = new CodexMicroBridge();
-  bridge.ensureConnected = async () => {};
-  bridge.activateRuntime = async () => true;
-  let expression = "";
-  bridge.evaluate = async (value) => {
-    expression = value;
-    return { deliveredCount: 2, requestedCount: 2, ultraConfirmed: false, error: null };
-  };
-  assert.equal((await bridge.adjustReasoning("increase", 2)).deliveredCount, 2);
-  assert.match(expression, /powerSelectionDirection: "increase"/);
-
-  bridge.evaluate = async () => ({
-    deliveredCount: 1,
-    requestedCount: 2,
-    ultraConfirmed: false,
-    error: "stopped"
-  });
-  await assert.rejects(
-    () => bridge.adjustReasoning("increase", 2),
-    (error) => error.code === "MICRO_PARTIAL_DELIVERY" && error.delivery === "unknown"
-  );
 });
 
 test("task switching matches canonical ids but sends the exact Micro slot key", async () => {

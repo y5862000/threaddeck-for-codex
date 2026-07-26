@@ -92,7 +92,7 @@ done
 if [[ "$micro_port" == <-> ]]; then
   pass "Codex Micro bridge is connected on process-owned loopback port $micro_port"
 elif [[ -n "$codex_process_command" ]]; then
-  pass "Codex is running without Micro; ThreadDeck uses its verified Accessibility fallback without a restart"
+  pass "Codex has no persistent renderer bridge; Micro commands use a short-lived exact-process loopback bridge while passive reads and fallback stay on the verified local/Accessibility adapters"
 else
   warn "Codex is not running; ThreadDeck will use the best available control adapter when it opens"
 fi

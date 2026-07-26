@@ -264,7 +264,7 @@ class CodexMicroBootstrap {
 
   status(state, detail = null, extra = {}) {
     const value = { state, detail, atMs: this.now(), ...extra };
-    const key = `${state}:${detail ?? ""}:${extra.port ?? ""}`;
+    const key = `${state}:${detail ?? ""}:${extra.port ?? ""}:${extra.generation ?? ""}`;
     if (key !== this.lastStatusKey) {
       this.lastStatusKey = key;
       this.onStatus(value);
@@ -318,7 +318,10 @@ class CodexMicroBootstrap {
           updatedAt: new Date(this.now()).toISOString(),
           managedBy: "ThreadDeck"
         });
-        return this.status("connected", decision.action.reason, { port });
+        return this.status("connected", decision.action.reason, {
+          port,
+          generation: main?.generation ?? null
+        });
       }
       if (!main) {
         this.unhealthyBridgeSinceMs = null;
@@ -328,17 +331,22 @@ class CodexMicroBootstrap {
       if (candidatePorts.length === 0) {
         this.unhealthyBridgeSinceMs = null;
         await this.removeStaleBridgeState();
-        return this.status("fallback", "no-loopback-bridge");
+        return this.status("fallback", "no-loopback-bridge", {
+          generation: main.generation
+        });
       }
       this.unhealthyBridgeSinceMs ??= this.now();
       const unhealthyForMs = this.now() - this.unhealthyBridgeSinceMs;
       if (unhealthyForMs < this.bridgeReconnectGraceMs) {
         return this.status("waiting", "bridge-reconnecting", {
-          port: candidatePorts[0]
+          port: candidatePorts[0],
+          generation: main.generation
         });
       }
       await this.removeStaleBridgeState();
-      return this.status("fallback", "bridge-unhealthy");
+      return this.status("fallback", "bridge-unhealthy", {
+        generation: main.generation
+      });
     } catch (error) {
       return this.status("error", error?.message ?? "Micro bootstrap failed");
     }

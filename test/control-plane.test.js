@@ -105,6 +105,31 @@ test("an unavailable bootstrap pins commands to legacy until Micro reconnects", 
   assert.equal(restored.backend, "micro");
 });
 
+test("a prepared local bridge enables Micro commands without continuous renderer polling", async () => {
+  const calls = [];
+  const plane = new CodexControlPlane({
+    micro: {
+      refreshReadOnly: async () => {
+        calls.push("read");
+        return { activeThreadKey: "task" };
+      }
+    }
+  });
+  plane.setMicroCommandAvailable(true, "prepared-local-bridge");
+  assert.equal(await plane.refreshReadOnly({ force: true }), null);
+  const result = await plane.execute("fast", {
+    micro: async () => {
+      calls.push("command");
+      return true;
+    },
+    legacy: async () => calls.push("legacy")
+  });
+  assert.deepEqual(calls, ["command"]);
+  assert.equal(result.backend, "micro");
+  assert.equal(plane.health().reason, null);
+  assert.equal(await plane.refreshReadOnly({ force: true }), null);
+});
+
 test("fallback classifier rejects any possibly delivered command", () => {
   assert.equal(definiteMicroFallback(microError("MICRO_UNAVAILABLE", "none")), true);
   assert.equal(definiteMicroFallback(microError("MICRO_UNAVAILABLE", "unknown")), false);
