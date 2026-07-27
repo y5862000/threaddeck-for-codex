@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.5.13 — 2026-07-27
+
+- Restored page navigation to the Stream Deck action list as one configurable **Page navigation** control. Its Property Inspector selects Previous or Next, while existing settings-free instances remain Previous. Custom profiles can therefore use ThreadDeck's light/dark artwork and completion feedback instead of Elgato's fixed generic navigation key.
+
 ## 0.5.12 — 2026-07-27
 
 - Added a restart-free, preconnected Micro command path for an ordinary Codex launch. ThreadDeck reuses an existing process-owned renderer endpoint when present; otherwise plugin startup briefly opens Node's loopback inspector on the exact Codex main PID, verifies listener ownership, installs an authenticated mode-`0600` Unix-domain command socket in Codex process memory, and closes the inspector before the first key press. Later buttons reuse that socket with no button-time attach. This path never terminates, relaunches, activates, or continuously polls Codex, and safely falls back if port 9229 belongs to another process.

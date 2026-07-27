@@ -38,14 +38,18 @@ function inferThreadDeckPage(visibleActions = []) {
   return matches.length === 1 ? matches[0] : null;
 }
 
+function pageDirectionFromSettings(action, settings = {}) {
+  const configured = String(settings?.pageDirection ?? "").trim().toLowerCase();
+  if (configured === "next") return 1;
+  if (configured === "previous") return -1;
+  return PAGE_DIRECTION_BY_ACTION.get(action) ?? null;
+}
+
 function resolveProfilePageTarget(action, settings = {}, visibleActions = []) {
-  const direction = PAGE_DIRECTION_BY_ACTION.get(action);
+  const direction = pageDirectionFromSettings(action, settings);
   if (!direction) return null;
 
-  const configuredCount = integerSetting(settings?.pageCount);
-  const pageCount = configuredCount && configuredCount > 0
-    ? configuredCount
-    : DEFAULT_PROFILE_PAGE_COUNT;
+  const pageCount = DEFAULT_PROFILE_PAGE_COUNT;
   const configuredPage = integerSetting(settings?.currentPage);
   const inferredPage = inferThreadDeckPage(visibleActions);
   const currentPage = configuredPage !== null
@@ -59,6 +63,7 @@ function resolveProfilePageTarget(action, settings = {}, visibleActions = []) {
 
   return {
     currentPage,
+    direction,
     pageCount,
     page: (currentPage + direction + pageCount) % pageCount,
     source: configuredPage === currentPage ? "settings" : "visible-actions"
@@ -67,5 +72,6 @@ function resolveProfilePageTarget(action, settings = {}, visibleActions = []) {
 
 module.exports = {
   inferThreadDeckPage,
+  pageDirectionFromSettings,
   resolveProfilePageTarget
 };

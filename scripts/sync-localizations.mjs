@@ -36,7 +36,7 @@ const ENGLISH_ACTIONS = new Map(Object.entries({
   "com.yechan.threaddeck.sidechat": ["Codex Side Chat", "Legacy command retained for existing profiles."],
   "com.yechan.threaddeck.send": ["Send to Codex", "Legacy command retained for existing profiles."],
   "com.yechan.threaddeck.fastmode": ["Codex Fast mode", "Legacy Fast mode action retained for existing profiles."],
-  "com.yechan.threaddeck.page.previous": ["Previous page", "Internal navigation for the recommended ThreadDeck profile."]
+  "com.yechan.threaddeck.page.previous": ["Page navigation", "Choose Previous or Next for a theme-aware ThreadDeck page key."]
 }));
 
 function readJson(filePath) {

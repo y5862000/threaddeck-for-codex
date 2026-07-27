@@ -101,7 +101,7 @@ When an ordinary Codex launch has no persistent renderer endpoint, plugin startu
 
 The editable profile source lives under `profiles/source/unpacked`. `scripts/build-profile.sh` creates the `.streamDeckProfile` archive referenced by the plugin manifest. Hardware UUIDs are removed before publication so importing the profile does not bind it to the author's device.
 
-ThreadDeck owns the hidden previous-page action used by its two-page profile. It uses Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while the key participates in plugin-rendered completion overlays.
+ThreadDeck owns the configurable page-navigation action used by its two-page profile. It uses Stream Deck's official `switchToProfile` command with a page index, so navigation remains native while the key participates in plugin-rendered completion overlays. Previous or Next is selected in the Property Inspector; settings-free legacy instances still default to Previous. The action remains available in the Stream Deck action list because, unlike Elgato's generic navigation actions, its key artwork follows ThreadDeck's light and dark appearance.
 
 The Dashboard keeps a Current-configured Codex task at keypad position `0,1` and the combined Effort/Fast control at `1,1`. Three copies of the grouped Codex command action are configured as New Task, Side Chat, and Send. The second page reuses the grouped Codex task action for Top 1–7. Both grouped actions persist their selection through an autosaving Property Inspector.
 

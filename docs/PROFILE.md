@@ -19,7 +19,7 @@ The release pipeline also exports `threaddeck-for-codex-neo.streamDeckProfile` a
 
 | Weekly quota | New task | Side Chat | Send |
 |---|---|---|---|
-| Current task | Effort + Fast | Microphone | Previous page |
+| Current task | Effort + Fast | Microphone | Page navigation (Previous) |
 
 This is the recommended everyday page: monitor the task selected in Codex, set the next response's Effort/Fast state, dictate, and send without changing pages.
 
@@ -29,7 +29,7 @@ The three top-row workflow keys are copies of the same **Codex command** action,
 
 | Top Task 1 | Top Task 2 | Top Task 3 | Top Task 4 |
 |---|---|---|---|
-| Top Task 5 | Top Task 6 | Top Task 7 | Previous page |
+| Top Task 5 | Top Task 6 | Top Task 7 | Page navigation (Previous) |
 
 Every task key on this page is another copy of the same **Codex task** action with Top 1–7 selected in its Property Inspector. Add another copy and choose Top 8 for a custom layout.
 
@@ -37,6 +37,6 @@ Every task key on this page is another copy of the same **Codex task** action wi
 
 - Duplicate the profile in Stream Deck before making a large rearrangement.
 - Select a key to change its Task slot or Command in the autosaving Property Inspector.
-- Keep the bundled Previous Page key if you retain both pages.
+- Keep the bundled ThreadDeck **Page navigation** key if you retain both pages. It is also available in the ThreadDeck action list, lets you choose Previous or Next, and follows light/dark appearance unlike Stream Deck's generic navigation actions.
 - The profile source is hardware-UUID-free and lives under [`profiles/source/unpacked`](../profiles/source/unpacked).
 - The release audit verifies the Neo model and every recommended key coordinate before publishing.

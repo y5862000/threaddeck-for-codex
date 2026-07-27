@@ -95,7 +95,10 @@ const {
   permissionIssueForHealth,
   permissionIssueLabel
 } = require("./permission-health");
-const { resolveProfilePageTarget } = require("./profile-navigation");
+const {
+  pageDirectionFromSettings,
+  resolveProfilePageTarget
+} = require("./profile-navigation");
 const {
   codexCommandFromSettings,
   taskSlotFromSettings
@@ -2397,8 +2400,8 @@ function sideChatSvg() {
     <path d="M72 52V92M52 72H92" fill="none" stroke="${THEME.text}" stroke-width="5.5" stroke-linecap="round"/>`);
 }
 
-function pageNavigationSvg(action) {
-  const direction = PAGE_DIRECTION_BY_ACTION.get(action);
+function pageNavigationSvg(action, settings = {}) {
+  const direction = pageDirectionFromSettings(action, settings);
   if (!direction) return null;
   const chevron = direction < 0 ? "M92 42L62 72L92 102" : "M52 42L82 72L52 102";
   const railX = direction < 0 ? 48 : 96;
@@ -2450,7 +2453,9 @@ function staticActionSvg(action, context = null) {
     );
   }
   if (action === ACTIONS.sideChat) return sideChatSvg();
-  if (PAGE_DIRECTION_BY_ACTION.has(action)) return pageNavigationSvg(action);
+  if (PAGE_DIRECTION_BY_ACTION.has(action)) {
+    return pageNavigationSvg(action, context ? settingsForContext(context) : {});
+  }
   return null;
 }
 
@@ -9970,7 +9975,7 @@ function switchProfilePage(context, device, action, settings = {}) {
   };
   send(message);
   runtimeTrace("page-navigation", {
-    phase: action === ACTIONS.pagePrevious ? "previous" : "next",
+    phase: target.direction < 0 ? "previous" : "next",
     result: String(target.page)
   });
   return true;

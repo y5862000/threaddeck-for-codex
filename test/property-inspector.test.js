@@ -35,8 +35,10 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
     ["settings-loading", new FakeElement()],
     ["task-settings", new FakeElement()],
     ["command-settings", new FakeElement()],
+    ["navigation-settings", new FakeElement()],
     ["task-source", new FakeElement({ setting: "taskSource" })],
     ["command", new FakeElement({ setting: "command" })],
+    ["page-direction", new FakeElement({ setting: "pageDirection" })],
     ["save-status", new FakeElement()]
   ]);
   const optionElements = new Map();
@@ -83,7 +85,11 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
       },
       querySelectorAll(selector) {
         if (selector === "select[data-setting]") {
-          return [elements.get("task-source"), elements.get("command")];
+          return [
+            elements.get("task-source"),
+            elements.get("command"),
+            elements.get("page-direction")
+          ];
         }
         return [];
       }
@@ -113,6 +119,7 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
   assert.equal(elements.get("settings-loading").hidden, true);
   assert.equal(elements.get("task-settings").hidden, false);
   assert.equal(elements.get("command-settings").hidden, true);
+  assert.equal(elements.get("navigation-settings").hidden, true);
   assert.equal(elements.get("task-source").value, "top3");
 
   const socket = sockets[0];
@@ -128,5 +135,31 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
     event: "setSettings",
     context: "task-context",
     payload: { taskSource: "top4" }
+  });
+
+  sandbox.connectElgatoStreamDeckSocket(
+    "28197",
+    "navigation-context",
+    "registerPropertyInspector",
+    {},
+    {
+      action: "com.yechan.threaddeck.page.previous",
+      payload: { settings: { currentPage: 0 } }
+    }
+  );
+
+  assert.equal(elements.get("task-settings").hidden, true);
+  assert.equal(elements.get("command-settings").hidden, true);
+  assert.equal(elements.get("navigation-settings").hidden, false);
+  assert.equal(elements.get("page-direction").value, "previous");
+
+  const navigationSocket = sockets[1];
+  navigationSocket.open();
+  elements.get("page-direction").value = "next";
+  elements.get("page-direction").listeners.get("change")();
+  assert.deepEqual(navigationSocket.sent[1], {
+    event: "setSettings",
+    context: "navigation-context",
+    payload: { currentPage: 0, pageDirection: "next" }
   });
 });

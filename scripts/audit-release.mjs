@@ -65,14 +65,16 @@ const expectedVisibleActionUuids = [
   "com.yechan.threaddeck.thread1",
   "com.yechan.threaddeck.newthread",
   "com.yechan.threaddeck.voice",
-  "com.yechan.threaddeck.reasoning"
+  "com.yechan.threaddeck.reasoning",
+  "com.yechan.threaddeck.page.previous"
 ];
 if (JSON.stringify(visibleActionUuids) !== JSON.stringify(expectedVisibleActionUuids)) {
-  failures.push("Marketplace action list is not the five-action Codex-focused layout");
+  failures.push("Marketplace action list is not the six-action Codex-focused layout");
 }
 for (const uuid of [
   "com.yechan.threaddeck.thread1",
-  "com.yechan.threaddeck.newthread"
+  "com.yechan.threaddeck.newthread",
+  "com.yechan.threaddeck.page.previous"
 ]) {
   const action = pluginManifest.Actions.find((candidate) => candidate.UUID === uuid);
   if (action?.PropertyInspectorPath !== "property-inspector/index.html") {
@@ -104,7 +106,7 @@ const expectedProfileActions = {
     "0,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "current" } },
     "1,1": { uuid: "com.yechan.threaddeck.reasoning" },
     "2,1": { uuid: "com.yechan.threaddeck.voice" },
-    "3,1": { uuid: "com.yechan.threaddeck.page.previous", settings: { currentPage: 0, pageCount: 2 } }
+    "3,1": { uuid: "com.yechan.threaddeck.page.previous", settings: { currentPage: 0, pageDirection: "previous" } }
   },
   THREADS: {
     "0,0": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top1" } },
@@ -114,7 +116,7 @@ const expectedProfileActions = {
     "0,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top5" } },
     "1,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top6" } },
     "2,1": { uuid: "com.yechan.threaddeck.thread1", settings: { taskSource: "top7" } },
-    "3,1": { uuid: "com.yechan.threaddeck.page.previous", settings: { currentPage: 1, pageCount: 2 } }
+    "3,1": { uuid: "com.yechan.threaddeck.page.previous", settings: { currentPage: 1, pageDirection: "previous" } }
   }
 };
 const profilePagesRoot = path.join(path.dirname(profileManifest), "Profiles");

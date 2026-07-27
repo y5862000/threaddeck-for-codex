@@ -74,6 +74,7 @@ const {
 } = require("../src/action-settings");
 const {
   inferThreadDeckPage,
+  pageDirectionFromSettings,
   resolveProfilePageTarget
 } = require("../src/profile-navigation");
 
@@ -145,7 +146,22 @@ test("profile navigation infers the visible page when a newly placed key has no 
       {},
       [ACTIONS.topThread1, ACTIONS.thread4, ACTIONS.pagePrevious]
     ),
-    { currentPage: 1, pageCount: 2, page: 0, source: "visible-actions" }
+    { currentPage: 1, direction: -1, pageCount: 2, page: 0, source: "visible-actions" }
+  );
+});
+
+test("page navigation exposes only relative previous and next directions", () => {
+  assert.equal(pageDirectionFromSettings(ACTIONS.pagePrevious, {}), -1);
+  assert.equal(pageDirectionFromSettings(ACTIONS.pagePrevious, { pageDirection: "next" }), 1);
+  assert.equal(pageDirectionFromSettings(ACTIONS.pagePrevious, { pageDirection: "invalid" }), -1);
+
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      { pageDirection: "next", currentPage: "0" },
+      [ACTIONS.weekly]
+    ),
+    { currentPage: 0, direction: 1, pageCount: 2, page: 1, source: "settings" }
   );
 });
 
@@ -153,10 +169,10 @@ test("profile navigation prefers valid settings and fails closed on an ambiguous
   assert.deepEqual(
     resolveProfilePageTarget(
       ACTIONS.pagePrevious,
-      { currentPage: "1", pageCount: "2" },
+      { currentPage: "1" },
       [ACTIONS.weekly]
     ),
-    { currentPage: 1, pageCount: 2, page: 0, source: "settings" }
+    { currentPage: 1, direction: -1, pageCount: 2, page: 0, source: "settings" }
   );
   assert.equal(
     resolveProfilePageTarget(

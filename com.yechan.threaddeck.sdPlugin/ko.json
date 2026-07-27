@@ -66,7 +66,7 @@
     "Tooltip": "한 번 눌렀다 놓으면 현재 Codex 작업의 Fast mode를 켜거나 끕니다. 작업이나 사이드챗 전환 중에는 새 작성창을 기다리고, 실제 확인된 상태만 번개에 반영합니다."
   },
   "com.yechan.threaddeck.page.previous": {
-    "Name": "이전 페이지",
-    "Tooltip": "ThreadDeck 프로필의 이전 페이지로 이동합니다."
+    "Name": "페이지 전환",
+    "Tooltip": "이전 또는 다음 방향을 골라 화면 모드에 맞는 ThreadDeck 페이지 버튼으로 사용합니다."
   }
 }

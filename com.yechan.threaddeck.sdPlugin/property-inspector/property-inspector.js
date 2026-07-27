@@ -2,6 +2,7 @@
 
 const TASK_ACTION = "com.yechan.threaddeck.thread1";
 const COMMAND_ACTION = "com.yechan.threaddeck.newthread";
+const NAVIGATION_ACTION = "com.yechan.threaddeck.page.previous";
 const COPY = {
   en: {
     loading: "Loading settings…",
@@ -13,6 +14,9 @@ const COPY = {
     sideChat: "Side Chat",
     send: "Send",
     commandHelp: "Send uses Return on a tap and Command+Return after the key turns blue.",
+    directionLabel: "Direction",
+    previousPage: "Previous page",
+    nextPage: "Next page",
     help: "Help",
     saved: "Saved"
   },
@@ -26,6 +30,9 @@ const COPY = {
     sideChat: "사이드챗",
     send: "보내기",
     commandHelp: "보내기는 짧게 누르면 Return, 파란색이 될 때까지 누르면 Command+Return입니다.",
+    directionLabel: "방향",
+    previousPage: "이전 페이지",
+    nextPage: "다음 페이지",
     help: "도움말",
     saved: "저장됨"
   }
@@ -94,18 +101,24 @@ function initializeControls() {
   const loadingPanel = document.getElementById("settings-loading");
   const taskPanel = document.getElementById("task-settings");
   const commandPanel = document.getElementById("command-settings");
+  const navigationPanel = document.getElementById("navigation-settings");
   taskPanel.hidden = action !== TASK_ACTION;
   commandPanel.hidden = action !== COMMAND_ACTION;
+  navigationPanel.hidden = action !== NAVIGATION_ACTION;
   loadingPanel.hidden = true;
 
   const taskSource = document.getElementById("task-source");
   const command = document.getElementById("command");
+  const pageDirection = document.getElementById("page-direction");
   taskSource.value = /^(?:current|top[1-8])$/.test(settings.taskSource)
     ? settings.taskSource
     : "current";
   command.value = /^(?:new-task|side-chat|send)$/.test(settings.command)
     ? settings.command
     : "new-task";
+  pageDirection.value = /^(?:previous|next)$/.test(settings.pageDirection)
+    ? settings.pageDirection
+    : "previous";
 
   for (const select of document.querySelectorAll("select[data-setting]")) {
     select.addEventListener("change", () => {

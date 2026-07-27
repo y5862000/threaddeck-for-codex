@@ -201,7 +201,7 @@
         "3,1": {
           "ActionID": "a0869e99-2588-413e-81f5-14e1f08a1b96",
           "LinkedTitle": false,
-          "Name": "이전 페이지",
+          "Name": "Page navigation",
           "Plugin": {
             "Name": "ThreadDeck for Codex",
             "UUID": "com.yechan.threaddeck",
@@ -210,7 +210,7 @@
           "Resources": null,
           "Settings": {
             "currentPage": 1,
-            "pageCount": 2
+            "pageDirection": "previous"
           },
           "State": 0,
           "States": [
