@@ -136,6 +136,7 @@ const {
   COMPLETION_STARTUP_GRACE_MS,
   CURRENT_THREAD_SLOT,
   DESKTOP_LOG_PATH_CACHE_MS,
+  DISTRIBUTED_PROFILE_DISPLAY_NAME,
   DISTRIBUTED_PROFILE_NAME,
   FAST_MODE_LONG_PRESS_MS,
   GLOBAL_COMPLETION_FRAME_INTERVAL_MS,
@@ -10155,7 +10156,10 @@ async function switchProfilePage(context, device, action, settings = {}, options
   const profileStateReader = options.profileStateReader ?? readInstalledProfilePageState;
   let profileState = null;
   try {
-    profileState = await profileStateReader(context);
+    profileState = await profileStateReader(context, {
+      actionUUID: action,
+      profileName: DISTRIBUTED_PROFILE_DISPLAY_NAME
+    });
   } catch {
     // The action's saved page and visible action set remain a safe fallback.
   }

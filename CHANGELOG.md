@@ -4,6 +4,10 @@
 
 ## Unreleased
 
+## 0.5.15 — 2026-07-27
+
+- Keep relative page navigation on ThreadDeck's own dynamically rendered action, preserving the matching light/dark key artwork, while the actual move still uses Stream Deck's official profile-switch command. Installed custom profiles now resolve their declared current page even when Stream Deck's runtime action context differs from the ActionID saved in `ProfilesV3`, so Previous works from page 3 and every later page without falling back to a two-page guess.
+
 ## 0.5.14 — 2026-07-27
 
 - Confirm task-key dictation submissions from the target task model instead of treating a cleared composer as proof of delivery. A new request, queue entry, or turn now produces **Sent**; an already-cleared composer suppresses a duplicate retry without creating a false success or **Try again** result.
