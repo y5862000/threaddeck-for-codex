@@ -4,6 +4,11 @@
 
 ## Unreleased
 
+## 0.5.14 — 2026-07-27
+
+- Confirm task-key dictation submissions from the target task model instead of treating a cleared composer as proof of delivery. A new request, queue entry, or turn now produces **Sent**; an already-cleared composer suppresses a duplicate retry without creating a false success or **Try again** result.
+- Resolve relative page navigation from the exact action instance in the installed Stream Deck profile. Previous and Next now use the profile's real page order and wrap correctly across arbitrary custom page counts, including the third page and beyond, while retaining the conservative two-page fallback when profile state is temporarily unavailable.
+
 ## 0.5.13 — 2026-07-27
 
 - Restored page navigation to the Stream Deck action list as one configurable **Page navigation** control. Its Property Inspector selects Previous or Next, while existing settings-free instances remain Previous. Custom profiles can therefore use ThreadDeck's light/dark artwork and completion feedback instead of Elgato's fixed generic navigation key.
