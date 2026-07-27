@@ -163,6 +163,34 @@ test("page navigation exposes only relative previous and next directions", () =>
     ),
     { currentPage: 0, direction: 1, pageCount: 2, page: 1, source: "settings" }
   );
+
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      { pageDirection: "previous", currentPage: "1" },
+      [],
+      { currentPage: 6, pageCount: 7, source: "installed-profile" }
+    ),
+    { currentPage: 6, direction: -1, pageCount: 7, page: 5, source: "installed-profile" }
+  );
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      { pageDirection: "next" },
+      [],
+      { currentPage: 6, pageCount: 7, source: "installed-profile" }
+    ),
+    { currentPage: 6, direction: 1, pageCount: 7, page: 0, source: "installed-profile" }
+  );
+  assert.deepEqual(
+    resolveProfilePageTarget(
+      ACTIONS.pagePrevious,
+      { pageDirection: "previous" },
+      [],
+      { currentPage: 0, pageCount: 7, source: "installed-profile" }
+    ),
+    { currentPage: 0, direction: -1, pageCount: 7, page: 6, source: "installed-profile" }
+  );
 });
 
 test("profile navigation prefers valid settings and fails closed on an ambiguous page", () => {

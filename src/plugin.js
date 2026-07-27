@@ -99,6 +99,7 @@ const {
   pageDirectionFromSettings,
   resolveProfilePageTarget
 } = require("./profile-navigation");
+const { readInstalledProfilePageState } = require("./streamdeck-profile-state");
 const {
   codexCommandFromSettings,
   taskSlotFromSettings
@@ -10149,9 +10150,21 @@ function visibleActionsForDevice(device) {
   return actions;
 }
 
-function switchProfilePage(context, device, action, settings = {}) {
+async function switchProfilePage(context, device, action, settings = {}, options = {}) {
   if (!device) return false;
-  const target = resolveProfilePageTarget(action, settings, visibleActionsForDevice(device));
+  const profileStateReader = options.profileStateReader ?? readInstalledProfilePageState;
+  let profileState = null;
+  try {
+    profileState = await profileStateReader(context);
+  } catch {
+    // The action's saved page and visible action set remain a safe fallback.
+  }
+  const target = resolveProfilePageTarget(
+    action,
+    settings,
+    visibleActionsForDevice(device),
+    profileState
+  );
   if (!target) {
     runtimeTrace("page-navigation", { phase: "resolve", result: "failed" });
     showFeedback(context, "error", t("feedback.stateCheck"));
@@ -10173,7 +10186,7 @@ function switchProfilePage(context, device, action, settings = {}) {
   send(message);
   runtimeTrace("page-navigation", {
     phase: target.direction < 0 ? "previous" : "next",
-    result: String(target.page)
+    result: `${target.page}:${target.source}`
   });
   return true;
 }
@@ -10357,7 +10370,12 @@ function registerPlugin() {
       } else if (threadSlotForContext(message.context, action) !== undefined) {
         endThreadPress(message.context);
       } else if (PAGE_DIRECTION_BY_ACTION.has(action)) {
-        switchProfilePage(message.context, message.device, action, message.payload?.settings);
+        void switchProfilePage(
+          message.context,
+          message.device,
+          action,
+          message.payload?.settings
+        );
       } else if (action === ACTIONS.weekly) {
         void refreshUsage(message.context);
       } else if (codexCommandForContext(message.context, action) === "new-task") {

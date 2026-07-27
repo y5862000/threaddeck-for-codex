@@ -45,14 +45,25 @@ function pageDirectionFromSettings(action, settings = {}) {
   return PAGE_DIRECTION_BY_ACTION.get(action) ?? null;
 }
 
-function resolveProfilePageTarget(action, settings = {}, visibleActions = []) {
+function resolveProfilePageTarget(action, settings = {}, visibleActions = [], profileState = null) {
   const direction = pageDirectionFromSettings(action, settings);
   if (!direction) return null;
 
-  const pageCount = DEFAULT_PROFILE_PAGE_COUNT;
+  const observedPageCount = integerSetting(profileState?.pageCount);
+  const observedPage = integerSetting(profileState?.currentPage);
+  const hasObservedProfileState = observedPageCount !== null
+    && observedPageCount > 0
+    && observedPage !== null
+    && observedPage >= 0
+    && observedPage < observedPageCount;
+  const pageCount = hasObservedProfileState
+    ? observedPageCount
+    : DEFAULT_PROFILE_PAGE_COUNT;
   const configuredPage = integerSetting(settings?.currentPage);
   const inferredPage = inferThreadDeckPage(visibleActions);
-  const currentPage = configuredPage !== null
+  const currentPage = hasObservedProfileState
+    ? observedPage
+    : configuredPage !== null
     && configuredPage >= 0
     && configuredPage < pageCount
     ? configuredPage
@@ -66,7 +77,9 @@ function resolveProfilePageTarget(action, settings = {}, visibleActions = []) {
     direction,
     pageCount,
     page: (currentPage + direction + pageCount) % pageCount,
-    source: configuredPage === currentPage ? "settings" : "visible-actions"
+    source: hasObservedProfileState
+      ? String(profileState?.source ?? "profile-state")
+      : configuredPage === currentPage ? "settings" : "visible-actions"
   };
 }
 
