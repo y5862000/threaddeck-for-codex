@@ -164,6 +164,7 @@ const {
   VOICE_AUTO_SUBMIT_STABLE_MS,
   VOICE_COMPLETE_DISPLAY_MS,
   VOICE_ERROR_DISPLAY_MS,
+  VOICE_REQUEST_VERIFY_DELAYS_MS,
   VOICE_START_VERIFY_MS,
   VOICE_SUBMIT_VERIFY_DELAYS_MS,
   VOICE_TARGET_OPEN_HINT_MS,
@@ -3417,6 +3418,105 @@ async function waitForVoiceDraftReset(context, targetThreadId, tracker, options 
   return false;
 }
 
+function normalizeVoiceSubmitOutcome(value) {
+  if (!value || typeof value !== "object") {
+    return {
+      dispatched: Boolean(value),
+      backend: null,
+      acknowledged: false
+    };
+  }
+  const dispatched = value.ok === true || value.dispatched === true;
+  return {
+    dispatched,
+    backend: typeof value.backend === "string" ? value.backend : null,
+    // This acknowledges only that Codex's native command dispatcher handled
+    // CODEX. It is deliberately not sufficient for a Sent visual; the target
+    // task must expose a new request or queue entry below.
+    acknowledged: dispatched
+      && value.backend === "micro"
+      && value.acknowledged === true
+  };
+}
+
+function voiceSubmissionStateForThread(targetThreadId, threads = combinedVisibleThreads()) {
+  const thread = threads.find((candidate) => candidate?.id === targetThreadId) ?? null;
+  if (!thread) return null;
+  const queueCount = Math.max(0, Number.parseInt(thread.queueCount, 10) || 0);
+  const promptCount = Number.isFinite(Number(thread.promptCount))
+    ? Math.max(0, Number(thread.promptCount))
+    : null;
+  const turnId = typeof thread.turnId === "string" && thread.turnId
+    ? thread.turnId
+    : typeof thread.latestTurnId === "string" && thread.latestTurnId
+      ? thread.latestTurnId
+      : null;
+  return {
+    threadId: targetThreadId,
+    status: typeof thread.status === "string" ? thread.status : null,
+    turnId,
+    startedAtMs: Number.isFinite(thread.startedAtMs) ? thread.startedAtMs : null,
+    queueCount,
+    promptCount
+  };
+}
+
+function voiceSubmissionReceiptEvidence(baseline, current) {
+  if (!baseline || !current || baseline.threadId !== current.threadId) return null;
+  if (Number.isFinite(baseline.promptCount)
+      && Number.isFinite(current.promptCount)
+      && current.promptCount > baseline.promptCount) return "request-recorded";
+  if (current.queueCount > baseline.queueCount) return "queue-increased";
+
+  const turnChanged = Boolean(current.turnId)
+    && current.turnId !== baseline.turnId;
+  const startAdvanced = Number.isFinite(current.startedAtMs)
+    && (!Number.isFinite(baseline.startedAtMs)
+      || current.startedAtMs > baseline.startedAtMs);
+  const becameWorking = baseline.status !== "working" && current.status === "working";
+  const turnAdvanced = turnChanged || startAdvanced;
+  if (!turnAdvanced && !becameWorking) return null;
+
+  // With no earlier queue, the newly observed turn is the submitted request.
+  // If an older queue item was already present, its consumption would reduce
+  // the count by one. A turn advance without that reduction proves another
+  // request was accepted during the handoff.
+  if (baseline.queueCount === 0) return "turn-started";
+  if (!turnAdvanced) return null;
+  return current.queueCount >= baseline.queueCount
+    ? "queue-retained-across-turn"
+    : null;
+}
+
+async function readVoiceSubmissionState(targetThreadId) {
+  // A failed refresh preserves the last good task snapshot. Return that
+  // snapshot as the baseline so a later successful poll can still prove the
+  // request transition instead of failing before dispatch.
+  await refreshThreads(null, { retryDelays: [] });
+  return voiceSubmissionStateForThread(targetThreadId);
+}
+
+async function waitForVoiceSubmissionReceipt(
+  context,
+  targetThreadId,
+  tracker,
+  baseline,
+  options = {}
+) {
+  if (!baseline) return null;
+  const stateReader = options.submissionStateReader ?? readVoiceSubmissionState;
+  const sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+  const delays = options.submissionDelays ?? VOICE_REQUEST_VERIFY_DELAYS_MS;
+  for (const delayMs of delays) {
+    await sleep(delayMs);
+    if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return null;
+    const current = await stateReader(targetThreadId);
+    const evidence = voiceSubmissionReceiptEvidence(baseline, current);
+    if (evidence) return evidence;
+  }
+  return null;
+}
+
 async function submitCompletedVoiceTranscription(context, targetThreadId, tracker, options = {}) {
   const openApp = options.openApp
     ?? (() => execFileAsync("/usr/bin/open", ["-b", "com.openai.codex"], { timeout: 5000 }));
@@ -3430,7 +3530,15 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
           micro: (micro) => micro.submit(),
           legacy: () => bridge("codex-submit-composer", null, { quiet: true })
         }, { quiet: true });
-        return result.ok;
+        return {
+          ok: result.ok,
+          backend: result.backend,
+          acknowledged: result.backend === "micro"
+            && result.ok
+            && (result.value === true
+              || result.value?.delivered === true
+              || result.value?.handled === true)
+        };
       });
   const waitForDraftReset = options.waitForDraftReset ?? waitForVoiceDraftReset;
   const scheduleRefresh = options.scheduleRefresh ?? (() => setTimeout(() => void refreshThreads(), 500));
@@ -3439,6 +3547,10 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
     && !options.bridge
     && !options.submit
     && !options.targetFocused;
+  const submissionStateReader = options.submissionStateReader
+    ?? (productionControl ? readVoiceSubmissionState : null);
+  const waitForSubmissionReceipt = options.waitForSubmissionReceipt
+    ?? waitForVoiceSubmissionReceipt;
   const microStatus = options.microStatus
     ?? (productionControl ? microControlThreadStatus : null);
   const requireTargetFocus = async (phase) => {
@@ -3479,33 +3591,118 @@ async function submitCompletedVoiceTranscription(context, targetThreadId, tracke
     if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
     if (!microTargetVerified && !await requireTargetFocus("target-check")) return;
 
-    const clickedSubmit = await submit();
-    let confirmed = clickedSubmit
-      && await waitForDraftReset(context, targetThreadId, tracker, options);
+    let submissionBaseline = null;
+    if (submissionStateReader) {
+      submissionBaseline = await submissionStateReader(targetThreadId);
+      runtimeTrace("voice-submit", {
+        phase: "baseline",
+        result: submissionBaseline ? "ready" : "unavailable"
+      });
+      if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
+    }
+    const submitOutcome = normalizeVoiceSubmitOutcome(await submit());
+    runtimeTrace("voice-submit", {
+      phase: "dispatch",
+      strategy: submitOutcome.backend ?? (microTargetVerified ? "micro" : "legacy"),
+      result: submitOutcome.acknowledged
+        ? "acknowledged"
+        : submitOutcome.dispatched ? "delivered" : "failed"
+    });
+    let confirmationEvidence = null;
+    if (submitOutcome.dispatched && submissionStateReader && submissionBaseline) {
+      confirmationEvidence = await waitForSubmissionReceipt(
+        context,
+        targetThreadId,
+        tracker,
+        submissionBaseline,
+        { ...options, submissionStateReader }
+      );
+    }
+    // Explicit test adapters and legacy callers without a task-state reader
+    // retain the original draft-reset contract. Production Sent state is
+    // based only on a new target request/turn or queue entry.
+    let confirmed = Boolean(confirmationEvidence);
+    if (!submissionStateReader && submitOutcome.dispatched) {
+      confirmed = await waitForDraftReset(context, targetThreadId, tracker, options);
+      if (confirmed) {
+        runtimeTrace("voice-submit", { phase: "confirmation", result: "draft-reset" });
+      }
+    } else if (confirmationEvidence) {
+      runtimeTrace("voice-submit", {
+        phase: "confirmation",
+        result: confirmationEvidence
+      });
+    }
     const allowKeyboardFallback = options.allowKeyboardFallback ?? !microTargetVerified;
     if (!confirmed
         && allowKeyboardFallback
         && voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) {
       // The explicit button is preferred, but Codex can rebuild the composer
       // between transcription and submission. Refocus the draft and retry with
-      // Return, then verify the draft actually cleared before showing success.
+      // Return, then verify the target task accepted a request before showing
+      // success. The draft probe is only a duplicate-send guard: an already
+      // cleared composer suppresses the retry but never produces Sent itself.
       // Recheck immediately before that fallback so a task switch during the
       // first confirmation wait can never submit into the new task.
       if (!await requireTargetFocus("fallback-target-check")) return;
-      if (!bridge("codex-focus-composer", null, { quiet: true })) {
-        failVoiceTranscription(context);
-        runtimeTrace("voice-submit", { phase: "fallback-focus", result: "failed" });
-        return;
+      if (submissionStateReader && await waitForDraftReset(
+        context,
+        targetThreadId,
+        tracker,
+        {
+          ...options,
+          delays: options.fallbackDraftGuardDelays ?? [0, 80]
+        }
+      )) {
+        runtimeTrace("voice-submit", {
+          phase: "fallback-suppressed",
+          result: "draft-cleared-without-task-receipt"
+        });
+        // A cleared draft says only that retrying could duplicate the message.
+        // Give the task model one final observation window, but never turn the
+        // cleared input itself into a successful Sent result.
+        if (submissionBaseline) {
+          confirmationEvidence = await waitForSubmissionReceipt(
+            context,
+            targetThreadId,
+            tracker,
+            submissionBaseline,
+            {
+              ...options,
+              submissionStateReader,
+              submissionDelays: options.postDraftReceiptDelays ?? [120, 240, 480, 960]
+            }
+          );
+          confirmed = Boolean(confirmationEvidence);
+        }
+      } else {
+        if (!bridge("codex-focus-composer", null, { quiet: true })) {
+          failVoiceTranscription(context);
+          runtimeTrace("voice-submit", { phase: "fallback-focus", result: "failed" });
+          return;
+        }
+        if (!bridge("send", context)) {
+          failVoiceTranscription(context);
+          return;
+        }
+        if (submissionStateReader && submissionBaseline) {
+          confirmationEvidence = await waitForSubmissionReceipt(
+            context,
+            targetThreadId,
+            tracker,
+            submissionBaseline,
+            { ...options, submissionStateReader }
+          );
+          confirmed = Boolean(confirmationEvidence);
+        } else {
+          confirmed = await waitForDraftReset(context, targetThreadId, tracker, options);
+        }
       }
-      if (!bridge("send", context)) {
-        failVoiceTranscription(context);
-        return;
-      }
-      confirmed = await waitForDraftReset(context, targetThreadId, tracker, options);
     }
     if (!voiceSubmissionStillCurrent(context, targetThreadId, tracker.sessionId)) return;
     if (!confirmed) {
       failVoiceTranscription(context);
+      runtimeTrace("voice-submit", { phase: "confirmation", result: "unconfirmed" });
       console.error("Codex dictated message submission could not be confirmed");
       return;
     }
@@ -11697,6 +11894,154 @@ async function verifyVoiceSubmissionPolicy() {
   const successRequiresConfirmation = verificationAttempts === 2
     && voiceStateByContext.get(context) === "sent";
 
+  const receiptBaseline = {
+    threadId: targetThreadId,
+    status: "working",
+    turnId: "turn-a",
+    startedAtMs: 1_000,
+    queueCount: 0,
+    promptCount: null
+  };
+  const queueIncreaseIsReceipt = voiceSubmissionReceiptEvidence(
+    receiptBaseline,
+    { ...receiptBaseline, queueCount: 1 }
+  ) === "queue-increased";
+  const newTurnIsReceipt = voiceSubmissionReceiptEvidence(
+    receiptBaseline,
+    { ...receiptBaseline, turnId: "turn-b", startedAtMs: 2_000 }
+  ) === "turn-started";
+  const sideChatPromptIsReceipt = voiceSubmissionReceiptEvidence(
+    { ...receiptBaseline, promptCount: 1 },
+    { ...receiptBaseline, promptCount: 2 }
+  ) === "request-recorded";
+  const consumedOlderQueueIsNotReceipt = voiceSubmissionReceiptEvidence(
+    { ...receiptBaseline, queueCount: 1 },
+    {
+      ...receiptBaseline,
+      turnId: "turn-b",
+      startedAtMs: 2_000,
+      queueCount: 0
+    }
+  ) === null;
+  const queuedStatusTransitionIsNotReceipt = voiceSubmissionReceiptEvidence(
+    { ...receiptBaseline, status: "completed", queueCount: 1 },
+    { ...receiptBaseline, status: "working", queueCount: 1 }
+  ) === null;
+  const retainedQueueAcrossTurnIsReceipt = voiceSubmissionReceiptEvidence(
+    { ...receiptBaseline, queueCount: 1 },
+    {
+      ...receiptBaseline,
+      turnId: "turn-b",
+      startedAtMs: 2_000,
+      queueCount: 1
+    }
+  ) === "queue-retained-across-turn";
+
+  voiceStateByContext.set(context, "submitting");
+  voiceTargetThreadByContext.set(context, targetThreadId);
+  voiceSessionIdByContext.set(context, sessionId);
+  const queuedReceiptStates = [
+    receiptBaseline,
+    { ...receiptBaseline, queueCount: 1 }
+  ];
+  let queueReceiptReads = 0;
+  let queueReceiptDraftChecks = 0;
+  let queueReceiptRefreshes = 0;
+  await submitCompletedVoiceTranscription(context, targetThreadId, {
+    ...tracker,
+    lastObserved: transcript
+  }, {
+    openApp: async () => {},
+    sleep: async () => {},
+    targetFocused: async () => true,
+    submit: async () => ({
+      ok: true,
+      backend: "micro",
+      acknowledged: true
+    }),
+    submissionStateReader: async () => {
+      queueReceiptReads += 1;
+      return queuedReceiptStates.shift() ?? queuedReceiptStates.at(-1) ?? {
+        ...receiptBaseline,
+        queueCount: 1
+      };
+    },
+    submissionDelays: [0],
+    waitForDraftReset: async () => {
+      queueReceiptDraftChecks += 1;
+      return false;
+    },
+    scheduleRefresh: () => { queueReceiptRefreshes += 1; }
+  });
+  const queueReceiptConfirmsMicroSubmission = queueReceiptReads === 2
+    && queueReceiptDraftChecks === 0
+    && queueReceiptRefreshes === 1
+    && voiceStateByContext.get(context) === "sent";
+
+  voiceStateByContext.set(context, "submitting");
+  voiceTargetThreadByContext.set(context, targetThreadId);
+  voiceSessionIdByContext.set(context, sessionId);
+  let acknowledgementOnlyReads = 0;
+  const originalConsoleError = console.error;
+  try {
+    console.error = () => {};
+    await submitCompletedVoiceTranscription(context, targetThreadId, {
+      ...tracker,
+      lastObserved: transcript
+    }, {
+      openApp: async () => {},
+      sleep: async () => {},
+      targetFocused: async () => true,
+      submit: async () => ({
+        ok: true,
+        backend: "micro",
+        acknowledged: true
+      }),
+      submissionStateReader: async () => {
+        acknowledgementOnlyReads += 1;
+        return receiptBaseline;
+      },
+      submissionDelays: [0],
+      allowKeyboardFallback: false,
+      scheduleRefresh: () => {}
+    });
+  } finally {
+    console.error = originalConsoleError;
+  }
+  const microAcknowledgementAloneIsInsufficient = acknowledgementOnlyReads === 2
+    && voiceStateByContext.get(context) === "error";
+
+  voiceStateByContext.set(context, "submitting");
+  voiceTargetThreadByContext.set(context, targetThreadId);
+  voiceSessionIdByContext.set(context, sessionId);
+  const draftOnlyCommands = [];
+  const draftOnlyConsoleError = console.error;
+  try {
+    console.error = () => {};
+    await submitCompletedVoiceTranscription(context, targetThreadId, {
+      ...tracker,
+      lastObserved: transcript
+    }, {
+      openApp: async () => {},
+      sleep: async () => {},
+      targetFocused: async () => true,
+      submit: async () => true,
+      submissionStateReader: async () => receiptBaseline,
+      submissionDelays: [0],
+      postDraftReceiptDelays: [0],
+      waitForDraftReset: async () => true,
+      bridge(command) {
+        draftOnlyCommands.push(command);
+        return true;
+      },
+      scheduleRefresh: () => {}
+    });
+  } finally {
+    console.error = draftOnlyConsoleError;
+  }
+  const draftResetAloneIsInsufficient = draftOnlyCommands.length === 0
+    && voiceStateByContext.get(context) === "error";
+
   voiceStateByContext.set(context, "submitting");
   voiceTargetThreadByContext.set(context, targetThreadId);
   voiceSessionIdByContext.set(context, sessionId);
@@ -12306,6 +12651,15 @@ async function verifyVoiceSubmissionPolicy() {
     && acceptedStableCrossSourceReset
     && retriedUnconfirmedSubmit
     && successRequiresConfirmation
+    && queueIncreaseIsReceipt
+    && newTurnIsReceipt
+    && sideChatPromptIsReceipt
+    && consumedOlderQueueIsNotReceipt
+    && queuedStatusTransitionIsNotReceipt
+    && retainedQueueAcrossTurnIsReceipt
+    && queueReceiptConfirmsMicroSubmission
+    && microAcknowledgementAloneIsInsufficient
+    && draftResetAloneIsInsufficient
     && fallbackRechecksTarget
     && sameTitleVoiceGuardUsesUuid
     && staleSubmissionIgnored
@@ -12339,6 +12693,15 @@ async function verifyVoiceSubmissionPolicy() {
     acceptedStableCrossSourceReset,
     retriedUnconfirmedSubmit,
     successRequiresConfirmation,
+    queueIncreaseIsReceipt,
+    newTurnIsReceipt,
+    sideChatPromptIsReceipt,
+    consumedOlderQueueIsNotReceipt,
+    queuedStatusTransitionIsNotReceipt,
+    retainedQueueAcrossTurnIsReceipt,
+    queueReceiptConfirmsMicroSubmission,
+    microAcknowledgementAloneIsInsufficient,
+    draftResetAloneIsInsufficient,
     fallbackRechecksTarget,
     sameTitleVoiceGuardUsesUuid,
     staleSubmissionIgnored,
