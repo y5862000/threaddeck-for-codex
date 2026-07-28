@@ -4,6 +4,8 @@
 
 ## Unreleased
 
+- Tightened the goal-only timing capsule so the unfinished-goal marker and elapsed time read as one centered group, while preserving the existing compact goal-and-queue layout.
+
 ## 0.5.15 — 2026-07-27
 
 - Keep relative page navigation on ThreadDeck's own dynamically rendered action, preserving the matching light/dark key artwork, while the actual move still uses Stream Deck's official profile-switch command. Installed custom profiles now resolve their declared current page even when Stream Deck's runtime action context differs from the ActionID saved in `ProfilesV3`, so Previous works from page 3 and every later page without falling back to a two-page guess.

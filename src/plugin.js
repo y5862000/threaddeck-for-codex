@@ -6905,7 +6905,7 @@ function queueBadgeSvg(thread) {
     <text x="103.5" y="122.5" fill="${THEME.amber}" font-family="${FONT_STACK}" font-size="14.5" font-weight="700" font-variant-numeric="tabular-nums" text-anchor="middle">${label}</text>`;
 }
 
-function goalBadgeSvg(thread) {
+function goalBadgeSvg(thread, queueCount = 0) {
   if (!goalIsUnfinished(thread?.goal)) return "";
   const colors = {
     active: THEME.blue,
@@ -6915,8 +6915,12 @@ function goalBadgeSvg(thread) {
     budgetLimited: THEME.amber
   };
   const color = colors[thread.goal.status] ?? THEME.textSecondary;
+  // A goal by itself has enough room to sit beside the elapsed label as one
+  // centered group. Keep the older left edge only for the compact
+  // goal+queue composition, where the timer and queue badge need that space.
+  const translateX = queueCount > 0 ? 14.6 : 29.6;
   return `
-    <g data-goal="${escapeXml(thread.goal.status)}" transform="translate(14.6 109.2) scale(.69)" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
+    <g data-goal="${escapeXml(thread.goal.status)}" transform="translate(${translateX} 109.2) scale(.69)" fill="none" stroke="${color}" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round">
       <path d="M12 13V2l8 4-8 4"/>
       <path d="M20.561 10.222a9 9 0 1 1-12.55-5.29"/>
       <path d="M8.002 9.997a5 5 0 1 0 8.9 2.02"/>
@@ -6950,7 +6954,7 @@ function threadTimingBarSvg(thread, completionEffect = null) {
   return `
     <rect x="13" y="102" width="118" height="31" rx="11" fill="${THEME.raised}"/>
     ${completionChrome}
-    ${goalBadgeSvg(thread)}
+    ${goalBadgeSvg(thread, queueCount)}
     <text data-thread-timing="base" x="${timingX}" y="${timingBaselineY}" fill="${THEME.textSecondary}" font-family="${FONT_STACK}" font-size="${timingFontSize}" font-weight="600" font-variant-numeric="tabular-nums" text-anchor="middle">${escapeXml(elapsedLabel)}</text>
     ${queueBadgeSvg(thread)}
     ${completionText}`;
@@ -12824,6 +12828,18 @@ async function verifyInteractionPolicy() {
     && blockedGoalMarkup.includes(">02:05</text>");
   const completedGoalHidesBadgeButKeepsTotal = !completedGoalMarkup.includes("data-goal=")
     && completedGoalMarkup.includes(">02:05</text>");
+  const goalOnlyTimingMarkup = threadTimingBarSvg({
+    ...goalThreadBase,
+    status: "working",
+    goal: {
+      status: "active",
+      timeUsedSeconds: 4 * 60 + 30,
+      updatedAtMs: renderTimeMs()
+    }
+  });
+  const goalOnlyTimingIsTightlyGrouped = goalOnlyTimingMarkup.includes(
+    'transform="translate(29.6 109.2) scale(.69)"'
+  ) && goalOnlyTimingMarkup.includes('data-thread-timing="base" x="81"');
   const compactGoalQueueBaselineY = timingTextBaselineY(16.5);
   const compactGoalQueueMarkup = threadTimingBarSvg({
     ...goalThreadBase,
@@ -12836,6 +12852,7 @@ async function verifyInteractionPolicy() {
     }
   }, { strength: 0.5 });
   const compactGoalQueueTimingIsVerticallyCentered = compactGoalQueueBaselineY < 125.5
+    && compactGoalQueueMarkup.includes('transform="translate(14.6 109.2) scale(.69)"')
     && compactGoalQueueMarkup.includes(
       `data-thread-timing="base" x="58" y="${compactGoalQueueBaselineY}"`
     )
@@ -15543,6 +15560,7 @@ async function verifyInteractionPolicy() {
     && activeGoalUsesOfficialBadge
     && blockedGoalBadgeAndTimeFreeze
     && completedGoalHidesBadgeButKeepsTotal
+    && goalOnlyTimingIsTightlyGrouped
     && compactGoalQueueTimingIsVerticallyCentered
     && completedGoalLifetimeFollowsTurn
     && remoteGoalProbeNeedsStableAbsence
@@ -15647,6 +15665,7 @@ async function verifyInteractionPolicy() {
     activeGoalUsesOfficialBadge,
     blockedGoalBadgeAndTimeFreeze,
     completedGoalHidesBadgeButKeepsTotal,
+    goalOnlyTimingIsTightlyGrouped,
     compactGoalQueueTimingIsVerticallyCentered,
     completedGoalLifetimeFollowsTurn,
     remoteGoalProbeNeedsStableAbsence,
