@@ -1279,7 +1279,16 @@ class CodexMicroBridge {
         await this.connect();
       } catch (error) {
         if (error?.delivery !== "none" || !await this.preparedBridge.canAttach()) throw error;
-        await this.prepareCommandBridge();
+        try {
+          await this.prepareCommandBridge();
+        } catch (prepareError) {
+          // Preparation precedes the requested command. Preserve a definite
+          // compatibility rejection here without reclassifying later delivery.
+          if (prepareError?.code === "MICRO_UNAVAILABLE" && prepareError.delivery === "none") {
+            throw microUnavailable(prepareError.message, prepareError);
+          }
+          throw prepareError;
+        }
       }
     })();
     try {

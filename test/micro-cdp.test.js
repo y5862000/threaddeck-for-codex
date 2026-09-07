@@ -2,6 +2,11 @@
 
 const test = require("node:test");
 const assert = require("node:assert/strict");
+const fs = require("node:fs/promises");
+const os = require("node:os");
+const path = require("node:path");
+const { CodexControlPlane } = require("../src/control-plane");
+const { CodexMainInspectorEvaluator, inspectorUnavailable } = require("../src/micro-main-inspector");
 
 const {
   ACTIVATE_RUNTIME_EXPRESSION,
@@ -242,6 +247,81 @@ test("prepares a local command bridge without requiring a renderer launch port",
     delivered: true
   });
   assert.match(evaluated, /__threadDeckPendingEvaluations/);
+});
+
+test("a cold Micro command preserves a real fuse rejection for safe legacy fallback", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "threaddeck-cold-inspector-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const app = path.join(root, "ChatGPT.app");
+  const framework = path.join(app, "Contents/Frameworks/Codex Framework.framework/Codex Framework");
+  await fs.mkdir(path.dirname(framework), { recursive: true });
+  await fs.writeFile(framework, Buffer.concat([
+    Buffer.from("dL7pKGdnNz796PbbjQWNKmHXBZaB9tsX"), Buffer.from([1, 9]), Buffer.from("010011001")
+  ]));
+  const stats = await fs.stat(framework, { bigint: true });
+  let signals = 0;
+  let contacts = 0;
+  let evaluations = 0;
+  let legacyCalls = 0;
+  let mappings = 0;
+  const execFile = async (command, args) => {
+    if (command === "/bin/ps") {
+      return { stdout: `740 1 Sun Jul 26 22:46:04 2026 ${app}/Contents/MacOS/ChatGPT` };
+    }
+    if (args.includes("-FfniD")) {
+      mappings += 1;
+      return { stdout: `p740\nftxt\nD0x${stats.dev.toString(16)}\ni${stats.ino}\nn${framework}\n` };
+    }
+    return { stdout: "" };
+  };
+  const fetch = async () => { contacts += 1; throw new Error("Unexpected inspector contact"); };
+  class NoWebSocket {
+    static OPEN = 1;
+    static CONNECTING = 0;
+    constructor() { contacts += 1; throw new Error("Unexpected inspector socket"); }
+  }
+  const mainInspector = new CodexMainInspectorEvaluator({
+    platform: "darwin", execFile, fetch, WebSocket: NoWebSocket,
+    sendSignal: () => { signals += 1; }
+  });
+  mainInspector.request = async () => { evaluations += 1; return true; };
+  const bridge = new CodexMicroBridge({
+    platform: "darwin", execFile, fetch, WebSocket: NoWebSocket, mainInspector,
+    readFile: async () => { throw new Error("No bridge port file"); }
+  });
+  const plane = new CodexControlPlane({ micro: bridge });
+  const result = await plane.execute("fast", {
+    micro: (micro) => micro.runKeycap("FAST"),
+    legacy: async () => { legacyCalls += 1; return true; }
+  });
+  assert.equal(result.backend, "legacy");
+  assert.equal(result.ok, true);
+  assert.equal(mappings, 1);
+  assert.equal(legacyCalls, 1);
+  assert.equal(signals, 0);
+  assert.equal(contacts, 0);
+  assert.equal(evaluations, 0);
+});
+
+test("inspector errors during native evaluation remain ambiguous and never fall back", async () => {
+  const bridge = new CodexMicroBridge();
+  const plane = new CodexControlPlane({ micro: bridge });
+  let evaluations = 0;
+  let legacyCalls = 0;
+  bridge.ensureConnected = async () => {};
+  bridge.evaluate = async () => {
+    evaluations += 1;
+    throw inspectorUnavailable("Inspector closed before responding.");
+  };
+  const result = await plane.execute("fast", {
+    micro: (micro) => micro.runKeycap("FAST"),
+    legacy: async () => { legacyCalls += 1; return true; }
+  });
+  assert.equal(result.backend, "micro");
+  assert.equal(result.ambiguous, true);
+  assert.equal(result.ok, false);
+  assert.equal(evaluations, 1);
+  assert.equal(legacyCalls, 0);
 });
 
 test("all generated renderer entrypoints remain syntactically valid", () => {
