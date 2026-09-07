@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Treat failed local turns as errors instead of successful completions. Task keys show review-required safety pauses as yellow **Need input** and other errors in red, preserve the final elapsed time, and do not return to Thinking while a child process is still running.
 - Tightened the goal-only timing capsule so the unfinished-goal marker and elapsed time read as one centered group, while preserving the existing compact goal-and-queue layout.
 
 ## 0.5.15 — 2026-07-27

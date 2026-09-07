@@ -39,13 +39,13 @@ function timingLabel(thread, nowMs) {
     return Number.isFinite(goalDurationMs) ? formatDuration(goalDurationMs) : "--:--";
   }
   if (!Number.isFinite(thread?.startedAtMs)) {
-    if (["working", "completed", "stopped"].includes(thread?.status)) return "--:--";
+    if (["working", "completed", "stopped", "error"].includes(thread?.status)) return "--:--";
     return t("action.open", "Open");
   }
   const endMs = thread.status === "working" ? nowMs : thread.endedAtMs;
   if (!Number.isFinite(endMs) || endMs < thread.startedAtMs) return "--:--";
   const duration = formatDuration(endMs - thread.startedAtMs);
-  if (["working", "completed", "stopped"].includes(thread.status)) return duration;
+  if (["working", "completed", "stopped", "error"].includes(thread.status)) return duration;
   return t("action.open", "Open");
 }
 
