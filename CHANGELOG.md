@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Keep fixture verification offline: mock New Task state reads and permission checks, skip native startup/cleanup in contract modes, and fail verification before any external command, connection, process signal, or file write.
 - Guard inspector bootstrap against Codex builds that disable `SIGUSR1` activation. ThreadDeck checks the loaded Electron framework's inspector fuse and rechecks the process identity before signaling; disabled or unverifiable builds use the existing safe fallback without sending the signal. Existing process-owned inspector connections remain usable.
 - Tightened the goal-only timing capsule so the unfinished-goal marker and elapsed time read as one centered group, while preserving the existing compact goal-and-queue layout.
 

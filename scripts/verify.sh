@@ -21,12 +21,7 @@ for bundled in "$PLUGIN_DIR"/bin/*.js(N); do
     exit 1
   }
 done
-node "$PLUGIN_DIR/bin/plugin.js" --verify-completion
-node "$PLUGIN_DIR/bin/plugin.js" --verify-refresh-resilience
-node "$PLUGIN_DIR/bin/plugin.js" --verify-usage-cache
-node "$PLUGIN_DIR/bin/plugin.js" --verify-voice-submit
-node "$PLUGIN_DIR/bin/plugin.js" --verify-interactions
-pnpm run test
+THREADDECK_VERIFY_PLUGIN="$PLUGIN_DIR/bin/plugin.js" pnpm run test
 (
   cd "$ROOT_DIR/reference/codex-micro-protocol"
   shasum -a 256 -c UPSTREAM.sha256
