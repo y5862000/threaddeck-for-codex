@@ -1,6 +1,6 @@
 {
   "Name": "ThreadDeck for Codex",
-  "Description": "A bilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS.",
+  "Description": "A multilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS.",
   "com.yechan.threaddeck.weekly": {
     "Name": "Weekly Codex quota",
     "Tooltip": "Shows remaining weekly Codex capacity as a ring. Press to refresh now."

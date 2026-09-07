@@ -4,6 +4,9 @@
 
 ## Unreleased
 
+- Add Russian action names, button settings, task/activity labels, dictation feedback, and permission messages, selected automatically from Stream Deck's language. The Property Inspector now uses the host language when provided and retains English fallback for unsupported languages.
+- Size Cyrillic captions as proportional text so Russian words fit Neo keys without premature truncation.
+
 - Tightened the goal-only timing capsule so the unfinished-goal marker and elapsed time read as one centered group, while preserving the existing compact goal-and-queue layout.
 
 ## 0.5.15 — 2026-07-27

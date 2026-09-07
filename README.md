@@ -26,7 +26,7 @@
 
 ThreadDeck turns a Stream Deck into a physical Codex task monitor and controller. It is inspired by the compact hardware-agent workflow explored by [Codex Micro](https://github.com/mpociot/codex-micro-stream-deck-emulator) and uses Codex's own Micro renderer events without requiring physical Micro hardware. Its independent eight-task monitor, renderer, and verified macOS adapter remain in place, so an unavailable native path falls back safely instead of disabling the deck. If you searched for a **Codex Stream Deck**, **Codex StreamDeck**, or a larger open-source Codex Micro-style controller, this is the project.
 
-The overview and gesture demos are generated from the plugin's real SVG key renderer with sanitized example tasks. English is the default documentation and release language; the same plugin automatically switches its action names and key UI to Korean when Stream Deck uses Korean. No separate language build is required.
+The overview and gesture demos are generated from the plugin's real SVG key renderer with sanitized example tasks. English is the default documentation and release language; the same plugin automatically switches its action names, button settings, and key UI to Korean or Russian when Stream Deck uses that language. No separate language build is required. See the [generated English/Russian key comparison](docs/media/russian-localization.png) for both themes.
 
 ![ThreadDeck workflow showing reasoning effort steps, Fast mode, task-key dictation, queue progress, and the coordinated completion pulse](docs/media/threaddeck-overview.gif)
 
@@ -67,7 +67,7 @@ The overview and gesture demos are generated from the plugin's real SVG key rend
 
 3. Confirm the four Codex shortcuts below so the verified fallback remains available, then test the microphone key. A missing persistent Micro renderer endpoint never requires a Codex restart: ThreadDeck prepares a private command socket against the exact running Codex process before the first press, while passive monitoring and fallback stay on the local/Accessibility adapters.
 
-The package contains an editable ready-to-use profile, one universal Apple silicon/Intel helper, and both English and Korean localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
+The package contains an editable ready-to-use profile, one universal Apple silicon/Intel helper, and English, Korean, and Russian localization. For screenshots of every setup step, updates, removal, and the read-only doctor command, see [Install ThreadDeck on another Mac](docs/INSTALL.md).
 
 | Codex function | Legacy fallback shortcut | Used by |
 |---|---:|---|
@@ -233,7 +233,7 @@ The GIF pipeline uses Node.js and the development-only Sharp dependency for SVG 
 
 ## Current limits
 
-- The bundled profile and physical QA target macOS and Stream Deck Neo; English and Korean are selected automatically from Stream Deck. Actions placed manually on another model use its official device type and key geometry for an independent conservative frame budget, but those layouts are not yet published as supported profiles.
+- The bundled profile and physical QA target macOS and Stream Deck Neo; English, Korean, and Russian are selected automatically from Stream Deck. Actions placed manually on another model use its official device type and key geometry for an independent conservative frame budget, but those layouts are not yet published as supported profiles.
 - Task and Side Chat detection depend on private Codex file and log formats and can lag behind a Codex release.
 - Native controls depend on an undocumented Codex Micro renderer API. The bridge is bound only to a random loopback port, and ThreadDeck falls back only when it can prove no Micro action was delivered.
 - Codex exposes six native Micro task slots; ThreadDeck keeps its separate eight-card monitor and uses the legacy verified switch path for the remaining two or for tasks not assigned to a Micro slot.

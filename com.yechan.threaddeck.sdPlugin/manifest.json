@@ -293,7 +293,7 @@
   "Category": "ThreadDeck for Codex",
   "CategoryIcon": "images/category",
   "CodePath": "bin/plugin.js",
-  "Description": "A bilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS.",
+  "Description": "A multilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS.",
   "Icon": "images/plugin",
   "Name": "ThreadDeck for Codex",
   "Nodejs": {

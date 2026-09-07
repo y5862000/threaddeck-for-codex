@@ -245,6 +245,17 @@ test("display-width helpers wrap and compact grapheme-safe titles", () => {
   assert.deepEqual(wrapTitle("짧은 제목"), ["짧은 제목", ""]);
 });
 
+test("Cyrillic captions use proportional widths and preserve combining marks", () => {
+  assert.equal(visualWidth("П"), 0.66);
+  assert.equal(visualWidth("И\u0306"), 0.66);
+  assert.equal(compactLine("Проверка", 6.2), "Проверка");
+  assert.deepEqual(wrapTitle("Проверка", 5.75), ["Проверка", ""]);
+  assert.equal(compactLine("И\u0306И\u0306И\u0306И\u0306", 2), "И\u0306…");
+  assert.equal(visualWidth("👩‍💻"), 1);
+  assert.equal(visualWidth("한"), 1);
+  assert.equal(visualWidth("A"), 0.58);
+});
+
 test("internal title detection recognizes exact injected templates without broad false positives", () => {
   assert.equal(
     isInternalAmbientTitle("This block is automatically supplied ambient UI state for the model"),

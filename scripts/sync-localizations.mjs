@@ -7,15 +7,20 @@ const packagePath = path.join(root, "package.json");
 const manifestPath = path.join(pluginDirectory, "manifest.json");
 const englishPath = path.join(pluginDirectory, "en.json");
 const koreanPath = path.join(pluginDirectory, "ko.json");
+const russianPath = path.join(pluginDirectory, "ru.json");
 
 const ROOT_COPY = {
   en: {
     Name: "ThreadDeck for Codex",
-    Description: "A bilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS."
+    Description: "A multilingual Stream Deck Neo dashboard for monitoring and controlling Codex Desktop tasks on macOS."
   },
   ko: {
     Name: "ThreadDeck for Codex",
-    Description: "macOS의 Codex Desktop 작업을 모니터링하고 제어하는 한영 지원 Stream Deck Neo 대시보드입니다."
+    Description: "macOS의 Codex Desktop 작업을 모니터링하고 제어하는 영어·한국어·러시아어 지원 Stream Deck Neo 대시보드입니다."
+  },
+  ru: {
+    Name: "ThreadDeck for Codex",
+    Description: "Панель Stream Deck Neo для наблюдения за задачами Codex Desktop и управления ими на macOS. Поддерживает английский, корейский и русский языки."
   }
 };
 
@@ -82,11 +87,21 @@ const korean = Object.fromEntries([
   ...manifest.Actions.map((action) => [action.UUID, existingKorean[action.UUID]])
 ]);
 const english = localeFromEnglish(manifest);
+const existingRussian = readJson(russianPath);
+const russian = Object.fromEntries([
+  ["Name", ROOT_COPY.ru.Name],
+  ["Description", ROOT_COPY.ru.Description],
+  ...manifest.Actions.map((action) => [action.UUID, existingRussian[action.UUID]])
+]);
 for (const action of manifest.Actions) {
   const copy = ENGLISH_ACTIONS.get(action.UUID);
   const koreanCopy = korean[action.UUID];
   if (!koreanCopy?.Name || !koreanCopy?.Tooltip) {
     throw new Error(`Missing Korean localization for ${action.UUID}`);
+  }
+  const russianCopy = russian[action.UUID];
+  if (!russianCopy?.Name?.trim() || !russianCopy?.Tooltip?.trim()) {
+    throw new Error(`Missing Russian localization for ${action.UUID}`);
   }
   action.Name = copy[0];
   action.Tooltip = copy[1];
@@ -99,7 +114,8 @@ manifest.Version = `${packageVersion}.0`;
 const expected = new Map([
   [manifestPath, serialized(manifest)],
   [englishPath, serialized(english)],
-  [koreanPath, serialized(korean)]
+  [koreanPath, serialized(korean)],
+  [russianPath, serialized(russian)]
 ]);
 const checkOnly = process.argv.includes("--check");
 for (const [filePath, contents] of expected) {

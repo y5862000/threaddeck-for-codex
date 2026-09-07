@@ -5,9 +5,11 @@ const COMMAND_ACTION = "com.yechan.threaddeck.newthread";
 const NAVIGATION_ACTION = "com.yechan.threaddeck.page.previous";
 const COPY = {
   en: {
+    title: "ThreadDeck settings",
     loading: "Loading settings…",
     taskLabel: "Task slot",
     currentTask: "Current task",
+    topTask: "Top task {index}",
     taskHelp: "Choose a Codex task for this key.",
     commandLabel: "Command",
     newTask: "New task",
@@ -21,9 +23,11 @@ const COPY = {
     saved: "Saved"
   },
   ko: {
+    title: "ThreadDeck 설정",
     loading: "설정을 불러오는 중…",
     taskLabel: "작업 위치",
     currentTask: "현재 작업",
+    topTask: "상위 작업 {index}",
     taskHelp: "이 버튼으로 제어할 Codex 작업을 선택하세요.",
     commandLabel: "명령",
     newTask: "새 작업",
@@ -35,6 +39,24 @@ const COPY = {
     nextPage: "다음 페이지",
     help: "도움말",
     saved: "저장됨"
+  },
+  ru: {
+    title: "Настройки ThreadDeck",
+    loading: "Загрузка настроек…",
+    taskLabel: "Задача",
+    currentTask: "Текущая задача",
+    topTask: "Задача {index} в списке",
+    taskHelp: "Выберите задачу Codex для этой кнопки.",
+    commandLabel: "Команда",
+    newTask: "Новая задача",
+    sideChat: "Дополнительный чат",
+    send: "Отправить",
+    commandHelp: "Короткое нажатие отправляет Return. Удержание до синего цвета — Command+Return.",
+    directionLabel: "Направление",
+    previousPage: "Предыдущая страница",
+    nextPage: "Следующая страница",
+    help: "Справка",
+    saved: "Сохранено"
   }
 };
 
@@ -44,6 +66,7 @@ let action = "";
 let settings = {};
 let statusTimer = null;
 let settingsPending = false;
+let hostLanguage = "";
 
 function parseJson(value, fallback = {}) {
   if (value && typeof value === "object") return value;
@@ -55,7 +78,9 @@ function parseJson(value, fallback = {}) {
 }
 
 function language() {
-  return /^ko(?:-|$)/i.test(navigator.language) ? "ko" : "en";
+  const base = String(hostLanguage || navigator.language || "en")
+    .trim().toLowerCase().replaceAll("_", "-").split("-")[0];
+  return Object.hasOwn(COPY, base) ? base : "en";
 }
 
 function localize() {
@@ -65,11 +90,9 @@ function localize() {
     const value = copy[element.dataset.copy];
     if (value) element.textContent = value;
   }
-  if (language() === "ko") {
-    for (let index = 1; index <= 8; index += 1) {
-      const option = document.querySelector(`option[value="top${index}"]`);
-      if (option) option.textContent = `상위 작업 ${index}`;
-    }
+  for (let index = 1; index <= 8; index += 1) {
+    const option = document.querySelector(`option[value="top${index}"]`);
+    if (option) option.textContent = copy.topTask.replace("{index}", String(index));
   }
 }
 
@@ -137,7 +160,8 @@ function connectElgatoStreamDeckSocket(
   info,
   actionInfo
 ) {
-  void info;
+  const registrationInfo = parseJson(info);
+  hostLanguage = String(registrationInfo?.application?.language ?? "").trim();
   context = uuid;
   const parsedActionInfo = parseJson(actionInfo);
   action = parsedActionInfo.action ?? "";
@@ -151,3 +175,5 @@ function connectElgatoStreamDeckSocket(
     if (settingsPending) setSettings(settings);
   });
 }
+
+localize();

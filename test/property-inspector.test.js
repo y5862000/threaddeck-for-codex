@@ -29,7 +29,7 @@ class FakeElement {
   }
 }
 
-test("Property Inspector exposes the Stream Deck callback and saves grouped task settings", () => {
+function createHost(navigatorLanguage = "en-US") {
   const elements = new Map([
     ["settings", new FakeElement()],
     ["settings-loading", new FakeElement()],
@@ -42,6 +42,9 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
     ["save-status", new FakeElement()]
   ]);
   const optionElements = new Map();
+  const html = fs.readFileSync(path.join(ROOT, "com.yechan.threaddeck.sdPlugin/property-inspector/index.html"), "utf8");
+  const localizedElements = new Map([...html.matchAll(/data-copy="([^"]+)"/g)]
+    .map((match) => [match[1], new FakeElement({ copy: match[1] })]));
   const sockets = [];
 
   class FakeWebSocket {
@@ -71,7 +74,7 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
 
   const sandbox = {
     WebSocket: FakeWebSocket,
-    navigator: { language: "en-US" },
+    navigator: { language: navigatorLanguage },
     document: {
       documentElement: { lang: "" },
       getElementById(id) {
@@ -84,6 +87,7 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
         return optionElements.get(match[1]);
       },
       querySelectorAll(selector) {
+        if (selector === "[data-copy]") return [...localizedElements.values()];
         if (selector === "select[data-setting]") {
           return [
             elements.get("task-source"),
@@ -102,6 +106,11 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
   sandbox.window = sandbox;
 
   vm.runInNewContext(SCRIPT, sandbox, { filename: "property-inspector.js" });
+  return { sandbox, elements, optionElements, localizedElements, sockets };
+}
+
+test("Property Inspector exposes the Stream Deck callback and saves grouped task settings", () => {
+  const { sandbox, elements, sockets } = createHost();
   assert.equal(typeof sandbox.connectElgatoStreamDeckSocket, "function");
 
   sandbox.connectElgatoStreamDeckSocket(
@@ -162,4 +171,60 @@ test("Property Inspector exposes the Stream Deck callback and saves grouped task
     context: "navigation-context",
     payload: { currentPage: 0, pageDirection: "next" }
   });
+});
+
+
+test("Property Inspector uses Russian host language and preserves setting values", () => {
+  const { sandbox, elements, optionElements, localizedElements, sockets } = createHost("en-US");
+  sandbox.connectElgatoStreamDeckSocket("28196", "ru-context", "registerPropertyInspector",
+    JSON.stringify({ application: { language: "ru_RU" } }),
+    { action: "com.yechan.threaddeck.thread1", payload: { settings: { taskSource: "top3", custom: true } } });
+  assert.equal(sandbox.document.documentElement.lang, "ru");
+  assert.equal(localizedElements.get("taskLabel").textContent, "Задача");
+  assert.equal(localizedElements.get("currentTask").textContent, "Текущая задача");
+  assert.equal(localizedElements.get("commandLabel").textContent, "Команда");
+  assert.equal(localizedElements.get("nextPage").textContent, "Следующая страница");
+  assert.equal(localizedElements.get("title").textContent, "Настройки ThreadDeck");
+  for (let index = 1; index <= 8; index += 1) {
+    assert.equal(optionElements.get(`top${index}`).textContent, `Задача ${index} в списке`);
+  }
+  assert.equal(elements.get("task-source").value, "top3");
+  sockets[0].open();
+  elements.get("task-source").value = "top8";
+  elements.get("task-source").listeners.get("change")();
+  assert.deepEqual(sockets[0].sent[1], {
+    event: "setSettings", context: "ru-context",
+    payload: { taskSource: "top8", custom: true }
+  });
+  assert.equal(elements.get("save-status").textContent, "Сохранено");
+});
+
+test("Property Inspector falls back to navigator only when host language is missing", () => {
+  for (const info of [{}, "{broken", null, { application: { language: "  " } }]) {
+    const { sandbox, localizedElements } = createHost("ru-RU");
+    assert.equal(localizedElements.get("loading").textContent, "Загрузка настроек…");
+    sandbox.connectElgatoStreamDeckSocket("28196", "context", "registerPropertyInspector", info, {});
+    assert.equal(sandbox.document.documentElement.lang, "ru");
+    assert.equal(localizedElements.get("help").textContent, "Справка");
+  }
+  const { sandbox, localizedElements } = createHost("ru-RU");
+  sandbox.connectElgatoStreamDeckSocket("28196", "context", "registerPropertyInspector",
+    { application: { language: "ja" } }, {});
+  assert.equal(sandbox.document.documentElement.lang, "en");
+  assert.equal(localizedElements.get("help").textContent, "Help");
+});
+
+test("Property Inspector can relocalize all task slots between supported languages", () => {
+  const { sandbox, optionElements, localizedElements } = createHost("ru-RU");
+  for (const [locale, language, slot, help] of [
+    ["ko_KR", "ko", "상위 작업 1", "도움말"],
+    ["ru-RU", "ru", "Задача 1 в списке", "Справка"],
+    ["en-US", "en", "Top task 1", "Help"]
+  ]) {
+    sandbox.connectElgatoStreamDeckSocket("28196", "context", "registerPropertyInspector",
+      { application: { language: locale } }, {});
+    assert.equal(sandbox.document.documentElement.lang, language);
+    assert.equal(optionElements.get("top1").textContent, slot);
+    assert.equal(localizedElements.get("help").textContent, help);
+  }
 });
