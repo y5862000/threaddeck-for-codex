@@ -7,7 +7,7 @@
   },
   "com.yechan.threaddeck.thread1": {
     "Name": "Codex 작업",
-    "Tooltip": "속성 검사기에서 현재 작업 또는 상위 작업 1~8을 고릅니다. 짧게 누르면 열고, 0.55초 이상 누른 채 말하고 놓으면 후속 요청을 받아써서 보냅니다."
+    "Tooltip": "속성 관리자에서 현재 작업, 상위 작업 1–8 또는 고정 작업을 선택하세요. 짧게 누르면 열고, 0.55초 동안 누르면 후속 메시지를 받아쓰기하고 전송합니다."
   },
   "com.yechan.threaddeck.newthread": {
     "Name": "Codex 명령",

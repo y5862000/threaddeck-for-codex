@@ -24,8 +24,12 @@
           <option value="top6">Top task 6</option>
           <option value="top7">Top task 7</option>
           <option value="top8">Top task 8</option>
+          <option value="fixed" data-copy="fixedTask">Fixed task</option>
         </select>
         <p data-copy="taskHelp">Choose a Codex task for this key.</p>
+        <label for="fixed-task" data-copy="fixedTaskLabel" hidden>Task</label>
+        <select id="fixed-task" data-setting="fixedTaskId" aria-describedby="fixed-task-status" hidden disabled></select>
+        <p id="fixed-task-status" role="status" aria-live="polite" hidden></p>
       </section>
 
       <section id="command-settings" class="setting-group" hidden>

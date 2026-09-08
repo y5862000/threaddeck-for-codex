@@ -7,7 +7,7 @@
   },
   "com.yechan.threaddeck.thread1": {
     "Name": "Codex task",
-    "Tooltip": "Choose Current or Top 1–8 in the Property Inspector. Tap to open it, or hold for 0.55 seconds to dictate and submit a follow-up."
+    "Tooltip": "Choose Current, Top 1–8, or Fixed task in the Property Inspector. Tap to open it, or hold for 0.55 seconds to dictate and submit a follow-up."
   },
   "com.yechan.threaddeck.newthread": {
     "Name": "Codex command",

@@ -62,7 +62,7 @@ const {
   parseCodexComposerState,
   recordRemoteComposerStateObservation,
 } = require("./remote-state");
-const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
+const { selectTopThreadRows: selectThreadRows, persistentThreadRows, selectFixedThreadRow } = require("./thread-selection");
 const { isInternalThreadRecord } = require("./thread-privacy");
 const {
   parseCodexQueueWindows,
@@ -102,6 +102,9 @@ const {
 const { readInstalledProfilePageState } = require("./streamdeck-profile-state");
 const {
   codexCommandFromSettings,
+  fixedTaskIdFromSettings,
+  fixedTaskTitleFromSettings,
+  taskSourceFromSettings,
   taskSlotFromSettings
 } = require("./action-settings");
 const {
@@ -362,6 +365,7 @@ const completionContractMode = process.argv.includes("--verify-completion");
 const refreshResilienceContractMode = process.argv.includes("--verify-refresh-resilience");
 const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
 const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
+const fixedTaskContractMode = process.argv.includes("--verify-fixed-task");
 const interactionContractMode = process.argv.includes("--verify-interactions");
 const keyBridgePermissionContractMode = process.argv.includes("--verify-keybridge-permission");
 const demoOutput = argument("--render-demo");
@@ -378,6 +382,7 @@ const runtimeTraceEnabled = !snapshotMode
   && !refreshResilienceContractMode
   && !usageCacheContractMode
   && !voiceSubmitContractMode
+  && !fixedTaskContractMode
   && !interactionContractMode
   && !keyBridgePermissionContractMode
   && !demoOutput
@@ -488,6 +493,10 @@ let activeAppearanceRefresh = null;
 // independently selectable Current Task action resolves through
 // `primaryThreadRow`, so switching tasks never silently renumbers the list.
 let threadSlots = Array(THREAD_COUNT).fill(null);
+let fixedThreadRows = new Map();
+let taskCatalog = [];
+let taskCatalogAvailable = false;
+const taskCatalogContexts = new Set();
 let primaryThreadId = null;
 let primaryThreadRow = null;
 let usageState = { remaining: null, failed: false };
@@ -816,7 +825,70 @@ function threadSlotForContext(context, action = contexts.get(context)) {
 
 function threadForContext(context) {
   const slot = threadSlotForContext(context);
-  return slot === undefined ? null : threadForSlot(slot);
+  if (slot === undefined) return null;
+  if (contexts.get(context) !== ACTIONS.thread1) return threadForSlot(slot);
+  const settings = settingsForContext(context);
+  if (taskSourceFromSettings(settings) === "fixed") {
+    return fixedThreadRows.get(fixedTaskIdFromSettings(settings)) ?? null;
+  }
+  return threadForSlot(slot);
+}
+
+function taskContextImage(context) {
+  const slot = threadSlotForContext(context);
+  if (threadRefreshUnavailable && !hasLoadedThreadState) {
+    return threadSvg(THREAD_REFRESH_ERROR_STATE, slot);
+  }
+  const thread = threadForContext(context);
+  const settings = settingsForContext(context);
+  if (!thread && contexts.get(context) === ACTIONS.thread1
+      && taskSourceFromSettings(settings) === "fixed" && fixedTaskIdFromSettings(settings)) {
+    const [line1, line2] = wrapTitle(fixedTaskTitleFromSettings(settings) || t("thread.untitled"), 5.75);
+    return shell(THEME.muted, `
+      <text x="72" y="65" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="20.5" font-weight="600" text-anchor="middle">${escapeXml(line1)}</text>
+      <text x="72" y="89" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="20.5" font-weight="600" text-anchor="middle">${escapeXml(line2)}</text>`,
+      threadHeader(THEME.muted, "idle", t("feedback.unavailable"), { kind: "idle", code: "activity.waiting" }));
+  }
+  return threadSvg(thread, slot);
+}
+
+function taskSelectionSettings(context) {
+  const settings = settingsForContext(context);
+  return JSON.stringify([taskSourceFromSettings(settings), fixedTaskIdFromSettings(settings)]);
+}
+
+function requestedTaskSources() {
+  const fixedIds = new Set();
+  for (const [context, action] of contexts) {
+    if (action !== ACTIONS.thread1) continue;
+    const settings = settingsForContext(context);
+    if (taskSourceFromSettings(settings) === "fixed") {
+      const id = fixedTaskIdFromSettings(settings);
+      if (id) fixedIds.add(id);
+    }
+  }
+  return { fixedIds };
+}
+
+function sendTaskCatalog(context) {
+  if (contexts.get(context) !== ACTIONS.thread1) return;
+  send({ event: "sendToPropertyInspector", context, payload: {
+    event: "task-catalog", available: taskCatalogAvailable, tasks: taskCatalog
+  } });
+}
+
+function applyTaskControlSnapshot(snapshot) {
+  if (Array.isArray(snapshot) || !snapshot) return;
+  fixedThreadRows = new Map((snapshot.fixedThreads ?? []).map((thread) => [thread.id.toLowerCase(), thread]));
+  if (Array.isArray(snapshot.taskCatalog)) {
+    taskCatalog = snapshot.taskCatalog;
+    taskCatalogAvailable = true;
+    publishTaskCatalog();
+  }
+}
+
+function publishTaskCatalog() {
+  for (const context of taskCatalogContexts) sendTaskCatalog(context);
 }
 
 function codexCommandForContext(context, action = contexts.get(context)) {
@@ -832,10 +904,11 @@ function contextIsSendControl(context) {
   return codexCommandForContext(context) === "send";
 }
 
-function combinedVisibleThreads(currentThread = currentThreadForDisplay(), rankedThreads = threadSlots) {
+function combinedVisibleThreads(currentThread = currentThreadForDisplay(), rankedThreads = threadSlots,
+  additionalThreads = [...fixedThreadRows.values()]) {
   const seen = new Set();
   const rows = [];
-  for (const thread of [currentThread, ...rankedThreads]) {
+  for (const thread of [currentThread, ...rankedThreads, ...additionalThreads]) {
     if (!thread?.id || seen.has(thread.id)) continue;
     seen.add(thread.id);
     rows.push(thread);
@@ -1968,7 +2041,7 @@ function cancelThreadPress(context, releaseVoice = true) {
 
 function beginThreadPress(context, slot, options = {}) {
   if (threadPressByContext.has(context)) return;
-  const thread = options.thread ?? threadForSlot(slot);
+  const thread = options.thread ?? (context ? threadForContext(context) : threadForSlot(slot));
   if (!thread?.id) {
     showFeedback(context, "error", "작업 없음");
     return;
@@ -2467,7 +2540,7 @@ function currentActionSvg(action, context = null) {
   const slot = context === null
     ? THREAD_SLOT_BY_ACTION.get(action)
     : threadSlotForContext(context, action);
-  if (slot !== undefined) return threadSvg(displayedThreadSlot(slot), slot);
+  if (slot !== undefined) return context ? taskContextImage(context) : threadSvg(displayedThreadSlot(slot), slot);
   return staticActionSvg(action, context);
 }
 
@@ -8065,6 +8138,7 @@ function applyFocusedComposerState(thread, state, nowMs = Date.now()) {
   threadSlots = threadSlots.map((candidate) => (
     candidate?.id === thread.id ? refreshedThread(candidate) : candidate
   ));
+  if (fixedThreadRows.has(thread.id)) fixedThreadRows.set(thread.id, refreshedThread(fixedThreadRows.get(thread.id)));
   if (primaryThreadRow?.id === thread.id) {
     primaryThreadRow = refreshedThread(primaryThreadRow);
   }
@@ -8600,6 +8674,16 @@ function annotateKnownTitleAmbiguity(selected, candidates) {
   }));
 }
 
+function eligibleRemoteThreadRows(remoteRows, localRows, persistentIds) {
+  const localIds = new Set(localRows.map((row) => row.id.toLowerCase()));
+  const allLocalIds = new Set([...persistentIds].map((id) => id.toLowerCase()));
+  // An archived/internal local task is absent from the eligible query but is
+  // still present in the complete ID table. A stale remote copy must not
+  // reintroduce that exact identity into Fixed keys or their picker.
+  return remoteRows.filter((row) => !allLocalIds.has(row.id.toLowerCase())
+    || localIds.has(row.id.toLowerCase()));
+}
+
 async function readTopThreads() {
   const microSideChatTitlesPromise = refreshMicroSideChatTitleCache();
   const queueWindowsPromise = readCodexQueueWindows();
@@ -8708,13 +8792,19 @@ async function readTopThreads() {
     });
   }
   const rankedThreadIds = selection.selected.map((thread) => thread.id);
+  const fixedRemoteRows = eligibleRemoteThreadRows(normalizedRemoteRows, localRows, persistentIds);
+  const fixedSelection = [...requestedTaskSources().fixedIds]
+    .map((id) => selectFixedThreadRow(id, localRows, fixedRemoteRows))
+    .filter(Boolean);
+  const fixedThreadIds = fixedSelection.map((thread) => thread.id);
+  const selectedCandidates = [...selection.selected, ...fixedSelection];
   const selected = annotateKnownTitleAmbiguity(
-    // Hydrate all eight ranked rows plus an independently tracked current row.
-    // The old current-first slice displaced Top Task 8 and made Top Task 1 a
-    // duplicate of Current Task whenever the active task was not rank 1.
-    primaryFirstThreadRows(selection.selected, currentCandidates, THREAD_COUNT + 1),
+    // Fixed keys hydrate only their chosen rows in addition to all eight
+    // ranked rows and the independently tracked Current task.
+    primaryFirstThreadRows(selectedCandidates, currentCandidates, selectedCandidates.length + 1),
     identityCandidates
-  );
+  ).map((thread) => fixedThreadIds.includes(thread.id)
+    ? { ...thread, requiresStrictIdentity: true } : thread);
   await Promise.all([
     refreshVisibleRemoteComposerState(selected, queueWindows),
     refreshFocusedGoalState(currentThread?.remote ? currentThread : null)
@@ -8777,6 +8867,10 @@ async function readTopThreads() {
   const leasedHydratedThread = activeComposerFocusThread(goalThreads);
   return {
     threads: rankedThreadIds.map((id) => goalById.get(id)).filter(Boolean),
+    fixedThreads: fixedThreadIds.map((id) => goalById.get(id)).filter(Boolean),
+    taskCatalog: persistentThreadRows(localRows, fixedRemoteRows).map((thread) => ({
+      id: thread.id, title: thread.title || t("thread.untitled"), remote: Boolean(thread.remote)
+    })),
     currentThread: leasedHydratedThread
       ?? (primaryThreadId ? goalById.get(primaryThreadId) ?? null : null)
   };
@@ -8963,7 +9057,7 @@ async function refreshUsage(feedbackContext, options = {}) {
 function renderThreadContexts() {
   for (const [context, action] of contexts) {
     const slot = threadSlotForContext(context, action);
-    if (slot !== undefined) setImage(context, threadSvg(displayedThreadSlot(slot), slot));
+    if (slot !== undefined) setImage(context, taskContextImage(context));
   }
 }
 
@@ -8971,7 +9065,7 @@ function renderVoiceTargetThreadContexts(targetThreadId, nowMs = Date.now(), tra
   if (!targetThreadId) return;
   for (const [context, action] of contexts) {
     const slot = threadSlotForContext(context, action);
-    const thread = slot === undefined ? null : threadForSlot(slot);
+    const thread = slot === undefined ? null : threadForContext(context);
     if (thread?.id !== targetThreadId) continue;
     const svg = threadSvg(thread, slot);
     if (transition) setImageTransition(context, svg, VISUAL_STATE_TRANSITION_MS, nowMs);
@@ -9014,7 +9108,7 @@ function renderAnimatedThreadContexts(nowMs = Date.now()) {
   const expiredDismissFadeThreadIds = new Set();
   for (const [context, action] of contexts) {
     const slot = threadSlotForContext(context, action);
-    const thread = slot === undefined ? null : threadForSlot(slot);
+    const thread = slot === undefined ? null : threadForContext(context);
     if (slot === undefined) continue;
     if (thread?.id) visibleThreadIds.add(thread.id);
     const completionStartedAtMs = thread?.id ? completionPulseStartedAt.get(thread.id) : null;
@@ -9234,9 +9328,11 @@ async function refreshThreads(feedbackContext, options = {}) {
         const nextCurrentThread = currentThreadForDisplay(nextThreadSlots, primaryThreadRow);
         trackCompletionTransitions(
           previousVisibleThreads,
-          combinedVisibleThreads(nextCurrentThread, nextThreadSlots)
+          combinedVisibleThreads(nextCurrentThread, nextThreadSlots, Array.isArray(snapshot)
+            ? [] : snapshot.fixedThreads ?? [])
         );
         threadSlots = nextThreadSlots;
+        applyTaskControlSnapshot(snapshot);
         renderThreadContexts();
         const composerThread = nextCurrentThread ?? primaryThreadRow;
         const snapshotComposerState = fastModeStateFromThread(
@@ -9273,6 +9369,8 @@ async function refreshThreads(feedbackContext, options = {}) {
         return true;
       } catch (error) {
         consecutiveThreadRefreshFailures += 1;
+        taskCatalogAvailable = false;
+        publishTaskCatalog();
         const wasUnavailable = threadRefreshUnavailable;
         if (!hasLoadedThreadState
             && consecutiveThreadRefreshFailures >= THREAD_REFRESH_STARTUP_ERROR_FAILURES) {
@@ -9707,7 +9805,7 @@ function navigateRemoteThread(thread, slot, options = {}) {
 }
 
 async function openThread(context, slot, options = {}) {
-  const thread = options.thread ?? threadForSlot(slot);
+  const thread = options.thread ?? (context ? threadForContext(context) : threadForSlot(slot));
   const feedback = options.feedback ?? showFeedback;
   if (!thread?.id) {
     feedback(context, "error", "작업 없음");
@@ -10200,6 +10298,19 @@ async function switchProfilePage(context, device, action, settings = {}, options
   return true;
 }
 
+function updateTaskKeySettings(context, settings) {
+  if (!settings) return false;
+  const before = taskSelectionSettings(context);
+  const hadPress = threadPressByContext.has(context);
+  actionSettingsByContext.set(context, settings);
+  if (contexts.get(context) === ACTIONS.thread1 && before !== taskSelectionSettings(context)) {
+    cancelThreadPress(context, true);
+    cancelVoiceTranscription(context);
+    return hadPress;
+  }
+  return false;
+}
+
 function registerPlugin() {
   if (!port || !pluginUUID || !registerEvent) process.exit(1);
   socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -10278,16 +10389,24 @@ function registerPlugin() {
       });
     }
 
-    if (message.event === "didReceiveSettings" && contexts.has(message.context)) {
+    if (message.event === "sendToPlugin" && message.action === ACTIONS.thread1
+        && contexts.get(message.context) === ACTIONS.thread1
+        && message.payload?.event === "get-task-catalog") {
+      taskCatalogContexts.add(message.context);
+      sendTaskCatalog(message.context);
+      if (!taskCatalogAvailable) void refreshThreads();
+    } else if (message.event === "propertyInspectorDidDisappear") {
+      taskCatalogContexts.delete(message.context);
+    } else if (message.event === "didReceiveSettings" && contexts.has(message.context)) {
       const wasSendControl = contextIsSendControl(message.context);
-      actionSettingsByContext.set(message.context, message.payload?.settings ?? {});
+      updateTaskKeySettings(message.context, message.payload?.settings ?? {});
       if (wasSendControl && !contextIsSendControl(message.context)) {
         cancelSendPress(message.context, false);
       }
       const action = contexts.get(message.context);
       const slot = threadSlotForContext(message.context, action);
       if (slot !== undefined) {
-        setImage(message.context, threadSvg(displayedThreadSlot(slot), slot));
+        setImage(message.context, taskContextImage(message.context));
         void refreshThreads();
       } else {
         const svg = staticActionSvg(action, message.context);
@@ -10310,7 +10429,7 @@ function registerPlugin() {
         // Replace Stream Deck's persisted image with this process's current
         // last-good state. On first startup this is the neutral placeholder.
         const slot = threadSlotForContext(message.context, message.action);
-        setImage(message.context, threadSvg(displayedThreadSlot(slot), slot));
+        setImage(message.context, taskContextImage(message.context));
         void refreshThreads();
       } else {
         const svg = staticActionSvg(message.action, message.context);
@@ -10342,6 +10461,7 @@ function registerPlugin() {
       voiceStateByContext.delete(message.context);
       voiceSessionIdByContext.delete(message.context);
       contexts.delete(message.context);
+      taskCatalogContexts.delete(message.context);
       actionSettingsByContext.delete(message.context);
       contextDeviceIds.delete(message.context);
       contextImages.delete(message.context);
@@ -10352,9 +10472,7 @@ function registerPlugin() {
       permissionAlertedContexts.delete(message.context);
       microBridgeAlertedContexts.delete(message.context);
     } else if (message.event === "keyDown" && contexts.has(message.context)) {
-      if (message.payload?.settings) {
-        actionSettingsByContext.set(message.context, message.payload.settings);
-      }
+      if (updateTaskKeySettings(message.context, message.payload?.settings)) return;
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice && !voiceHeldContexts.has(message.context)) {
         beginCurrentVoicePress(message.context);
@@ -10368,9 +10486,7 @@ function registerPlugin() {
         beginThreadPress(message.context, threadSlotForContext(message.context, action));
       }
     } else if (message.event === "keyUp" && contexts.has(message.context)) {
-      if (message.payload?.settings) {
-        actionSettingsByContext.set(message.context, message.payload.settings);
-      }
+      if (updateTaskKeySettings(message.context, message.payload?.settings)) return;
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice) {
         endCurrentVoicePress(message.context);
@@ -15922,6 +16038,174 @@ function installShutdownHandlers() {
   });
 }
 
+async function verifyFixedTasks() {
+  const assert = require("node:assert/strict");
+  const id = (n) => `10000000-0000-4000-8000-${String(n).padStart(12, "0")}`;
+  const recent = { id: id(1), title: "Recent", status: "idle", remote: false };
+  const fixed = { id: id(2), title: "Fixed task", status: "working", remote: false,
+    requiresStrictIdentity: true };
+  const archived = { id: id(3), title: "Archived", remote: true };
+  const internal = { id: id(4), title: "Internal", remote: true };
+  const remote = { id: id(5), title: "Remote", remote: true };
+  const eligible = eligibleRemoteThreadRows([archived, internal, remote], [recent, fixed],
+    new Set([recent.id, fixed.id, archived.id, internal.id]));
+  assert.deepEqual(eligible, [remote], "complete local ID table excludes stale remote copies of absent rows");
+  assert.equal(selectFixedThreadRow(archived.id, [recent, fixed], eligible), null);
+  assert.equal(selectFixedThreadRow(internal.id, [recent, fixed], eligible), null);
+
+  const messages = [];
+  socket = { readyState: 1, send: (message) => messages.push(JSON.parse(message)) };
+  for (const context of ["current", "ranked", "fixed"]) contexts.set(context, ACTIONS.thread1);
+  actionSettingsByContext.set("current", { taskSource: "current" });
+  actionSettingsByContext.set("ranked", { taskSource: "top1" });
+  const assignment = { taskSource: "fixed", fixedTaskId: fixed.id, fixedTaskTitle: fixed.title };
+  actionSettingsByContext.set("fixed", assignment);
+  threadSlots = [recent];
+  primaryThreadId = recent.id;
+  primaryThreadRow = recent;
+  applyTaskControlSnapshot({ fixedThreads: [fixed], taskCatalog: [recent, fixed, remote] });
+  assert.equal(threadSlotForContext("fixed"), -2);
+  assert.equal(threadForContext("current").id, recent.id);
+  assert.equal(threadForContext("ranked").id, recent.id);
+  assert.equal(threadForContext("fixed").id, fixed.id);
+  assert.deepEqual([...requestedTaskSources().fixedIds], [fixed.id]);
+  assert.deepEqual(combinedVisibleThreads().map((thread) => thread.id), [recent.id, fixed.id]);
+  assert.notEqual(currentActionSvg(ACTIONS.thread1, "fixed"), currentActionSvg(ACTIONS.thread1, "ranked"));
+
+  const opened = [];
+  let heldCallback = null;
+  let voiceCalls = 0;
+  const pressOptions = {
+    openThread: async (_context, _slot, options) => { opened.push(options.thread); return true; },
+    focusComposer: async () => true,
+    beginVoice: async () => { voiceCalls++; return true; },
+    pauseMedia: async () => false, resumeMedia: async () => false,
+    sleep: async () => {}, schedule: (callback) => { heldCallback = callback; return null; }
+  };
+  beginThreadPress("fixed", -2, pressOptions);
+  threadSlots = [remote, recent];
+  primaryThreadId = remote.id;
+  primaryThreadRow = remote;
+  endThreadPress("fixed");
+  await Promise.resolve();
+  assert.deepEqual(opened.map((thread) => thread.id), [fixed.id]);
+  assert.equal(opened[0].requiresStrictIdentity, true);
+  assert.equal(threadForContext("current").id, remote.id);
+  assert.equal(threadForContext("ranked").id, remote.id);
+
+  beginThreadPress("fixed", -2, pressOptions);
+  assert.equal(updateTaskKeySettings("fixed", { ...assignment, taskSource: "current" }), true);
+  assert.equal(updateTaskKeySettings("fixed", assignment), false);
+  assert.equal(threadPressByContext.has("fixed"), false);
+  await heldCallback();
+  endThreadPress("fixed");
+  assert.equal(voiceCalls, 0, "a round-trip settings change cannot revive an old hold");
+  beginThreadPress("fixed", -2, pressOptions);
+  assert.equal(updateTaskKeySettings("fixed", { ...assignment, fixedTaskId: remote.id }), true);
+  await heldCallback();
+  assert.equal(voiceCalls, 0, "changing UUID cancels a held key");
+  updateTaskKeySettings("fixed", assignment);
+
+  applyTaskControlSnapshot({ fixedThreads: [{ ...fixed, title: "Renamed" }], taskCatalog: [recent, fixed] });
+  assert.equal(threadForContext("fixed").title, "Renamed");
+  primaryThreadId = fixed.id;
+  primaryThreadRow = fixed;
+  applyTaskControlSnapshot({ fixedThreads: [], taskCatalog: [recent] });
+  assert.equal(threadForContext("fixed"), null, "a missing assignment never falls back to retained Current");
+  assert.ok(taskContextImage("fixed").includes("Unavailable"));
+  assert.ok(taskContextImage("fixed").includes("Fixed"));
+  let navigationCalls = 0;
+  assert.equal(await openThread("fixed", -2, {
+    feedback: () => {}, navigate: () => { navigationCalls++; }
+  }), false);
+  assert.equal(navigationCalls, 0);
+  assert.deepEqual(settingsForContext("fixed"), assignment);
+  taskCatalogAvailable = false;
+  assert.equal(threadForContext("fixed"), null);
+  applyTaskControlSnapshot({ fixedThreads: [fixed], taskCatalog: [recent, fixed] });
+  assert.equal(threadForContext("fixed").id, fixed.id);
+  sendTaskCatalog("fixed");
+  const catalogMessage = messages.at(-1);
+  assert.equal(catalogMessage.context, "fixed");
+  assert.equal(catalogMessage.event, "sendToPropertyInspector");
+  assert.equal(catalogMessage.payload.event, "task-catalog");
+  assert.equal(catalogMessage.payload.available, true);
+  const count = messages.length;
+  sendTaskCatalog("unknown");
+  assert.equal(messages.length, count);
+
+  const originalNow = Date.now;
+  let now = 100_000;
+  Date.now = () => now;
+  try {
+    const stable = { ...recent, reasoningEffort: "medium", serviceTier: "default", queueCount: 0 };
+    const working = { ...fixed, startedAtMs: 90_000, endedAtMs: null, queueCount: 0,
+      reasoningEffort: "medium", serviceTier: "default" };
+    primaryThreadId = stable.id;
+    primaryThreadRow = stable;
+    hasLoadedThreadState = false;
+    completionPulseStartedAt.clear();
+    const refresh = (fixedThreads) => refreshThreads(null, { retryDelays: [], reader: async () => ({
+      threads: [stable], currentThread: stable, fixedThreads, taskCatalog: [stable, ...fixedThreads]
+    }) });
+    assert.equal(await refresh([working]), true);
+    assert.equal(threadForContext("fixed").status, "working");
+    const completed = { ...working, status: "completed", endedAtMs: 100_100,
+      activity: { kind: "complete", code: "activity.completed" } };
+    now = 100_200;
+    assert.equal(await refresh([completed]), true);
+    assert.equal(completionPulseStartedAt.has(fixed.id), false, "first end observation only stages completion");
+    now = 100_300;
+    assert.equal(await refresh([completed]), true);
+    assert.equal(completionPulseStartedAt.has(fixed.id), true, "a coherent second end snapshot starts the Fixed pulse");
+    assert.equal(threadForContext("fixed").status, "completed");
+    assert.deepEqual(threadSlots.filter(Boolean).map((thread) => thread.id), [stable.id]);
+    renderAnimatedThreadContexts(now);
+    assert.ok(contextImages.get("fixed").includes(THEME.green));
+    now = 100_400;
+    assert.equal(await refresh([]), true);
+    assert.equal(threadForContext("fixed"), null);
+    assert.ok(contextImages.get("fixed").includes("Unavailable"));
+    assert.equal(completionPulseStartedAt.has(fixed.id), false);
+    assert.equal(threadForContext("ranked").id, stable.id);
+  } finally {
+    Date.now = originalNow;
+  }
+
+  const previewOutput = argument("--render-fixed-task-preview");
+  if (previewOutput) {
+    // Documentation uses synthetic titles and the same renderer as live keys.
+    const images = [];
+    let row = 0;
+    for (const [locale, title] of [["en", "Demo task"], ["ko", "예제 작업"], ["ru", "Создание плагина"]]) {
+      setLanguage(locale);
+      actionSettingsByContext.set("fixed", { ...assignment, fixedTaskTitle: title });
+      let column = 0;
+      for (const theme of [LIGHT_THEME, DARK_THEME]) {
+        THEME = theme;
+        for (const available of [true, false]) {
+          fixedThreadRows = new Map(available ? [[fixed.id, { ...fixed, title, status: "idle" }]] : []);
+          const svg = Buffer.from(taskContextImage("fixed")).toString("base64");
+          images.push(`<svg x="${64 + column * 156}" y="${42 + row * 170}" width="144" height="144" viewBox="0 0 144 144"><image width="144" height="144" clip-path="url(#keyClip)" href="data:image/svg+xml;base64,${svg}"/></svg>`);
+          column++;
+        }
+      }
+      images.push(`<text x="14" y="${120 + row * 170}" fill="#333" font-family="sans-serif" font-size="15">${locale.toUpperCase()}</text>`);
+      row++;
+    }
+    fsSync.writeFileSync(previewOutput, `<svg xmlns="http://www.w3.org/2000/svg" width="704" height="550" viewBox="0 0 704 550">
+      <defs><clipPath id="keyClip"><rect width="144" height="144" rx="22"/></clipPath></defs>
+      <rect width="704" height="550" fill="#eeeeee"/>
+      <text x="150" y="25" font-family="sans-serif" font-size="15">Available / Unavailable · Light</text>
+      <text x="440" y="25" font-family="sans-serif" font-size="15">Available / Unavailable · Dark</text>
+      ${images.join("\n")}</svg>\n`);
+  }
+
+  console.log(JSON.stringify({ passed: true, fixedIdentity: true, independentCurrentAndTop: true,
+    renameRemovalRecovery: true, heldSettingsCancellation: true, archivedRemoteExclusion: true,
+    fixedRefreshCompletion: true }));
+}
+
 function runSelectedMode() {
   if (keyBridgePermissionContractMode) {
     fsSync.accessSync(KEY_BRIDGE, fsSync.constants.X_OK);
@@ -15931,6 +16215,8 @@ function runSelectedMode() {
       packagedPath: PACKAGED_KEY_BRIDGE,
       runtimePath: KEY_BRIDGE
     }));
+  } else if (fixedTaskContractMode) {
+    verifyFixedTasks().catch((error) => { console.error(error); process.exitCode = 1; });
   } else if (completionContractMode) {
     verifyCompletionFanout();
   } else if (refreshResilienceContractMode) {
@@ -15999,7 +16285,8 @@ function main() {
     || refreshResilienceContractMode
     || usageCacheContractMode
     || voiceSubmitContractMode
-    || interactionContractMode;
+    || interactionContractMode
+    || fixedTaskContractMode;
   if (verificationOnly) {
     runSelectedMode();
     return;

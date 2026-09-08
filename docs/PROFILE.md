@@ -31,7 +31,7 @@ The three top-row workflow keys are copies of the same **Codex command** action,
 |---|---|---|---|
 | Top Task 5 | Top Task 6 | Top Task 7 | Page navigation (Previous) |
 
-Every task key on this page is another copy of the same **Codex task** action with Top 1–7 selected in its Property Inspector. Add another copy and choose Top 8 for a custom layout.
+Every task key on this page is another copy of the same **Codex task** action with Top 1–7 selected in its Property Inspector. Add another copy and choose Top 8 for a custom layout. To keep a specific task on a key, choose **Fixed task** and select it from the task picker. The assignment follows its UUID through renames and reordering; a missing or archived task is shown as unavailable. Existing profiles keep their Current and Top settings.
 
 ## Customize safely
 
