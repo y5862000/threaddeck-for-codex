@@ -37,6 +37,7 @@ Every task key on this page is another copy of the same **Codex task** action wi
 
 - Duplicate the profile in Stream Deck before making a large rearrangement.
 - Select a key to change its Task slot or Command in the autosaving Property Inspector.
+- Add **Task actions** or choose Approve/Decline in **Codex command** for identical confirmation controls. With the default **Task selected on Stream Deck** target, press a task key first; its name appears on the approval keys, and it remains selected while another app has focus. **Current dialog (foreground)** acts on the visible request instead. See [approval behavior and limitations](../README.md#approve-and-decline).
 - Keep the bundled ThreadDeck **Page navigation** key if you retain both pages. It is also available in the ThreadDeck action list, lets you choose Previous or Next, and follows light/dark appearance unlike Stream Deck's generic navigation actions.
 - The profile source is hardware-UUID-free and lives under [`profiles/source/unpacked`](../profiles/source/unpacked).
 - The release audit verifies the Neo model and every recommended key coordinate before publishing.

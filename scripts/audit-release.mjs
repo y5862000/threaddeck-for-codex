@@ -64,16 +64,18 @@ const expectedVisibleActionUuids = [
   "com.yechan.threaddeck.weekly",
   "com.yechan.threaddeck.thread1",
   "com.yechan.threaddeck.newthread",
+  "com.yechan.threaddeck.taskactions",
   "com.yechan.threaddeck.voice",
   "com.yechan.threaddeck.reasoning",
   "com.yechan.threaddeck.page.previous"
 ];
 if (JSON.stringify(visibleActionUuids) !== JSON.stringify(expectedVisibleActionUuids)) {
-  failures.push("Marketplace action list is not the six-action Codex-focused layout");
+  failures.push("Marketplace action list is not the seven-action Codex-focused layout");
 }
 for (const uuid of [
   "com.yechan.threaddeck.thread1",
   "com.yechan.threaddeck.newthread",
+  "com.yechan.threaddeck.taskactions",
   "com.yechan.threaddeck.page.previous"
 ]) {
   const action = pluginManifest.Actions.find((candidate) => candidate.UUID === uuid);

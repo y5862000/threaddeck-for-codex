@@ -77,6 +77,11 @@ static CGEventRef create_key_event(
   return event;
 }
 
+#include "approval-shortcuts.h"
+#include "approval-api-context.h"
+#include "review-continue.h"
+#include "approval-card.h"
+
 static void post_key(CGKeyCode key, bool down, CGEventFlags flags) {
   CGEventRef event = create_key_event(key, down, flags, NULL, 0);
   if (event == NULL) return;
@@ -2069,6 +2074,7 @@ static int print_permission_health(bool request) {
 
 static bool command_needs_accessibility(const char *command) {
   if (strstr(command, "selftest") != NULL) return false;
+  if (strcmp(command, "codex-approval-api-context") == 0) return false;
   if (strncmp(command, "fast-mode-", strlen("fast-mode-")) == 0) return true;
   if (strncmp(command, "reasoning-effort-", strlen("reasoning-effort-")) == 0) return true;
   if (strncmp(command, "codex-", strlen("codex-")) == 0
@@ -2094,6 +2100,8 @@ static bool command_needs_post_event_access(const char *command) {
       || strncmp(command, "codex-open-side-chat", strlen("codex-open-side-chat")) == 0
       || strncmp(command, "codex-find-thread", strlen("codex-find-thread")) == 0
       || strncmp(command, "codex-search-thread", strlen("codex-search-thread")) == 0
+      || strcmp(command, "codex-approval-shortcut") == 0
+      || strcmp(command, "codex-approval-card") == 0
       || strcmp(command, "codex-dismiss-intelligence-popover") == 0) return true;
   return strcmp(command, "voice-down") == 0
     || strcmp(command, "send") == 0
@@ -9247,7 +9255,58 @@ int main(int argc, char **argv) {
     return print_permission_health(true);
   }
   int permission_gate = command_permission_gate(argv[1]);
-  if (permission_gate != 0) return permission_gate;
+  if (permission_gate != 0) {
+    if (strcmp(argv[1], "codex-approval-context") == 0
+        || strcmp(argv[1], "codex-approval-shortcut") == 0
+        || strcmp(argv[1], "codex-review-continue") == 0
+        || strcmp(argv[1], "codex-review-diagnostics") == 0
+        || strcmp(argv[1], "codex-approval-card") == 0
+        || strcmp(argv[1], "codex-approval-card-diagnostics") == 0) {
+      return approval_print_error("permission-denied", permission_gate);
+    }
+    return permission_gate;
+  }
+  if (strcmp(argv[1], "codex-approval-api-context") == 0) {
+    if (argc != 2) return approval_api_print_error("invalid-arguments", 64);
+    return print_codex_approval_api_context();
+  }
+  if (strcmp(argv[1], "approval-api-context-selftest") == 0) {
+    if (argc != 2) return 64;
+    return approval_api_context_selftest();
+  }
+  if (strcmp(argv[1], "codex-approval-context") == 0) {
+    if (argc != 2) return approval_print_error("invalid-arguments", 64);
+    return print_codex_task_action_context();
+  }
+  if (strcmp(argv[1], "codex-approval-card") == 0) {
+    return codex_approval_card(argc, argv);
+  }
+  if (strcmp(argv[1], "codex-approval-card-diagnostics") == 0) {
+    if (argc != 2) return approval_print_error("invalid-arguments", 64);
+    return print_codex_approval_card_diagnostics();
+  }
+  if (strcmp(argv[1], "approval-card-selftest") == 0) {
+    if (argc != 2) return 64;
+    return approval_card_selftest();
+  }
+  if (strcmp(argv[1], "codex-approval-shortcut") == 0) {
+    return codex_approval_shortcut(argc, argv);
+  }
+  if (strcmp(argv[1], "approval-shortcut-selftest") == 0) {
+    if (argc != 2) return 64;
+    return approval_shortcut_selftest();
+  }
+  if (strcmp(argv[1], "codex-review-continue") == 0) {
+    return codex_review_continue(argc, argv);
+  }
+  if (strcmp(argv[1], "codex-review-diagnostics") == 0) {
+    if (argc != 2) return approval_print_error("invalid-arguments", 64);
+    return print_codex_review_diagnostics();
+  }
+  if (strcmp(argv[1], "review-continue-selftest") == 0) {
+    if (argc != 2) return 64;
+    return review_continue_selftest();
+  }
   if (strcmp(argv[1], "fast-mode-set") == 0) {
     if (argc != 3) return 64;
     if (strcmp(argv[2], "on") == 0) {

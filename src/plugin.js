@@ -63,6 +63,10 @@ const {
   recordRemoteComposerStateObservation,
 } = require("./remote-state");
 const { selectTopThreadRows: selectThreadRows } = require("./thread-selection");
+const { ApprovalControls } = require("./approval-controls");
+const { ApprovalShortcutControls } = require("./approval-shortcuts");
+const { CodexIpcClient } = require("./codex-ipc");
+const { IpcApprovalControls } = require("./ipc-approvals");
 const { isInternalThreadRecord } = require("./thread-privacy");
 const {
   parseCodexQueueWindows,
@@ -102,6 +106,7 @@ const {
 const { readInstalledProfilePageState } = require("./streamdeck-profile-state");
 const {
   codexCommandFromSettings,
+  taskActionFromSettings,
   taskSlotFromSettings
 } = require("./action-settings");
 const {
@@ -251,12 +256,20 @@ const RUNTIME_TRACE_FIELDS = new Set([
   "accessibility",
   "postEvent",
   "codexAccess",
-  "issue"
+  "issue",
+  "scanComplete",
+  "visited",
+  "scanLimit",
+  "reviewState",
+  "cardState",
+  "cardReason",
+  "decision"
 ]);
 const CURRENT_THREAD_AWARE_ACTIONS = new Set([
   ACTIONS.thread1,
   ACTIONS.sideChat,
   ACTIONS.newThread,
+  ACTIONS.taskActions,
   ACTIONS.voice,
   ACTIONS.send,
   ACTIONS.fastMode,
@@ -363,6 +376,7 @@ const refreshResilienceContractMode = process.argv.includes("--verify-refresh-re
 const usageCacheContractMode = process.argv.includes("--verify-usage-cache");
 const voiceSubmitContractMode = process.argv.includes("--verify-voice-submit");
 const interactionContractMode = process.argv.includes("--verify-interactions");
+const approvalContractMode = process.argv.includes("--verify-approvals");
 const keyBridgePermissionContractMode = process.argv.includes("--verify-keybridge-permission");
 const demoOutput = argument("--render-demo");
 const demoLightOutput = argument("--render-demo-light");
@@ -379,6 +393,7 @@ const runtimeTraceEnabled = !snapshotMode
   && !usageCacheContractMode
   && !voiceSubmitContractMode
   && !interactionContractMode
+  && !approvalContractMode
   && !keyBridgePermissionContractMode
   && !demoOutput
   && !demoLightOutput
@@ -488,6 +503,8 @@ let activeAppearanceRefresh = null;
 // independently selectable Current Task action resolves through
 // `primaryThreadRow`, so switching tasks never silently renumbers the list.
 let threadSlots = Array(THREAD_COUNT).fill(null);
+const approvalPressByContext = new Map();
+let approvalOperation = null;
 let primaryThreadId = null;
 let primaryThreadRow = null;
 let usageState = { remaining: null, failed: false };
@@ -820,6 +837,7 @@ function threadForContext(context) {
 }
 
 function codexCommandForContext(context, action = contexts.get(context)) {
+  if (action === ACTIONS.taskActions) return taskActionFromSettings(settingsForContext(context));
   if (action === ACTIONS.sideChat) return "side-chat";
   if (action === ACTIONS.send) return "send";
   if (action === ACTIONS.newThread) {
@@ -872,6 +890,24 @@ const codexMicroBridge = new CodexMicroBridge({
   log: (message) => {
     runtimeTrace("control-plane", { strategy: "micro", result: "connected" });
     if (process.env.THREADDECK_MICRO_DEBUG === "1") console.log(message);
+  }
+});
+const approvalControls = new ApprovalControls({
+  readRequest: (threadId) => codexMicroBridge.readApprovalRequest(threadId),
+  respond: (decision, request, options) => codexMicroBridge.respondToApproval(decision, request, options)
+});
+const approvalShortcutControls = new ApprovalShortcutControls({
+  run: (args) => execFileAsync(KEY_BRIDGE, args, { timeout: 2200, maxBuffer: 16 * 1024 })
+});
+const ipcApprovalControls = new IpcApprovalControls({
+  client: new CodexIpcClient(),
+  readContext: async () => {
+    try {
+      const result = await execFileAsync(KEY_BRIDGE, ["codex-approval-api-context"], { timeout: 2200, maxBuffer: 4096 });
+      return JSON.parse(result.stdout);
+    } catch (error) {
+      try { return JSON.parse(error.stdout); } catch { return { ok: false, error: "context-unavailable" }; }
+    }
   }
 });
 const codexControlPlane = new CodexControlPlane({
@@ -1122,6 +1158,7 @@ function showFeedback(context, kind, label, durationMs) {
     if (contextFeedback.get(context)?.token !== token) return;
     dismissFeedback(context, token);
   }, duration);
+  return token;
 }
 
 function dismissFeedback(context, token = null, nowMs = Date.now()) {
@@ -1966,17 +2003,28 @@ function cancelThreadPress(context, releaseVoice = true) {
   if (voiceStateByContext.get(context) === "preparing") setVoiceVisualState(context, "idle");
 }
 
+let approvalTaskTarget = null;
+
+function selectApprovalTask(thread) {
+  // Only an explicit task-key press supplies the UUID for background approval.
+  // A task title, periodic observer or Side Chat header cannot replace it.
+  approvalTaskTarget = thread?.id ? Object.freeze({ id: thread.id,
+    title: thread.title || t("thread.untitled"), remote: thread.remote, hostId: thread.hostId }) : null;
+  renderStaticContexts();
+  return approvalTaskTarget;
+}
+
+
 function beginThreadPress(context, slot, options = {}) {
   if (threadPressByContext.has(context)) return;
-  const thread = options.thread ?? threadForSlot(slot);
+  const thread = options.thread ?? (context ? threadForContext(context) : threadForSlot(slot));
+  const productionControl = !options.openThread && !options.focusComposer && !options.beginVoice;
+  if (productionControl || options.bindApprovalTarget === true) selectApprovalTask(thread);
   if (!thread?.id) {
     showFeedback(context, "error", "작업 없음");
     return;
   }
 
-  const productionControl = !options.openThread
-    && !options.focusComposer
-    && !options.beginVoice;
   const microStatus = options.microStatus
     ?? (productionControl ? microControlThreadStatus : null);
   const state = {
@@ -2397,6 +2445,189 @@ function endReasoningControlPress(context, options = {}) {
     : stepReasoningEffort(context, options.reasoning ?? options);
 }
 
+function approvalSvg(decision, target = approvalTaskTarget) {
+  const approve = decision === "approve";
+  const accent = approve ? THEME.green : THEME.red;
+  const mark = approve ? "M48 66L65 83L97 49" : "M53 49L91 87M91 49L53 87";
+  const title = target ? [...target.title].slice(0, 12).join("") + ([...target.title].length > 12 ? "…" : "") : "";
+  return shell(accent, `
+    ${title ? `<text x="72" y="18" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="11" text-anchor="middle">${escapeXml(title)}</text>` : ""}
+    <circle cx="72" cy="67" r="41" fill="none" stroke="${accent}" stroke-width="5"/>
+    <path d="${mark}" fill="none" stroke="${THEME.text}" stroke-width="6" stroke-linecap="round" stroke-linejoin="round"/>
+    <text x="72" y="126" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="17" font-weight="600" text-anchor="middle">${escapeXml(t(approve ? "approval.approve" : "approval.decline"))}</text>`);
+}
+
+function cancelApprovalPress(context) {
+  const state = approvalPressByContext.get(context);
+  approvalPressByContext.delete(context);
+  if (state) {
+    state.clearPendingFeedback();
+    void state.request.then((capture) => {
+      if (capture?.route === "ipc") state.ipc?.cancel(capture.lease);
+      else state.shortcuts.cancel(capture?.lease);
+      if (!state.released && approvalOperation === state) approvalOperation = null;
+    });
+  }
+}
+
+function updateKeyEventSettings(context, settings) {
+  if (!settings) return false;
+  const hadApprovalPress = approvalPressByContext.has(context);
+  const previousCommand = codexCommandForContext(context);
+  const previousApprovalTarget = approvalTargetMode(context);
+  actionSettingsByContext.set(context, settings);
+  if (hadApprovalPress && (previousCommand !== codexCommandForContext(context)
+      || previousApprovalTarget !== approvalTargetMode(context))) {
+    cancelApprovalPress(context);
+    return true;
+  }
+  return false;
+}
+
+function approvalTargetMode(context) {
+  const settings = settingsForContext(context);
+  const mode = settings.approvalTarget;
+  return !Object.hasOwn(settings, "approvalTarget") ? "task-key" : ["task-key", "current-dialog"].includes(mode) ? mode : null;
+}
+
+function approvalKeySvg(decision, context) {
+  const mode = approvalTargetMode(context);
+  return approvalSvg(decision, mode === "task-key"
+    ? approvalTaskTarget ?? { title: t("approval.task") }
+    : { title: mode === "current-dialog" ? t("approval.current") : "?" });
+}
+
+function beginApprovalPress(context, options = {}) {
+  if (approvalOperation || approvalPressByContext.size > 0) return;
+  const decision = codexCommandForContext(context);
+  if (decision !== "approve" && decision !== "decline") return;
+  const mode = approvalTargetMode(context);
+  if (mode == null) return;
+  const target = mode === "current-dialog" ? null : Object.hasOwn(options, "target") ? options.target
+    : approvalContractMode ? null : approvalTaskTarget;
+  const state = { decision, target, mode, threadId: target?.id ?? currentControlThreadId(), startedAtMs: Date.now(), released: false, request: null,
+    shortcuts: options.shortcuts ?? approvalShortcutControls,
+    ipc: mode === "current-dialog" ? null : Object.hasOwn(options, "ipc") ? options.ipc
+      : approvalContractMode ? null : ipcApprovalControls };
+  approvalPressByContext.set(context, state);
+  approvalOperation = state;
+  const beginFeedback = options.beginFeedback ?? showFeedback;
+  const clearPendingFeedback = options.clearPendingFeedback ?? dismissFeedback;
+  const feedbackToken = beginFeedback(context, "loading", t("feedback.checking"));
+  state.clearPendingFeedback = () => {
+    if (feedbackToken !== null && feedbackToken !== undefined) clearPendingFeedback(context, feedbackToken);
+  };
+  state.isCurrent = () => approvalPressByContext.get(context) === state
+    && codexCommandForContext(context) === state.decision
+    && approvalTargetMode(context) === state.mode
+    && (state.target ? (options.targetIsCurrent?.() ?? approvalTaskTarget === state.target)
+      : currentControlThreadId() === state.threadId)
+    && !activeRemoteNavigation?.promise && !activeDeepLinkNavigation?.promise && !activeComposerCreation;
+  // A command being eligible for Micro does not mean its bridge preparation
+  // succeeded. A physical approval press only inspects an already ready bridge.
+  const available = options.available ?? (() => codexControlPlane.shouldTryMicro() && codexMicroBridge.isReady());
+  const synchronize = options.synchronize ?? (() => synchronizeCurrentCodexThread({ quiet: true, refreshFastMode: false }));
+  const readRequest = options.readRequest ?? ((id) => codexMicroBridge.readApprovalRequest(id));
+  const verifyTarget = async () => state.target?.remote === false
+    && (state.target.hostId == null || state.target.hostId === "local") && state.isCurrent();
+  state.request = (async () => {
+    if (!state.isCurrent()) return null;
+    if (state.ipc) {
+      if (!await verifyTarget()) return { route: "ipc", ok: false, reason: "no-selected-task" };
+      const capture = await state.ipc.capture(state.threadId, state.isCurrent, verifyTarget);
+      // A task selected on the deck never falls through to a different visible
+      // native card, including when IPC is unavailable.
+      return { route: "ipc", ...capture };
+    }
+    if (state.threadId && available()) {
+      try {
+        const current = await synchronize();
+        if (!state.isCurrent()) return null;
+        if (current?.id === state.threadId) {
+          const request = await readRequest(state.threadId);
+          if (!state.isCurrent()) return null;
+          if (request) return { route: "renderer", request };
+        }
+      } catch {
+        // Inspection cannot dispatch a decision. Falling back here is safe;
+        // once renderer delivery starts, its result is final for this press.
+      }
+    }
+    if (!state.isCurrent()) return null;
+    const capture = await state.shortcuts.capture(state.isCurrent);
+    if (capture.diagnostics) runtimeTrace("approval-native-capture", {
+      ...capture.diagnostics, decision: state.decision, elapsedMs: Date.now() - state.startedAtMs
+    });
+    return { route: "native", ...capture };
+  })().catch(() => null);
+}
+
+function approvalShortcutFeedback(reason) {
+  if (["approval-unavailable", "no-requests"].includes(reason)) return t("approval.unavailable");
+  if (reason === "multiple-requests") return t("approval.multiple");
+  if (["no-selected-task", "target-changed"].includes(reason)) return t("approval.task");
+  if (reason === "unsupported-request") return t("approval.review");
+  if (["review-required", "review-unchecked"].includes(reason)) return t("approval.review");
+  if (reason === "review-unavailable") return t("approval.focus");
+  if (["permission-denied"].includes(reason)) return t("approval.permission");
+  if (["not-frontmost", "context-unavailable", "session-unavailable", "session-inactive", "session-locked"].includes(reason)) return t("approval.focus");
+  return t("approval.changed");
+}
+
+async function endApprovalPress(context, options = {}) {
+  const state = approvalPressByContext.get(context);
+  if (!state || state.released) return false;
+  state.released = true;
+  const feedback = options.feedback ?? showFeedback;
+  const execute = options.execute ?? ((decision, id, request, isCurrent) => approvalControls.execute(decision, id, { request, isCurrent }));
+  let capture;
+  try {
+    capture = await state.request;
+    if (approvalPressByContext.get(context) !== state) return false;
+    if (!capture || !state.isCurrent()) {
+      feedback(context, "error", t("approval.changed"));
+      return false;
+    }
+    if (capture.route === "ipc") {
+      const result = capture.ok
+        ? await state.ipc.execute(state.decision, capture.lease, state.isCurrent) : capture;
+      runtimeTrace("approval-ipc", { decision: state.decision, result: result.ok ? "owner-accepted" : "failed",
+        reason: result.reason ?? "none", elapsedMs: Date.now() - state.startedAtMs });
+      if (approvalPressByContext.get(context) !== state) return false;
+      feedback(context, result.ok ? "info" : "error", result.ok ? t("approval.sent") : approvalShortcutFeedback(result.reason));
+      return result.ok === true;
+    }
+    if (capture.route === "native") {
+      const result = capture.ok
+        ? await state.shortcuts.execute(state.decision, capture.lease, state.isCurrent)
+        : capture;
+      runtimeTrace("approval-native", { decision: state.decision, result: result.ok ? "sent" : "failed",
+        reason: result.reason ?? "none", elapsedMs: Date.now() - state.startedAtMs });
+      if (approvalPressByContext.get(context) !== state) return false;
+      // Native activation has no request-resolution acknowledgment from Codex.
+      // Blue Sent means activation was sent, never that the request completed.
+      feedback(context, result.ok ? "info" : "error", result.ok
+        ? t("approval.sent") : approvalShortcutFeedback(result.reason));
+      return result.ok === true;
+    }
+    const result = await execute(state.decision, state.threadId, capture.request, state.isCurrent);
+    if (approvalPressByContext.get(context) !== state) return false;
+    feedback(context, result?.ok ? "info" : "error", result?.ok ? t("approval.sent")
+      : t(result?.reason === "unavailable" ? "approval.unavailable" : "approval.changed"));
+    if (result?.ok && !options.execute) void refreshThreads();
+    return result?.ok === true;
+  } catch {
+    if (approvalPressByContext.get(context) === state) feedback(context, "error", t("approval.changed"));
+    return false;
+  } finally {
+    state.clearPendingFeedback();
+    if (capture?.route === "ipc") state.ipc?.cancel(capture.lease);
+    else state.shortcuts.cancel(capture?.lease);
+    if (approvalPressByContext.get(context) === state) approvalPressByContext.delete(context);
+    if (approvalOperation === state) approvalOperation = null;
+  }
+}
+
 function sideChatSvg() {
   return shell(THEME.text, `
     <path d="M72 36C94 36 111 51.8 111 72.5C111 80.8 108.3 88.4 103.5 94.2L107 110L91.5 105.3C85.8 108.4 79.2 110 72 110C50 110 33 93.9 33 72.5C33 51.8 50 36 72 36Z" fill="none" stroke="${THEME.text}" stroke-width="5.5" stroke-linecap="round" stroke-linejoin="round"/>
@@ -2415,9 +2646,14 @@ function pageNavigationSvg(action, settings = {}) {
 
 function staticActionSvg(action, context = null) {
   const controlThreadId = currentControlThreadId();
+  if (action === ACTIONS.taskActions) {
+    const decision = context ? codexCommandForContext(context, action) : "approve";
+    return decision ? approvalKeySvg(decision, context) : shell(THEME.red, `<text x="72" y="82" fill="${THEME.text}" font-family="${FONT_STACK}" font-size="40" text-anchor="middle">?</text>`);
+  }
   if (action === ACTIONS.newThread) {
     const command = context ? codexCommandForContext(context, action) : "new-task";
     if (command === "side-chat") return sideChatSvg();
+    if (command === "approve" || command === "decline") return approvalKeySvg(command, context);
     if (command === "send") {
       return sendSvg(context ? sendLongPressArmedContexts.has(context) : false);
     }
@@ -10200,6 +10436,23 @@ async function switchProfilePage(context, device, action, settings = {}, options
   return true;
 }
 
+function applyReceivedSettings(context, settings) {
+  const wasSendControl = contextIsSendControl(context);
+  updateKeyEventSettings(context, settings);
+  if (wasSendControl && !contextIsSendControl(context)) {
+    cancelSendPress(context, false);
+  }
+  const action = contexts.get(context);
+  const slot = threadSlotForContext(context, action);
+  if (slot !== undefined) {
+    setImage(context, threadSvg(displayedThreadSlot(slot), slot));
+    void refreshThreads();
+  } else {
+    const svg = staticActionSvg(action, context);
+    if (svg) setImage(context, svg);
+  }
+}
+
 function registerPlugin() {
   if (!port || !pluginUUID || !registerEvent) process.exit(1);
   socket = new WebSocket(`ws://127.0.0.1:${port}`);
@@ -10233,6 +10486,7 @@ function registerPlugin() {
   });
 
   socket.addEventListener("close", () => {
+    for (const context of approvalPressByContext.keys()) cancelApprovalPress(context);
     imageDeliveryQueue.clear();
   });
 
@@ -10279,20 +10533,7 @@ function registerPlugin() {
     }
 
     if (message.event === "didReceiveSettings" && contexts.has(message.context)) {
-      const wasSendControl = contextIsSendControl(message.context);
-      actionSettingsByContext.set(message.context, message.payload?.settings ?? {});
-      if (wasSendControl && !contextIsSendControl(message.context)) {
-        cancelSendPress(message.context, false);
-      }
-      const action = contexts.get(message.context);
-      const slot = threadSlotForContext(message.context, action);
-      if (slot !== undefined) {
-        setImage(message.context, threadSvg(displayedThreadSlot(slot), slot));
-        void refreshThreads();
-      } else {
-        const svg = staticActionSvg(action, message.context);
-        if (svg) setImage(message.context, svg);
-      }
+      applyReceivedSettings(message.context, message.payload?.settings ?? {});
     } else if (message.event === "willAppear" && Object.values(ACTIONS).includes(message.action)) {
       contexts.set(message.context, message.action);
       actionSettingsByContext.set(message.context, message.payload?.settings ?? {});
@@ -10342,6 +10583,7 @@ function registerPlugin() {
       voiceStateByContext.delete(message.context);
       voiceSessionIdByContext.delete(message.context);
       contexts.delete(message.context);
+      cancelApprovalPress(message.context);
       actionSettingsByContext.delete(message.context);
       contextDeviceIds.delete(message.context);
       contextImages.delete(message.context);
@@ -10352,12 +10594,12 @@ function registerPlugin() {
       permissionAlertedContexts.delete(message.context);
       microBridgeAlertedContexts.delete(message.context);
     } else if (message.event === "keyDown" && contexts.has(message.context)) {
-      if (message.payload?.settings) {
-        actionSettingsByContext.set(message.context, message.payload.settings);
-      }
+      if (updateKeyEventSettings(message.context, message.payload?.settings)) return;
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice && !voiceHeldContexts.has(message.context)) {
         beginCurrentVoicePress(message.context);
+      } else if (["approve", "decline"].includes(codexCommandForContext(message.context))) {
+        beginApprovalPress(message.context);
       } else if (contextIsSendControl(message.context)) {
         beginSendPress(message.context);
       } else if (action === ACTIONS.fastMode) {
@@ -10368,12 +10610,12 @@ function registerPlugin() {
         beginThreadPress(message.context, threadSlotForContext(message.context, action));
       }
     } else if (message.event === "keyUp" && contexts.has(message.context)) {
-      if (message.payload?.settings) {
-        actionSettingsByContext.set(message.context, message.payload.settings);
-      }
+      if (updateKeyEventSettings(message.context, message.payload?.settings)) return;
       const action = contexts.get(message.context);
       if (action === ACTIONS.voice) {
         endCurrentVoicePress(message.context);
+      } else if (["approve", "decline"].includes(codexCommandForContext(message.context))) {
+        void endApprovalPress(message.context);
       } else if (contextIsSendControl(message.context)) {
         void endSendPress(message.context);
       } else if (threadSlotForContext(message.context, action) !== undefined) {
@@ -15907,19 +16149,419 @@ function installShutdownHandlers() {
     releaseVoiceKeysSync();
     codexMicroBootstrap.close();
     codexControlPlane.close();
+    ipcApprovalControls.close();
     process.exit(0);
   });
   process.once("SIGINT", () => {
     releaseVoiceKeysSync();
     codexMicroBootstrap.close();
     codexControlPlane.close();
+    ipcApprovalControls.close();
     process.exit(0);
   });
   process.on("exit", () => {
     releaseVoiceKeysSync();
     codexMicroBootstrap.close();
     codexControlPlane.close();
+    ipcApprovalControls.close();
   });
+}
+
+async function verifyApprovalControls() {
+  const assert = require("node:assert/strict");
+  const recent = { id: "10000000-0000-4000-8000-000000000001", title: "Recent task", status: "idle", remote: false };
+  const waiting = { id: "10000000-0000-4000-8000-000000000002", title: "Waiting task", status: "working", remote: false };
+  const messages = [];
+  socket = { readyState: 1, send: (message) => messages.push(JSON.parse(message)) };
+  contexts.set("task", ACTIONS.thread1);
+  actionSettingsByContext.set("task", { taskSource: "top1" });
+  threadSlots = [waiting, recent];
+  primaryThreadId = recent.id;
+  primaryThreadRow = recent;
+  const opened = [];
+  beginThreadPress("task", 0, {
+    bindApprovalTarget: true,
+    openThread: async (_context, _slot, options) => { opened.push(options.thread.id); return true; },
+    focusComposer: async () => false, beginVoice: async () => false,
+    pauseMedia: async () => false, resumeMedia: async () => false,
+    sleep: async () => {}, schedule: () => null
+  });
+  assert.equal(approvalTaskTarget.id, waiting.id, "Top task key binds the displayed UUID");
+  threadSlots = [recent, waiting];
+  endThreadPress("task");
+  await Promise.resolve();
+  assert.deepEqual(opened, [waiting.id], "task reordering does not retarget an in-flight key press");
+  selectApprovalTask(null);
+  actionSettingsByContext.set("task", { taskSource: "current" });
+  beginThreadPress("task", -1, {
+    bindApprovalTarget: true,
+    openThread: async (_context, _slot, options) => { opened.push(options.thread.id); return true; },
+    focusComposer: async () => false, beginVoice: async () => false,
+    pauseMedia: async () => false, resumeMedia: async () => false,
+    sleep: async () => {}, schedule: () => null
+  });
+  assert.equal(approvalTaskTarget.id, recent.id, "Current task key binds the displayed UUID");
+  primaryThreadId = waiting.id;
+  primaryThreadRow = waiting;
+  endThreadPress("task");
+  await Promise.resolve();
+  assert.deepEqual(opened, [waiting.id, recent.id], "Current task changes do not retarget an in-flight key press");
+  primaryThreadId = recent.id;
+  primaryThreadRow = recent;
+  selectApprovalTask(null);
+  const request = { threadId: recent.id, requestId: 42, hostId: "local", kind: "exec" };
+  contexts.set("approval", ACTIONS.newThread);
+  actionSettingsByContext.set("approval", { command: "approve" });
+  const delivered = [];
+  const rendererFeedback = [];
+  const quietApprovalFeedback = { beginFeedback: () => null };
+  const start = () => beginApprovalPress("approval", {
+    ...quietApprovalFeedback,
+    available: () => true, synchronize: async () => recent, readRequest: async () => request
+  });
+  start();
+  const approved = await endApprovalPress("approval", {
+    execute: async (decision, id, identity) => { delivered.push({ decision, id, identity }); return { ok: true }; },
+    feedback: (...args) => rendererFeedback.push(args)
+  });
+  assert.equal(approved, true);
+  assert.deepEqual(rendererFeedback, [["approval", "info", t("approval.sent")]], "renderer dispatch is blue Sent, not completed work");
+  assert.deepEqual(delivered, [{ decision: "approve", id: recent.id, identity: request }]);
+  assert.equal(await endApprovalPress("approval", { execute: () => assert.fail("duplicate release"), feedback: () => {} }), false);
+
+  start();
+  await approvalPressByContext.get("approval").request;
+  primaryThreadId = waiting.id;
+  primaryThreadRow = waiting;
+  assert.equal(await endApprovalPress("approval", { execute: () => assert.fail("changed task"), feedback: () => {} }), false);
+  primaryThreadId = recent.id;
+  primaryThreadRow = recent;
+  start();
+  await approvalPressByContext.get("approval").request;
+  cancelApprovalPress("approval");
+  assert.equal(await endApprovalPress("approval", { execute: () => assert.fail("cancelled context"), feedback: () => {} }), false);
+  beginApprovalPress("approval", { ...quietApprovalFeedback, available: () => false, readRequest: () => assert.fail("unavailable bridge"),
+    shortcuts: { capture: async () => ({ ok: false, reason: "not-frontmost" }), cancel: () => {} } });
+  assert.equal(await endApprovalPress("approval", { execute: () => assert.fail("unavailable request"), feedback: () => {} }), false);
+  // The native card route remains available on builds with no renderer bridge.
+  // Fixtures inject the helper; no live input is emitted by verification.
+  const shortcutCalls = [];
+  const shortcuts = new ApprovalShortcutControls({
+    run: async (args) => {
+      shortcutCalls.push(args);
+      return { stdout: JSON.stringify(args.length === 1
+        ? { pid: 123, token: "v2:123:45:501:1",
+          approval: { state: "ready", token: `a1:${"d".repeat(64)}` } } : { sent: true }) };
+    }
+  });
+  beginApprovalPress("approval", { ...quietApprovalFeedback, available: () => false, shortcuts });
+  const nativeFeedback = [];
+  assert.equal(await endApprovalPress("approval", {
+    execute: () => assert.fail("renderer must not run for shortcut capture"),
+    feedback: (...args) => nativeFeedback.push(args)
+  }), true);
+  assert.equal(shortcutCalls.length, 2);
+  assert.deepEqual(nativeFeedback, [["approval", "info", t("approval.sent")]]);
+  beginApprovalPress("approval", { ...quietApprovalFeedback, available: () => false, shortcuts });
+  await approvalPressByContext.get("approval").request;
+  cancelApprovalPress("approval");
+  await Promise.resolve();
+  assert.equal(shortcuts.active, null);
+  assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+  assert.equal(shortcutCalls.length, 3, "cancelled capture must not dispatch");
+  beginApprovalPress("approval", { ...quietApprovalFeedback, available: () => false, shortcuts });
+  await approvalPressByContext.get("approval").request;
+  assert.equal(updateKeyEventSettings("approval", { command: "new-task" }), true);
+  await Promise.resolve();
+  assert.equal(shortcuts.active, null);
+  assert.equal(approvalPressByContext.has("approval"), false);
+  actionSettingsByContext.set("approval", { command: "approve" });
+  start();
+  assert.equal(await endApprovalPress("approval", {
+    execute: async () => ({ ok: false, reason: "delivery-unknown", delivery: "unknown" }), feedback: () => {}
+  }), false);
+  assert.equal(shortcutCalls.length, 4, "renderer uncertainty must not trigger a shortcut");
+  let releaseRead;
+  let readStarted;
+  const startedRead = new Promise((resolve) => { readStarted = resolve; });
+  const waitingRead = new Promise((resolve) => { releaseRead = resolve; });
+  let responses = 0;
+  const delayedControls = new ApprovalControls({
+    readRequest: async () => { readStarted(); return waitingRead; },
+    respond: async () => { responses += 1; return { delivered: true }; },
+    executionState: { tail: Promise.resolve(), attempted: new Set() }
+  });
+  start();
+  const pendingApproval = endApprovalPress("approval", {
+    execute: (decision, id, captured, isCurrent) => delayedControls.execute(decision, id, { request: captured, isCurrent }),
+    feedback: () => {}
+  });
+  await startedRead;
+  cancelApprovalPress("approval");
+  releaseRead(request);
+  assert.equal(await pendingApproval, false);
+  assert.equal(responses, 0, "settings/context cancellation while queued must prevent delivery");
+  contexts.set("approval", ACTIONS.taskActions);
+  for (const [settings, decision] of [[{}, "approve"], [{ command: "decline" }, "decline"]]) {
+    actionSettingsByContext.set("approval", settings);
+    assert.equal(codexCommandForContext("approval"), decision);
+    start();
+    assert.equal(await endApprovalPress("approval", {
+      execute: async (actual, id, identity) => {
+        assert.equal(actual, decision);
+        assert.equal(id, recent.id);
+        assert.deepEqual(identity, request);
+        return { ok: true };
+      },
+      feedback: () => {}
+    }), true);
+    assert.equal(staticActionSvg(ACTIONS.taskActions, "approval"), approvalKeySvg(decision, "approval"));
+  }
+  actionSettingsByContext.set("approval", { command: "approve" });
+  const originalApprovalReadiness = codexMicroBridge.isReady;
+  const originalShouldTryMicro = codexControlPlane.shouldTryMicro;
+  try {
+    codexControlPlane.shouldTryMicro = () => true;
+    codexMicroBridge.isReady = () => false;
+    const pendingFeedback = new Map();
+    const feedbackCalls = [];
+    let feedbackToken = 0;
+    const fixtureFeedback = (context, kind, label) => {
+      const token = ++feedbackToken;
+      pendingFeedback.set(context, { token, kind, label });
+      feedbackCalls.push({ context, kind, label });
+      return token;
+    };
+    const pendingFeedbackOptions = {
+      beginFeedback: fixtureFeedback,
+      clearPendingFeedback: (context, token) => {
+        if (pendingFeedback.get(context)?.token === token) pendingFeedback.delete(context);
+      }
+    };
+    let releaseCapture;
+    const capturePromise = new Promise((resolve) => { releaseCapture = resolve; });
+    let captures = 0;
+    let nativeDispatches = 0;
+    const delayedShortcuts = {
+      capture: () => { captures += 1; return capturePromise; },
+      execute: async (decision, lease, isCurrent) => {
+        assert.equal(decision, "approve");
+        assert.equal(lease, "deferred-native");
+        assert.equal(isCurrent(), true);
+        nativeDispatches += 1;
+        return { ok: true };
+      },
+      cancel: () => {}
+    };
+    const beginDelayedNative = () => beginApprovalPress("approval", {
+      ...pendingFeedbackOptions,
+      synchronize: () => assert.fail("a cold bridge must not synchronize before native capture"),
+      readRequest: () => assert.fail("a cold bridge must not inspect or prepare the renderer"),
+      shortcuts: delayedShortcuts
+    });
+    beginDelayedNative();
+    assert.deepEqual(feedbackCalls, [{ context: "approval", kind: "loading", label: t("feedback.checking") }]);
+    assert.equal(captures, 1, "native capture starts before any asynchronous bridge operation");
+    const shortPress = endApprovalPress("approval", {
+      execute: () => assert.fail("native capture must not dispatch through the renderer"),
+      feedback: fixtureFeedback
+    });
+    beginDelayedNative();
+    assert.equal(await endApprovalPress("approval", { feedback: fixtureFeedback }), false);
+    assert.equal(captures, 1);
+    assert.equal(nativeDispatches, 0);
+    assert.equal(feedbackCalls.length, 1, "duplicate presses cannot replace the pending indicator");
+    releaseCapture({ ok: true, lease: "deferred-native" });
+    assert.equal(await shortPress, true);
+    assert.equal(nativeDispatches, 1, "a release before capture completes still dispatches exactly once");
+    assert.deepEqual(pendingFeedback.get("approval"), {
+      token: 2, kind: "info", label: t("approval.sent")
+    });
+    assert.equal(approvalPressByContext.has("approval"), false);
+
+    for (const newerFeedback of [false, true]) {
+      let finishCancelledCapture;
+      const cancelledCapture = new Promise((resolve) => { finishCancelledCapture = resolve; });
+      beginApprovalPress("approval", {
+        ...pendingFeedbackOptions,
+        shortcuts: {
+          capture: () => cancelledCapture,
+          execute: () => assert.fail("a cancelled short press cannot dispatch"),
+          cancel: () => {}
+        }
+      });
+      const cancelledState = approvalPressByContext.get("approval");
+      if (newerFeedback) fixtureFeedback("approval", "info", "Newer feedback");
+      cancelApprovalPress("approval");
+      if (newerFeedback) assert.equal(pendingFeedback.get("approval")?.label, "Newer feedback");
+      else assert.equal(pendingFeedback.has("approval"), false, "cancellation clears its pending indicator immediately");
+      finishCancelledCapture({ ok: true, lease: "cancelled-native" });
+      await cancelledState.request;
+      assert.equal(await endApprovalPress("approval", { feedback: fixtureFeedback }), false);
+      assert.equal(nativeDispatches, 1);
+    }
+
+    codexMicroBridge.isReady = () => true;
+    beginApprovalPress("approval", {
+      ...quietApprovalFeedback,
+      synchronize: async () => recent,
+      readRequest: async () => request,
+      shortcuts: { capture: () => assert.fail("a ready renderer keeps its existing route"), cancel: () => {} }
+    });
+    assert.equal(await endApprovalPress("approval", {
+      execute: async (decision, id, identity) => {
+        assert.equal(decision, "approve");
+        assert.equal(id, recent.id);
+        assert.deepEqual(identity, request);
+        return { ok: true };
+      },
+      feedback: () => {}
+    }), true);
+  } finally {
+    codexMicroBridge.isReady = originalApprovalReadiness;
+    codexControlPlane.shouldTryMicro = originalShouldTryMicro;
+  }
+  for (const result of [{ ok: true, delivery: "owner-accepted" }, { ok: false, reason: "delivery-unknown", delivery: "unknown" }]) {
+    let captured = 0, dispatched = 0;
+    const ipc = {
+      capture: async (id, isCurrent) => {
+        assert.equal(id, recent.id);
+        assert.equal(isCurrent(), true);
+        captured++;
+        return { ok: true, lease: "ipc-fixture" };
+      },
+      execute: async (decision, lease, isCurrent) => {
+        assert.equal(decision, "approve");
+        assert.equal(lease, "ipc-fixture");
+        assert.equal(isCurrent(), true);
+        dispatched++;
+        return result;
+      }, cancel: () => {}
+    };
+    beginApprovalPress("approval", { ...quietApprovalFeedback, ipc,
+      target: recent, targetIsCurrent: () => true,
+      synchronize: () => assert.fail("IPC does not focus or synchronize the renderer"),
+      shortcuts: { capture: () => assert.fail("IPC must not send keyboard input"), cancel: () => {} } });
+    beginApprovalPress("approval", { ipc });
+    const events = [];
+    assert.equal(await endApprovalPress("approval", {
+      execute: () => assert.fail("IPC cannot fall back after dispatch"), feedback: (...args) => events.push(args)
+    }), result.ok);
+    assert.equal(captured, 1);
+    assert.equal(dispatched, 1);
+    assert.equal(events[0][1], result.ok ? "info" : "error");
+    assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+  }
+  beginApprovalPress("approval", { ...quietApprovalFeedback,
+    target: recent, targetIsCurrent: () => true,
+    ipc: { capture: async () => ({ ok: false, reason: "multiple-requests" }), cancel: () => {} },
+    shortcuts: { capture: () => assert.fail("ambiguous IPC requests cannot use a keyboard fallback"), cancel: () => {} } });
+  assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+  for (const target of [{ ...recent, remote: true }, { ...recent, hostId: "remote-host" }]) {
+    beginApprovalPress("approval", { ...quietApprovalFeedback, target, targetIsCurrent: () => true,
+      ipc: { capture: () => assert.fail("host mismatch must not query IPC"), cancel: () => {} },
+      shortcuts: { capture: () => assert.fail("bound target must not become a native approval"), cancel: () => {} }
+    });
+    assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+  }
+  for (const reason of ["no-requests", "ipc-unavailable"]) {
+    beginApprovalPress("approval", { ...quietApprovalFeedback, target: recent, targetIsCurrent: () => true,
+      ipc: { capture: async () => ({ ok: false, reason, canFallback: true }), cancel: () => {} },
+      shortcuts: { capture: () => assert.fail("bound tasks cannot fall through to any other visible dialog"), cancel: () => {} }
+    });
+    assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+  }
+  actionSettingsByContext.set("approval", { command: "approve", approvalTarget: "current-dialog" });
+  beginApprovalPress("approval", { ...quietApprovalFeedback, target: recent,
+    ipc: { capture: () => assert.fail("current dialog mode must not query a bound task") },
+    available: () => false,
+    shortcuts: { capture: async () => ({ ok: true, lease: "manual-review" }),
+      execute: async (_decision, lease) => { assert.equal(lease, "manual-review"); return { ok: true }; }, cancel: () => {} }
+  });
+  assert.equal(await endApprovalPress("approval", { feedback: () => {} }), true);
+  actionSettingsByContext.set("approval", { command: "approve", approvalTarget: "unknown" });
+  beginApprovalPress("approval", quietApprovalFeedback);
+  assert.equal(approvalPressByContext.has("approval"), false);
+  actionSettingsByContext.set("approval", { command: "approve" });
+  const targetA = selectApprovalTask(recent);
+  primaryThreadId = waiting.id;
+  let releaseTargetCapture;
+  beginApprovalPress("approval", { ...quietApprovalFeedback, target: targetA,
+    ipc: { capture: async (id, valid) => {
+      assert.equal(id, recent.id, "explicit task-key target outranks a manually selected task");
+      assert.equal(valid(), true);
+      return new Promise((resolve) => { releaseTargetCapture = resolve; });
+    }, execute: () => assert.fail("a later task-key selection cancels captured approval"), cancel: () => {} }
+  });
+  contexts.set("other-approval", ACTIONS.taskActions);
+  actionSettingsByContext.set("other-approval", { command: "decline", approvalTarget: "current-dialog" });
+  beginApprovalPress("other-approval", { ...quietApprovalFeedback,
+    shortcuts: { capture: () => assert.fail("concurrent target modes cannot capture another decision") }
+  });
+  assert.equal(approvalPressByContext.has("other-approval"), false);
+  contexts.delete("other-approval");
+  actionSettingsByContext.delete("other-approval");
+  const targetPending = endApprovalPress("approval", { feedback: () => {} });
+  await Promise.resolve();
+  const targetB = selectApprovalTask({ ...recent, id: waiting.id });
+  assert.notEqual(targetA, targetB, "same task titles do not substitute UUIDs");
+  releaseTargetCapture({ ok: true, lease: "cancelled-target" });
+  assert.equal(await targetPending, false);
+  primaryThreadId = recent.id;
+  selectApprovalTask(null);
+  beginApprovalPress("approval", { ...quietApprovalFeedback, target: recent, targetIsCurrent: () => true,
+    ipc: { capture: async () => ({ ok: true, lease: "mode-change" }), cancel: () => {},
+      execute: () => assert.fail("changing target mode must cancel a captured decision") }
+  });
+  await approvalPressByContext.get("approval").request;
+  applyReceivedSettings("approval", { command: "approve", approvalTarget: "current-dialog" });
+  applyReceivedSettings("approval", { command: "approve", approvalTarget: "task-key" });
+  assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+  actionSettingsByContext.set("approval", { command: "send" });
+  assert.equal(codexCommandForContext("approval"), null);
+  start();
+  assert.equal(approvalPressByContext.has("approval"), false);
+  assert.equal(contextIsSendControl("approval"), false);
+  assert.match(staticActionSvg(ACTIONS.taskActions, "approval"), />\?<\/text>/);
+  assert.equal(CURRENT_THREAD_AWARE_ACTIONS.has(ACTIONS.taskActions), true);
+  // The two visible entry points must use the same target semantics for both decisions.
+  for (const action of [ACTIONS.newThread, ACTIONS.taskActions]) {
+    contexts.set("approval", action);
+    for (const decision of ["approve", "decline"]) {
+      for (const mode of ["task-key", "current-dialog"]) {
+        actionSettingsByContext.set("approval", { command: decision, approvalTarget: mode });
+        assert.equal(codexCommandForContext("approval"), decision);
+        const target = selectApprovalTask(recent);
+        const calls = [];
+        const ipc = { capture: async (id) => { calls.push(["capture", id]); return { ok: true, lease: "ipc-parity" }; },
+          execute: async (choice, lease) => { calls.push([choice, lease]); return { ok: true }; }, cancel: () => {} };
+        const shortcuts = { capture: async () => { calls.push(["capture-native"]); return { ok: true, lease: "native-parity" }; },
+          execute: async (choice, lease) => { calls.push([choice, lease]); return { ok: true }; }, cancel: () => {} };
+        beginApprovalPress("approval", { ...quietApprovalFeedback, target, ipc, shortcuts, available: () => false });
+        assert.equal(await endApprovalPress("approval", { feedback: () => {} }), true);
+        assert.deepEqual(calls, mode === "task-key"
+          ? [["capture", recent.id], [decision, "ipc-parity"]]
+          : [["capture-native"], [decision, "native-parity"]]);
+        assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+        beginApprovalPress("approval", { ...quietApprovalFeedback, target, ipc, shortcuts, available: () => false });
+        await approvalPressByContext.get("approval").request;
+        const count = calls.length;
+        applyReceivedSettings("approval", { command: decision, approvalTarget: mode === "task-key" ? "current-dialog" : "task-key" });
+        applyReceivedSettings("approval", { command: decision, approvalTarget: mode });
+        assert.equal(await endApprovalPress("approval", { feedback: () => {} }), false);
+        assert.equal(calls.length, count, "settings round-trip cancels both entry points without dispatch");
+        await Promise.resolve();
+      }
+    }
+  }
+  selectApprovalTask(null);
+  const previews = {};
+  for (const appearance of ["light", "dark"]) {
+    THEME = appearance === "light" ? LIGHT_THEME : DARK_THEME;
+    for (const decision of ["approve", "decline"]) previews[`${decision}-${appearance}`] = approvalSvg(decision);
+    previews[`bound-${appearance}`] = approvalSvg("approve", { title: "Создание плагина" });
+  }
+  console.log(JSON.stringify({ passed: true, frozenPress: true, approvalCaptureCancellation: true, approvalReadyOnly: true, approvalShortPress: true, approvalPendingFeedback: true, approvalIpcNoInput: true, previews }));
 }
 
 function runSelectedMode() {
@@ -15947,6 +16589,11 @@ function runSelectedMode() {
     verifyVoiceSubmissionPolicy().catch((error) => {
       console.error(error);
       process.exitCode = 1;
+    });
+  } else if (approvalContractMode) {
+    verifyApprovalControls().then(() => process.exit(process.exitCode ?? 0)).catch((error) => {
+      console.error(error);
+      process.exit(1);
     });
   } else if (interactionContractMode) {
     verifyInteractionPolicy()
@@ -15999,7 +16646,8 @@ function main() {
     || refreshResilienceContractMode
     || usageCacheContractMode
     || voiceSubmitContractMode
-    || interactionContractMode;
+    || interactionContractMode
+    || approvalContractMode;
   if (verificationOnly) {
     runSelectedMode();
     return;

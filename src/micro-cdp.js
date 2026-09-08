@@ -15,6 +15,7 @@ const { promisify } = require("node:util");
 
 const { CodexMainInspectorEvaluator } = require("./micro-main-inspector");
 const { CodexPreparedRendererBridge } = require("./micro-prepared-bridge");
+const { approvalRequestExpression, approvalResponseExpression, isApprovalContextCurrent, normalizeApprovalIdentity } = require("./approval-controls");
 
 const execFileAsync = promisify(execFile);
 const DEFAULT_STATE_PATH = path.join(
@@ -1066,6 +1067,12 @@ class CodexMicroBridge {
     this.evaluationNamespace = `${process.pid}-${Math.random().toString(36).slice(2)}`;
   }
 
+  isReady() {
+    return Boolean(this.socket && Number.isInteger(this.WebSocket?.OPEN)
+      && this.socket.readyState === this.WebSocket.OPEN)
+      || this.preparedBridge.isReady() === true;
+  }
+
   async refreshReadOnly() {
     try {
       await this.ensureConnected();
@@ -1102,6 +1109,36 @@ class CodexMicroBridge {
       }
     } catch (error) {
       throw this.normalizeError(error, `${keycapId} command`);
+    }
+  }
+
+  async readApprovalRequest(threadId) {
+    const expression = approvalRequestExpression(threadId);
+    try {
+      await this.ensureConnected();
+      return normalizeApprovalIdentity(await this.evaluate(expression));
+    } catch (error) {
+      throw this.normalizeError(error, "approval request inspection");
+    }
+  }
+
+  async respondToApproval(decision, request, options = {}) {
+    const expression = approvalResponseExpression(decision, request);
+    // Reuse the connection established by request inspection. Reconnecting,
+    // activating Micro, or using runKeycap could change the active request.
+    if (!isApprovalContextCurrent(options.isCurrent)) {
+      return { delivered: false, delivery: "none", reason: "cancelled" };
+    }
+    // Every error after this boundary has potentially unknown delivery. Never
+    // reclassify it as cancelled/undelivered if the context changes afterwards.
+    try {
+      return await this.evaluate(expression);
+    } catch (error) {
+      throw new MicroBridgeError("Codex approval delivery could not be confirmed.", {
+        code: "MICRO_APPROVAL_DELIVERY_UNKNOWN",
+        delivery: "unknown",
+        cause: error
+      });
     }
   }
 

@@ -12,6 +12,7 @@ const SCRIPT = fs.readFileSync(
 
 class FakeElement {
   constructor(dataset = {}) {
+    this.children = [];
     this.attributes = {};
     this.dataset = dataset;
     this.hidden = false;
@@ -36,6 +37,13 @@ function createHost(navigatorLanguage = "en-US") {
     ["task-settings", new FakeElement()],
     ["command-settings", new FakeElement()],
     ["navigation-settings", new FakeElement()],
+    ["task-actions-settings", new FakeElement()],
+    ["approval-target-settings", new FakeElement()],
+    ["command-help", new FakeElement({ copy: "commandHelp" })],
+    ["task-action-help", new FakeElement({ copy: "approvalHelp" })],
+    ["approval-target-help", new FakeElement()],
+    ["task-action", new FakeElement({ setting: "command" })],
+    ["approval-target", new FakeElement({ setting: "approvalTarget" })],
     ["task-source", new FakeElement({ setting: "taskSource" })],
     ["command", new FakeElement({ setting: "command" })],
     ["page-direction", new FakeElement({ setting: "pageDirection" })],
@@ -45,6 +53,17 @@ function createHost(navigatorLanguage = "en-US") {
   const html = fs.readFileSync(path.join(ROOT, "com.yechan.threaddeck.sdPlugin/property-inspector/index.html"), "utf8");
   const localizedElements = new Map([...html.matchAll(/data-copy="([^"]+)"/g)]
     .map((match) => [match[1], new FakeElement({ copy: match[1] })]));
+  for (const element of elements.values()) {
+    if (element.dataset.copy) localizedElements.set(element.dataset.copy, element);
+  }
+  for (const [, id, body] of html.matchAll(/<select id="([^"]+)"[^>]*>([\s\S]*?)<\/select>/g)) {
+    for (const [, value, copy, text] of body.matchAll(/<option value="([^"]*)"(?: data-copy="([^"]+)")?[^>]*>([^<]*)<\/option>/g)) {
+      const option = new FakeElement(copy ? { copy } : {});
+      option.value = value;
+      option.textContent = text;
+      elements.get(id).children.push(option);
+    }
+  }
   const sockets = [];
 
   class FakeWebSocket {
@@ -65,6 +84,12 @@ function createHost(navigatorLanguage = "en-US") {
     send(message) {
       this.sent.push(JSON.parse(message));
     }
+
+    receive(message) {
+      this.listeners.get("message")?.({ data: typeof message === "string" ? message : JSON.stringify(message) });
+    }
+
+    close() { this.readyState = 3; }
 
     open() {
       this.readyState = FakeWebSocket.OPEN;
@@ -87,11 +112,13 @@ function createHost(navigatorLanguage = "en-US") {
         return optionElements.get(match[1]);
       },
       querySelectorAll(selector) {
-        if (selector === "[data-copy]") return [...localizedElements.values()];
+        if (selector === "[data-copy]") return [...localizedElements.values(), ...[...elements.values()].flatMap((element) => element.children).filter((option) => option.dataset.copy)];
         if (selector === "select[data-setting]") {
           return [
             elements.get("task-source"),
             elements.get("command"),
+            elements.get("task-action"),
+            elements.get("approval-target"),
             elements.get("page-direction")
           ];
         }
@@ -227,4 +254,226 @@ test("Property Inspector can relocalize all task slots between supported languag
     assert.equal(optionElements.get("top1").textContent, slot);
     assert.equal(localizedElements.get("help").textContent, help);
   }
+});
+
+
+const TASK_ACTION = "com.yechan.threaddeck.thread1";
+const COMMAND_ACTION = "com.yechan.threaddeck.newthread";
+const TASK_ACTIONS_ACTION = "com.yechan.threaddeck.taskactions";
+const NAVIGATION_ACTION = "com.yechan.threaddeck.page.previous";
+
+function createInspector(language = "en-US") {
+  const host = createHost(language);
+  return {
+    ...host,
+    connect(settings, action = TASK_ACTION, context = "task-context") {
+      host.sandbox.connectElgatoStreamDeckSocket("28196", context, "registerPropertyInspector", {}, {
+        action, context, payload: { settings }
+      });
+      return host.sockets.at(-1);
+    },
+    change(id, value) {
+      const element = host.elements.get(id);
+      element.value = value;
+      element.listeners.get("change")?.();
+    }
+  };
+}
+function saved(socket) { return socket.sent.filter((message) => message.event === "setSettings"); }
+function requests(socket) { return socket.sent.filter((message) => message.event === "sendToPlugin"); }
+
+test("Approve and Decline autosave and explain pending approval behavior", () => {
+  const ui = createInspector();
+  const socket = ui.connect({ command: "approve", customSetting: "kept" }, COMMAND_ACTION, "command-context");
+  socket.open();
+  assert.equal(ui.elements.get("command").value, "approve");
+  assert.equal(ui.elements.get("command-settings").hidden, false);
+  assert.match(ui.elements.get("command-help").textContent, /pending request/);
+  assert.match(ui.elements.get("command-help").textContent, /Blue Sent means the action was sent/);
+  assert.equal(ui.elements.get("approval-target-settings").hidden, false);
+  assert.equal(ui.elements.get("approval-target").value, "task-key");
+  assert.doesNotMatch(ui.elements.get("command-help").textContent, /Command\+Return/);
+  ui.change("command", "decline");
+  assert.deepEqual(saved(socket)[0].payload, { command: "decline", customSetting: "kept" });
+  assert.match(ui.elements.get("command-help").textContent, /Blue Sent means the action was sent/);
+  ui.change("command", "send");
+  assert.match(ui.elements.get("command-help").textContent, /Command\+Return/);
+  assert.equal(ui.elements.get("approval-target-settings").hidden, true);
+  assert.deepEqual(requests(socket), []);
+});
+
+test("Task actions exposes only approval decisions and preserves settings on save", () => {
+  const ui = createInspector();
+  const socket = ui.connect({ customSetting: "kept" }, TASK_ACTIONS_ACTION, "actions-context");
+  socket.open();
+  assert.equal(ui.elements.get("task-actions-settings").hidden, false);
+  assert.equal(ui.elements.get("command-settings").hidden, true);
+  assert.equal(ui.elements.get("task-settings").hidden, true);
+  assert.equal(ui.elements.get("task-action").value, "approve");
+  assert.deepEqual(ui.elements.get("task-action").children.map((option) => option.value), ["approve", "decline"]);
+  assert.match(ui.elements.get("task-action-help").textContent, /Blue Sent means the action was sent/);
+  assert.equal(ui.elements.get("approval-target-settings").hidden, false);
+  assert.equal(saved(socket).length, 0, "opening settings must not change the profile");
+  ui.change("task-action", "decline");
+  assert.deepEqual(saved(socket)[0].payload, { customSetting: "kept", command: "decline" });
+  assert.equal(saved(socket)[0].context, "actions-context");
+  ui.change("task-action", "send");
+  assert.equal(saved(socket).length, 1, "unrelated commands must not be saved");
+  assert.deepEqual(requests(socket), []);
+  socket.receive({ event: "didReceiveSettings", context: "actions-context", payload: { settings: { command: "send" } } });
+  assert.equal(ui.elements.get("task-action").value, "", "invalid settings must not look like approval");
+  assert.equal(ui.elements.get("approval-target-settings").hidden, true);
+});
+
+test("approval target autosaves for both approval actions without altering unrelated settings", () => {
+  for (const action of [TASK_ACTIONS_ACTION, COMMAND_ACTION]) {
+    const ui = createInspector();
+    const socket = ui.connect({ command: "approve", customSetting: "kept" }, action, "approval-context");
+    socket.open();
+    assert.equal(ui.elements.get("approval-target").value, "task-key");
+    assert.deepEqual(saved(socket), [], "showing the default must not rewrite settings");
+    assert.match(ui.elements.get("approval-target-help").textContent, /name appears on Approve and Decline/);
+    assert.match(ui.elements.get("approval-target-help").textContent, /stays selected when you switch tasks manually in Codex/);
+    assert.match(ui.elements.get("approval-target-help").textContent, /another app has focus/);
+    ui.change("approval-target", "current-dialog");
+    assert.deepEqual(saved(socket).at(-1).payload, { command: "approve", customSetting: "kept", approvalTarget: "current-dialog" });
+    assert.match(ui.elements.get("approval-target-help").textContent, /intended task and request in the foreground/);
+    assert.match(ui.elements.get("approval-target-help").textContent, /Review findings/);
+    assert.match(ui.elements.get("approval-target-help").textContent, /check the acknowledgment in Codex first/);
+    ui.change(action === TASK_ACTIONS_ACTION ? "task-action" : "command", "decline");
+    assert.equal(saved(socket).at(-1).payload.approvalTarget, "current-dialog");
+    ui.change("approval-target", "task-key");
+    assert.deepEqual(saved(socket).at(-1).payload, { command: "decline", customSetting: "kept", approvalTarget: "task-key" });
+    assert.deepEqual(requests(socket), [], "approval target changes only settings");
+  }
+});
+
+test("unknown approval targets stay unselected and preserved until explicitly replaced", () => {
+  for (const approvalTarget of [null, "", "future-mode", false, 0, "TASK-KEY", " current-dialog "]) {
+    const ui = createInspector();
+    const socket = ui.connect({ command: "approve", approvalTarget }, TASK_ACTIONS_ACTION, "approval-context");
+    socket.open();
+    assert.equal(ui.elements.get("approval-target").value, "");
+    assert.match(ui.elements.get("approval-target-help").textContent, /not supported/);
+    assert.equal(saved(socket).length, 0);
+    ui.change("task-action", "decline");
+    assert.deepEqual(saved(socket).at(-1).payload, { command: "decline", approvalTarget });
+    ui.change("approval-target", "invalid");
+    assert.equal(saved(socket).length, 1, "unknown or placeholder values cannot be saved as a mode");
+    ui.change("approval-target", "current-dialog");
+    assert.deepEqual(saved(socket).at(-1).payload, { command: "decline", approvalTarget: "current-dialog" });
+  }
+});
+
+test("non-approval actions hide target settings and cannot save a target through the hidden control", () => {
+  for (const [action, settings] of [
+    [TASK_ACTION, { taskSource: "current" }], [NAVIGATION_ACTION, {}],
+    [COMMAND_ACTION, { command: "send" }], [COMMAND_ACTION, { command: "new-task" }],
+    [COMMAND_ACTION, { command: "side-chat" }], [TASK_ACTIONS_ACTION, { command: "send" }]
+  ]) {
+    const ui = createInspector();
+    const socket = ui.connect(settings, action);
+    socket.open();
+    assert.equal(ui.elements.get("approval-target-settings").hidden, true);
+    ui.change("approval-target", "current-dialog");
+    assert.equal(saved(socket).length, 0);
+  }
+});
+
+test("approval target reflects external settings and survives command switches", () => {
+  const ui = createInspector();
+  const socket = ui.connect({ command: "send", approvalTarget: "current-dialog" }, COMMAND_ACTION, "approval-context");
+  socket.open();
+  ui.change("command", "approve");
+  assert.equal(ui.elements.get("approval-target-settings").hidden, false);
+  assert.equal(ui.elements.get("approval-target").value, "current-dialog");
+  socket.receive({ event: "didReceiveSettings", context: "approval-context", payload: {
+    settings: { command: "decline", approvalTarget: "task-key" }
+  } });
+  assert.equal(ui.elements.get("approval-target").value, "task-key");
+  ui.change("command", "new-task");
+  assert.equal(ui.elements.get("approval-target-settings").hidden, true);
+  assert.equal(saved(socket).at(-1).payload.approvalTarget, "task-key");
+  ui.change("command", "decline");
+  assert.equal(ui.elements.get("approval-target").value, "task-key");
+});
+
+test("approval keys explain the visible-card action without changing Codex shortcuts", () => {
+  const ui = createInspector();
+  ui.sandbox.connectElgatoStreamDeckSocket("28196", "inspector-session", "registerPropertyInspector", {}, {
+    action: TASK_ACTIONS_ACTION, context: "task-instance", payload: { settings: { command: "approve", approvalTarget: "current-dialog" } }
+  });
+  const socket = ui.sockets.at(-1);
+  socket.open();
+  assert.deepEqual(requests(socket), []);
+  assert.equal(ui.elements.has("prepare-approval-shortcuts"), false);
+  assert.match(ui.elements.get("approval-target-help").textContent, /visible permission request/);
+  assert.match(ui.elements.get("approval-target-help").textContent, /No keyboard shortcut setup/);
+  assert.deepEqual(saved(socket), []);
+});
+
+test("approval copy is localized in every supported host language", () => {
+  for (const [language, approve, decline, target] of [
+    ["en", "Approve", "Decline", "Task selected on Stream Deck"],
+    ["ko", "승인", "거절", "Stream Deck에서 선택한 작업"],
+    ["ru", "Одобрить", "Отклонить", "Задача, выбранная на Stream Deck"]
+  ]) {
+    const ui = createInspector();
+    ui.sandbox.connectElgatoStreamDeckSocket("28196", "context", "registerPropertyInspector",
+      { application: { language } }, { action: TASK_ACTIONS_ACTION, payload: { settings: {} } });
+    const label = (id, value) => ui.elements.get(id).children.find((option) => option.value === value).textContent;
+    assert.equal(label("command", "approve"), approve);
+    assert.equal(label("command", "decline"), decline);
+    assert.equal(label("task-action", "approve"), approve);
+    assert.equal(label("task-action", "decline"), decline);
+    assert.equal(label("approval-target", "task-key"), target);
+  }
+});
+
+test("external settings target the active inspector without replacing pending user edits", () => {
+  const ui = createInspector();
+  const socket = ui.connect({ command: "approve" }, TASK_ACTIONS_ACTION, "active-context");
+  const message = (context, settings, action = TASK_ACTIONS_ACTION) => ({
+    event: "didReceiveSettings", context, action, payload: { settings }
+  });
+  socket.open();
+  socket.receive(message("other-context", { command: "decline" }));
+  socket.receive(message("active-context", { command: "decline" }, COMMAND_ACTION));
+  socket.receive("{invalid");
+  socket.receive("null");
+  assert.equal(ui.elements.get("task-action").value, "approve");
+  socket.receive(message("active-context", { command: "decline", approvalTarget: "current-dialog" }));
+  assert.equal(ui.elements.get("task-action").value, "decline");
+  const next = ui.connect({ command: "approve" }, TASK_ACTIONS_ACTION, "new-context");
+  ui.change("approval-target", "current-dialog");
+  next.receive(message("new-context", { command: "decline" }));
+  socket.receive(message("new-context", { command: "decline" }));
+  socket.open();
+  assert.equal(ui.elements.get("task-action").value, "approve");
+  next.open();
+  assert.deepEqual(saved(next).map((entry) => entry.payload), [{ command: "approve", approvalTarget: "current-dialog" }]);
+});
+
+test("settings messages may identify the action instance while saves use the inspector session", () => {
+  const ui = createInspector();
+  ui.sandbox.connectElgatoStreamDeckSocket("28196", "inspector-session", "registerPropertyInspector", {}, {
+    action: TASK_ACTIONS_ACTION, context: "action-instance", payload: { settings: {} }
+  });
+  const socket = ui.sockets.at(-1);
+  socket.open();
+  socket.receive({ event: "didReceiveSettings", context: "action-instance", action: TASK_ACTIONS_ACTION,
+    payload: { settings: { command: "decline", approvalTarget: "current-dialog" } } });
+  assert.equal(ui.elements.get("task-action").value, "decline");
+  ui.change("approval-target", "task-key");
+  assert.equal(saved(socket).at(-1).context, "inspector-session");
+});
+
+test("approval extraction leaves the existing task sources and profiles unchanged", () => {
+  const ui = createInspector();
+  const socket = ui.connect({ taskSource: "top2", customSetting: "kept" });
+  socket.open();
+  assert.deepEqual(ui.elements.get("task-source").children.map((option) => option.value),
+    ["current", "top1", "top2", "top3", "top4", "top5", "top6", "top7", "top8"]);
+  assert.deepEqual(saved(socket), []);
+  assert.deepEqual(requests(socket), []);
 });

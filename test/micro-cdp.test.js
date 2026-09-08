@@ -519,3 +519,43 @@ test("task switching matches canonical ids but sends the exact Micro slot key", 
   assert.match(expression, new RegExp(`local:${threadId}`));
   assert.match(expression, /AG02/);
 });
+
+test("approval readiness reads only an existing open or prepared connection", () => {
+  const unexpected = () => assert.fail("readiness must not prepare or perform I/O");
+  let prepared = false;
+  class ReadySocket {
+    static OPEN = 1;
+    constructor() { unexpected(); }
+  }
+  const bridge = new CodexMicroBridge({
+    WebSocket: ReadySocket, fetch: unexpected, execFile: unexpected, readFile: unexpected,
+    preparedBridge: { isReady: () => prepared, prepare: unexpected, canAttach: unexpected }
+  });
+  bridge.connect = unexpected;
+  bridge.ensureConnected = unexpected;
+  bridge.prepareCommandBridge = unexpected;
+  assert.equal(bridge.isReady(), false);
+  bridge.connecting = Promise.resolve();
+  bridge.onDemandAttached = true;
+  bridge.lastSnapshot = { connected: true };
+  assert.equal(bridge.isReady(), false, "pending preparation and stale state are not readiness");
+  for (const readyState of [0, 2, 3]) {
+    bridge.socket = { readyState };
+    assert.equal(bridge.isReady(), false);
+  }
+  bridge.socket = { readyState: 1 };
+  assert.equal(bridge.isReady(), true);
+  bridge.socket = null;
+  prepared = true;
+  assert.equal(bridge.isReady(), true, "a prepared command-only bridge remains available");
+  prepared = false;
+  assert.equal(bridge.isReady(), false);
+  bridge.socket = {};
+  for (const WebSocket of [undefined, {}]) {
+    bridge.WebSocket = WebSocket;
+    assert.equal(bridge.isReady(), false, "missing socket constants cannot match undefined state");
+    prepared = true;
+    assert.equal(bridge.isReady(), true);
+    prepared = false;
+  }
+});

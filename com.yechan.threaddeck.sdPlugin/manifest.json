@@ -47,9 +47,26 @@
           "ShowTitle": false
         }
       ],
-      "Tooltip": "Choose New task, Side Chat, or Send in the Property Inspector.",
+      "Tooltip": "Choose New task, Side Chat, Send, Approve, or Decline in the Property Inspector.",
       "UserTitleEnabled": false,
       "UUID": "com.yechan.threaddeck.newthread"
+    },
+    {
+      "Controllers": [
+        "Keypad"
+      ],
+      "Icon": "images/action",
+      "Name": "Task actions",
+      "PropertyInspectorPath": "property-inspector/index.html",
+      "States": [
+        {
+          "Image": "images/key",
+          "ShowTitle": false
+        }
+      ],
+      "Tooltip": "Choose Approve or Decline and an approval target in the Property Inspector.",
+      "UserTitleEnabled": false,
+      "UUID": "com.yechan.threaddeck.taskactions"
     },
     {
       "Controllers": [
