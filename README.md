@@ -104,6 +104,8 @@ Reasoning and speed have two deliberate timelines. A working task card keeps the
 
 ## Approve and Decline
 
+![Generated Approve and Decline keys in English, Korean and Russian, in light and dark themes, using a synthetic task title](docs/media/approval-actions.png)
+
 Add **Task actions** to any key and choose Approve or Decline, or select the same commands in **Codex command**. Both use the same handler. Existing profiles and keyboard shortcuts are preserved.
 
 - **Task selected on Stream Deck** (default): press a **Codex task** key first. Its title appears on Approve/Decline, and that exact task stays selected even if you switch tabs manually in Codex. A subsequent approval press uses the running desktop's local IPC and works without focusing Codex or sending a keystroke. Select the task again after restarting the plugin. Only local tasks are supported.
