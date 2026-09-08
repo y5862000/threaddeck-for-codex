@@ -2,7 +2,7 @@
 
 > [Korean installation guide](INSTALL.ko.md)
 
-ThreadDeck ships as one bilingual Stream Deck plugin. The same download uses English when Stream Deck is in English and Korean when Stream Deck is in Korean; no separate language build is required.
+ThreadDeck ships as one multilingual Stream Deck plugin. Action names, button settings, and key labels follow Stream Deck's language: English, Korean, or Russian. Unsupported languages use English; no separate language build is required.
 
 ## Before you start
 

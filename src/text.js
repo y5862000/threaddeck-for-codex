@@ -51,6 +51,8 @@ function isInternalAmbientTitle(value) {
 function visualWidth(grapheme) {
   if (/^\s+$/.test(grapheme)) return 0.35;
   if (/^[\x00-\x7F]+$/.test(grapheme)) return 0.58;
+  // Cyrillic uses proportional glyphs, not the full-width CJK estimate.
+  if (/^\p{Script=Cyrillic}\p{Mark}*$/u.test(grapheme)) return 0.66;
   return 1;
 }
 

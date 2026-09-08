@@ -32,6 +32,7 @@ node "$ROOT_DIR/scripts/sync-localizations.mjs" --check
 jq -e . "$PLUGIN_DIR/manifest.json" >/dev/null
 jq -e . "$PLUGIN_DIR/en.json" >/dev/null
 jq -e . "$PLUGIN_DIR/ko.json" >/dev/null
+jq -e . "$PLUGIN_DIR/ru.json" >/dev/null
 
 ARCHS="$(lipo -archs "$BRIDGE")"
 [[ "$ARCHS" == *arm64* ]] || { echo "keybridge is missing arm64" >&2; exit 1; }
