@@ -318,6 +318,16 @@ test("duration and timing labels handle known, long, and unknown times", () => {
   assert.equal(timingLabel({ status: "idle", startedAtMs: null }, 9_000), "Open");
 });
 
+test("failed turns keep their final duration, including review-required failures", () => {
+  for (const requiresReview of [false, true]) {
+    const thread = { status: "error", requiresReview, startedAtMs: 1_000, endedAtMs: 6_000 };
+    assert.equal(timingLabel(thread, 10_000), "00:05");
+    assert.equal(timingLabel(thread, 60_000), "00:05");
+    assert.equal(timingLabel({ ...thread, startedAtMs: null }, 60_000), "--:--");
+    assert.equal(timingLabel({ ...thread, endedAtMs: null }, 60_000), "--:--");
+  }
+});
+
 test("goal records normalize local and app-server status and timestamp formats", () => {
   assert.equal(normalizeGoalStatus("usage_limited"), "usageLimited");
   assert.equal(normalizeGoalStatus("budget-limited"), "budgetLimited");

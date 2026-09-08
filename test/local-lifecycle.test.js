@@ -194,3 +194,56 @@ test("malformed JSONL lines are ignored without changing lifecycle state", () =>
   assert.equal(consumeLifecycleLines(["", "not-json", "{broken"], lifecycle), false);
   assert.deepEqual(lifecycle, lifecycleState());
 });
+
+function completedTurnLines(error, turnId = "turn-failed") {
+  return [
+    jsonLine("event_msg", { type: "thread_settings_applied", thread_settings: {
+      reasoning_effort: "high", service_tier: "default"
+    } }, "2026-09-07T12:00:00.000Z"),
+    jsonLine("event_msg", { type: "task_started", turn_id: turnId }, "2026-09-07T12:00:00.001Z"),
+    jsonLine("event_msg", { type: "task_complete", turn_id: turnId, error }, "2026-09-07T12:00:05.001Z")
+  ];
+}
+
+test("task_complete with an error is a failed terminal turn, not successful completion", () => {
+  for (const error of [{ message: "private failure details", codex_error_info: "other" }, "private failure details"]) {
+    const lifecycle = lifecycleState();
+    consumeLifecycleLines(completedTurnLines(error), lifecycle);
+    assert.equal(lifecycle.status, "error");
+    assert.equal(lifecycle.requiresReview, false);
+    assert.equal(lifecycle.endedAtMs - lifecycle.startedAtMs, 5000);
+    assert.deepEqual(lifecycle.activity, { kind: "error", code: "activity.error" });
+    assert.equal(JSON.stringify(lifecycle).includes("private failure details"), false);
+  }
+});
+
+test("the structured review-block code marks a paused turn without interpreting error prose", () => {
+  const lifecycle = lifecycleState();
+  consumeLifecycleLines(completedTurnLines({ message: "private details", codex_error_info: "misalignment_policy_violation" }), lifecycle);
+  assert.equal(lifecycle.status, "error");
+  assert.equal(lifecycle.requiresReview, true);
+  assert.deepEqual(lifecycle.activity, { kind: "error", code: "activity.reviewRequired" });
+  const generic = lifecycleState();
+  consumeLifecycleLines(completedTurnLines({ message: "misalignment_policy_violation", codex_error_info: "other" }), generic);
+  assert.equal(generic.requiresReview, false);
+});
+
+test("successful completions and a later fresh turn clear an older review block", () => {
+  const failed = completedTurnLines({ codex_error_info: "misalignment_policy_violation" });
+  for (const error of [undefined, null]) {
+    const lifecycle = lifecycleState();
+    consumeLifecycleLines([...failed, ...completedTurnLines(error, "turn-recovered")], lifecycle);
+    assert.equal(lifecycle.status, "completed");
+    assert.equal(lifecycle.requiresReview, false);
+    assert.equal(lifecycle.turnId, "turn-recovered");
+  }
+  const working = lifecycleState();
+  consumeLifecycleLines([...failed,
+    jsonLine("event_msg", { type: "thread_settings_applied", thread_settings: { reasoning_effort: "high", service_tier: "default" } }, "2026-09-07T12:01:00.000Z"),
+    jsonLine("event_msg", { type: "task_started", turn_id: "turn-new" }, "2026-09-07T12:01:00.001Z")
+  ], working);
+  assert.equal(working.status, "working");
+  assert.equal(Boolean(working.requiresReview), false);
+  assert.equal(working.endedAtMs, null);
+  assert.equal(working.turnId, "turn-new");
+});

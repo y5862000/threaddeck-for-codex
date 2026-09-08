@@ -6966,7 +6966,7 @@ function ephemeralThreadSvg(thread) {
     completed: { accent: THEME.green, label: "완료" },
     stopped: { accent: THEME.red, label: "중단" },
     idle: { accent: THEME.muted, label: "대기" },
-    error: { accent: THEME.amber, label: "오류" }
+    error: { accent: thread.requiresReview ? THEME.amber : THEME.red, label: thread.requiresReview ? t("status.needInput") : t("status.error") }
   };
   const style = styles[thread.status] ?? styles.idle;
   const completionEffect = visibleCompletionPulseState(thread);
@@ -7006,7 +7006,7 @@ function threadSvg(thread, slot) {
     completed: { accent: THEME.green, label: "완료" },
     stopped: { accent: THEME.red, label: "중단" },
     idle: { accent: THEME.muted, label: "대기" },
-    error: { accent: THEME.amber, label: "오류" }
+    error: { accent: thread.requiresReview ? THEME.amber : THEME.red, label: thread.requiresReview ? t("status.needInput") : t("status.error") }
   };
   const style = styles[thread.status] ?? styles.idle;
   const completionEffect = visibleCompletionPulseState(thread);
@@ -8476,7 +8476,7 @@ async function statusForThread(thread, activeThreadIds) {
     // A live child process can outlast the Codex turn that launched it. Once the
     // rollout records a terminal event, keep that terminal state and its end
     // timestamp instead of letting the process registry restart the timer.
-    if (!isActive || ["completed", "stopped"].includes(scanned.status)) return scanned;
+    if (!isActive || ["completed", "stopped", "error"].includes(scanned.status)) return scanned;
     return {
       ...scanned,
       status: "working",
@@ -11425,6 +11425,44 @@ function verifyCompletionFanout() {
 }
 
 async function verifyThreadRefreshResilience() {
+  // Terminal rollout errors must survive a still-running child process and
+  // render as attention/error, without any successful-completion chrome.
+  const failedThread = {
+    id: "00000000-0000-4000-8000-000000000098",
+    title: "Failed turn",
+    rollout_path: "/fixture/failed-turn.jsonl"
+  };
+  const originalStat = fs.stat;
+  const failedTurnChecks = [];
+  try {
+    fs.stat = async (filePath) => {
+      if (filePath !== failedThread.rollout_path) throw new Error("Unexpected fixture read");
+      return { size: 1, mtimeMs: 1 };
+    };
+    for (const requiresReview of [false, true]) {
+      statusCache.set(failedThread.id, {
+        size: 1, mtimeMs: 1, status: "error", requiresReview,
+        startedAtMs: 1_000, endedAtMs: 6_000,
+        activity: { kind: "error", code: requiresReview ? "activity.reviewRequired" : "activity.error" }
+      });
+      const state = await statusForThread(failedThread, new Set([failedThread.id]));
+      const thread = { ...failedThread, ...state };
+      const label = t(requiresReview ? "status.needInput" : "status.error");
+      const color = requiresReview ? THEME.amber : THEME.red;
+      failedTurnChecks.push(state.status === "error"
+        && state.requiresReview === requiresReview
+        && timingLabel(thread, 60_000) === "00:05"
+        && visibleCompletionPulseState(thread) === null
+        && [threadSvg(thread, 0), ephemeralThreadSvg(thread)].every((svg) =>
+          svg.includes(`>${label}</text>`)
+          && svg.includes(`fill="${color}"`)
+          && !svg.includes("M61 22L68 28L83 16")));
+    }
+  } finally {
+    fs.stat = originalStat;
+    statusCache.delete(failedThread.id);
+  }
+  const failedTurnsStayTerminal = failedTurnChecks.length === 2 && failedTurnChecks.every(Boolean);
   const context = "refresh-resilience-context";
   const stableThread = {
     id: "00000000-0000-4000-8000-000000000003",
@@ -11663,7 +11701,8 @@ async function verifyThreadRefreshResilience() {
     for (const [id, title] of savedSideChatTitles) sideChatTitleById.set(id, title);
   }
 
-  const passed = recoveredInsideRefresh
+  const passed = failedTurnsStayTerminal
+    && recoveredInsideRefresh
     && startupControlsBindToCurrentTask
     && keptLastGoodList
     && oneOffStartupHidden
@@ -11675,6 +11714,7 @@ async function verifyThreadRefreshResilience() {
   console.log(JSON.stringify({
     passed,
     retryAttempts,
+    failedTurnsStayTerminal,
     startupControlsBindToCurrentTask,
     keptLastGoodList,
     oneOffStartupHidden,

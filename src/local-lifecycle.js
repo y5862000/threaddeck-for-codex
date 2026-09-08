@@ -154,7 +154,14 @@ function consumeLifecycleLines(lines, lifecycle) {
     const validTimestamp = Number.isFinite(timestampMs) ? timestampMs : null;
     if (!lifecycle.status) {
       if (type === "task_complete") {
-        lifecycle.status = "completed";
+        // task_complete ends a turn even when it failed. Only an absent/null
+        // error means success; never retain error messages in display state.
+        const failed = event.payload.error != null;
+        lifecycle.status = failed ? "error" : "completed";
+        lifecycle.requiresReview = failed
+          && event.payload.error?.codex_error_info === "misalignment_policy_violation";
+        if (failed) lifecycle.activity = makeActivity("error",
+          lifecycle.requiresReview ? "activity.reviewRequired" : "activity.error");
         lifecycle.endedAtMs = validTimestamp;
       } else if (type === "turn_aborted") {
         lifecycle.status = "stopped";
