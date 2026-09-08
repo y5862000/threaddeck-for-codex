@@ -4,7 +4,7 @@
 
 <h1 align="center">ThreadDeck for Codex</h1>
 
-<p align="center"><strong>An open-source physical dashboard for Codex on Stream Deck.</strong></p>
+<p align="center"><a href="https://threaddeck.dev/"><strong>ThreadDeck — an open-source Codex Stream Deck plugin for macOS.</strong></a></p>
 
 <p align="center">
   Monitor live Codex Desktop tasks, switch local or remote work, control Effort and Fast mode,<br>
@@ -20,7 +20,7 @@
   <img alt="Stream Deck" src="https://img.shields.io/badge/device-Stream%20Deck-111111?style=flat-square">
 </p>
 
-<p align="center"><strong>English (default)</strong> · <a href="docs/README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Website</a> · <a href="docs/INSTALL.md">Install</a> · <a href="docs/PROFILE.md">Neo profile</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
+<p align="center"><strong>English (default)</strong> · <a href="docs/README.ko.md">Korean</a> · <a href="https://threaddeck.dev/">Live web demo</a> · <a href="docs/INSTALL.md">Install</a> · <a href="docs/PROFILE.md">Neo profile</a> · <a href="#keys-with-hold-gestures">Gestures</a> · <a href="https://github.com/y5862000/threaddeck-for-codex/releases/latest">Download</a></p>
 
 <p align="center"><strong>Try ThreadDeck before installing:</strong> <a href="https://threaddeck.dev/">open the interactive web demo →</a></p>
 
