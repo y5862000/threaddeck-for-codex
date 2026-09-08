@@ -26,7 +26,7 @@ const ROOT_COPY = {
 
 const ENGLISH_ACTIONS = new Map(Object.entries({
   "com.yechan.threaddeck.weekly": ["Weekly Codex quota", "Shows remaining weekly Codex capacity as a ring. Press to refresh now."],
-  "com.yechan.threaddeck.thread1": ["Codex task", "Choose Current or Top 1–8 in the Property Inspector. Tap to open it, or hold for 0.55 seconds to dictate and submit a follow-up."],
+  "com.yechan.threaddeck.thread1": ["Codex task", "Choose Current, Top 1–8, or Fixed task in the Property Inspector. Tap to open it, or hold for 0.55 seconds to dictate and submit a follow-up."],
   "com.yechan.threaddeck.newthread": ["Codex command", "Choose New task, Side Chat, or Send in the Property Inspector."],
   "com.yechan.threaddeck.voice": ["Codex dictation", "Starts dictation in the current Codex composer while held. Release to leave a draft without submitting it."],
   "com.yechan.threaddeck.reasoning": ["Codex effort + Fast mode", "Tap repeatedly to move effort immediately; after you stop, ThreadDeck applies only the final level. Hold for 0.6 seconds to toggle Fast mode immediately."],

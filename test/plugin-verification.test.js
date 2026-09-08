@@ -10,7 +10,7 @@ const root = path.resolve(__dirname, "..");
 const guard = path.join(__dirname, "helpers/deny-live-io.cjs");
 const plugin = process.env.THREADDECK_VERIFY_PLUGIN ?? path.join(root, "src/plugin.js");
 
-for (const mode of ["completion", "refresh-resilience", "usage-cache", "voice-submit", "interactions"]) {
+for (const mode of ["completion", "refresh-resilience", "usage-cache", "voice-submit", "interactions", "fixed-task"]) {
   test(`--verify-${mode} passes without live host I/O`, { timeout: 30_000 }, async () => {
     const { stdout, stderr } = await execFileAsync(process.execPath, [
       "--require", guard, plugin, `--verify-${mode}`

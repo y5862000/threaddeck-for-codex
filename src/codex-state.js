@@ -77,6 +77,11 @@ function remoteThreadRowsFromState(globalState) {
         hostId,
         remote: true,
         title,
+        // Preserve explicit visibility metadata for persistent task pickers.
+        // Missing flags remain unknown; ordinary Top selection is unchanged.
+        ...Object.fromEntries(["archived", "isArchived", "hidden", "isHidden"]
+          .filter((flag) => Object.hasOwn(summary, flag))
+          .map((flag) => [flag, summary[flag]])),
         cwd: typeof summary?.cwd === "string" ? summary.cwd : "",
         rollout_path: null,
         recency_at: recencyAt,
