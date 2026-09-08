@@ -18,11 +18,17 @@ The Neo profile is installed with the plugin but is not forced over your current
 
 ## A Micro-native control does not respond
 
-ThreadDeck never terminates, relaunches, or foregrounds Codex to connect. It first reuses a healthy loopback renderer endpoint owned by the exact existing Codex process. If none exists, plugin startup opens Node's loopback inspector only on that exact main PID, verifies that the same PID owns port 9229, prepares an authenticated mode-`0600` Unix-domain socket for the main `app://` renderer, and closes an inspector it opened before the first press. Physical commands reuse that socket; passive polling never uses it.
+ThreadDeck first reuses a healthy loopback renderer endpoint owned by the exact existing Codex process. If none exists, it checks the loaded Electron framework's `EnableNodeCliInspectArguments` fuse before sending `SIGUSR1` to open Node's loopback inspector. The fuse must explicitly allow activation; disabled, missing, unreadable, or unrecognized data skips this step and leaves safe controls on the existing Accessibility/shortcut adapter. A changed process or framework file also cancels activation. ThreadDeck does not modify Codex's files, relaunch it, or bring it forward to connect.
 
-Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means a persistent renderer endpoint and main `app://` target both responded; no persistent bridge means plugin startup can prepare the exact-process command socket. `stopped` means Codex is closed. The doctor never opens the bootstrap inspector and neither component starts or closes Codex.
+On supported builds, ThreadDeck verifies that the same PID owns port 9229, prepares an authenticated mode-`0600` Unix-domain socket for the main `app://` renderer, and closes an inspector it opened before the first press. Physical commands reuse that socket; passive polling never uses it. A process-owned inspector that is already open can still be reused without sending the activation signal.
+
+Run `pnpm run doctor` from a source checkout for a read-only report. `connected` means a persistent renderer endpoint and main `app://` target both responded; without one, a command socket can be prepared only if inspector compatibility is verified. `stopped` means Codex is closed. The doctor never opens the bootstrap inspector and does not start or close Codex.
 
 If another process already owns port 9229, ThreadDeck refuses to attach to it and uses the verified Accessibility/shortcut adapter where a fallback is safe. If only a native control fails after a Codex update, do not keep pressing it: an ambiguous renderer delivery is intentionally never replayed because that could double-toggle Fast or submit twice. Update ThreadDeck or report the Codex version and exact key used.
+
+### Codex exits when ThreadDeck starts
+
+Older ThreadDeck builds attempted `SIGUSR1` activation without checking compatibility. Some Codex builds terminate on that signal; this is tracked in [issue #15](https://github.com/y5862000/threaddeck-for-codex/issues/15). Stop Stream Deck or disable ThreadDeck until you have a build with the compatibility guard. Enabling another macOS permission will not fix this: the [Electron inspector fuse](https://www.electronjs.org/docs/latest/tutorial/fuses#nodecliinspect) is set when Codex is packaged. Do not change the signed Codex application to enable it.
 
 ## No shortcut or remote-switch action works
 

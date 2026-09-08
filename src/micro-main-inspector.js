@@ -2,6 +2,7 @@
 
 const { execFile } = require("node:child_process");
 const { promisify } = require("node:util");
+const { supportsNodeCliInspectArguments } = require("./electron-fuses");
 
 const {
   parseCodexMainProcess,
@@ -130,6 +131,9 @@ class CodexMainInspectorEvaluator {
     this.fetch = options.fetch ?? globalThis.fetch;
     this.WebSocket = options.WebSocket ?? globalThis.WebSocket;
     this.sendSignal = options.sendSignal ?? ((pid, signal) => process.kill(pid, signal));
+    this.checkInspectorFuse = options.checkInspectorFuse ?? ((main) => (
+      supportsNodeCliInspectArguments(main, { execFile: this.execFile })
+    ));
     this.sleep = options.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
     this.now = options.now ?? Date.now;
     this.port = options.port ?? DEFAULT_INSPECTOR_PORT;
@@ -294,6 +298,15 @@ class CodexMainInspectorEvaluator {
       throw inspectorUnavailable(
         `Loopback inspector port ${this.port} is already owned by another process.`
       );
+    }
+    if (await this.checkInspectorFuse(main).catch(() => false) !== true) {
+      throw inspectorUnavailable(
+        "Codex inspector compatibility could not be confirmed: the loaded Electron framework must explicitly enable Node CLI inspector arguments."
+      );
+    }
+    const current = await this.findMainProcess();
+    if (!current || current.generation !== main.generation) {
+      throw inspectorUnavailable("Codex stopped or restarted before the inspector compatibility check completed.");
     }
     try {
       this.sendSignal(main.pid, "SIGUSR1");

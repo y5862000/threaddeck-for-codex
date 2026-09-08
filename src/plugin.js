@@ -9723,6 +9723,7 @@ async function openThread(context, slot, options = {}) {
   const deepLinkNavigation = options.navigateDeepLink ?? navigateDeepLinkThread;
   const remember = options.rememberThread ?? rememberVerifiedThread;
   const acknowledge = options.acknowledgeCompletion ?? acknowledgeCompletion;
+  const noteFailure = options.noteBridgeFailure ?? noteBridgeFailure;
   const focusThreadComposer = options.focusThreadComposer
     ?? (() => focusCurrentComposer(context));
   const scheduleRefresh = options.scheduleRefresh
@@ -9813,7 +9814,7 @@ async function openThread(context, slot, options = {}) {
     const exitCode = keyBridgeExitCode(error);
     const permissionFailure = exitCode === 3 || thread.titleAmbiguous
       ? false
-      : noteBridgeFailure(permissionCommand, error, context);
+      : noteFailure(permissionCommand, error, context);
     const label = thread.remote
       ? exitCode === 3 || thread.titleAmbiguous ? "제목 중복" : "원격 확인"
       : "열기 실패";
@@ -13377,6 +13378,7 @@ async function verifyInteractionPolicy() {
   console.error = () => {};
   const failedLocalNavigation = await openThread(currentSlotContext, 1, {
     navigateDeepLink: async () => { throw new Error("simulated navigation failure"); },
+    noteBridgeFailure: () => false,
     scheduleRefresh: () => {},
     feedback: () => {},
     rememberThread: (thread) => rememberVerifiedThread(thread, { refreshFastMode: false })
@@ -14805,6 +14807,10 @@ async function verifyInteractionPolicy() {
   activeFastModeUpdate = newThreadLease;
   let newThreadMutations = 0;
   const deferredNewThread = openNewThread("interaction-new-thread-after-fast", {
+    synchronizeCurrent: async () => currentThreadForDisplay(),
+    readGlobalState: async () => ({}),
+    readKnownThreadIds: async () => new Set(),
+    scheduleRefreshes: () => {},
     openApp: async () => { newThreadMutations += 1; },
     sleep: async () => {},
     bridge: () => {
@@ -15406,6 +15412,10 @@ async function verifyInteractionPolicy() {
   const creationReachedSleep = new Promise((resolve) => { creationSleepStarted = resolve; });
   const creationThenFastOrder = [];
   const creationBeforeFast = openNewThread("interaction-creation-before-fast", {
+    synchronizeCurrent: async () => currentThreadForDisplay(),
+    readGlobalState: async () => ({}),
+    readKnownThreadIds: async () => new Set(),
+    scheduleRefreshes: () => {},
     openApp: async () => { creationThenFastOrder.push("open"); },
     sleep: async () => {
       creationSleepStarted();
@@ -15491,6 +15501,10 @@ async function verifyInteractionPolicy() {
   await supersededNavigationReady;
   let supersedingCreationBridges = 0;
   const supersedingCreation = openNewThread("interaction-navigation-superseded", {
+    synchronizeCurrent: async () => currentThreadForDisplay(),
+    readGlobalState: async () => ({}),
+    readKnownThreadIds: async () => new Set(),
+    scheduleRefreshes: () => {},
     openApp: async () => {},
     sleep: async () => {},
     bridge: () => {
@@ -15527,6 +15541,10 @@ async function verifyInteractionPolicy() {
   const interleavedCreationGate = new Promise((resolve) => { releaseInterleavedCreation = resolve; });
   const interleavedCreationReady = new Promise((resolve) => { interleavedCreationStarted = resolve; });
   const interleavedCreation = openNewThread("interaction-same-target-interleave", {
+    synchronizeCurrent: async () => currentThreadForDisplay(),
+    readGlobalState: async () => ({}),
+    readKnownThreadIds: async () => new Set(),
+    scheduleRefreshes: () => {},
     openApp: async () => {},
     sleep: async () => {
       interleavedCreationStarted();
@@ -15935,6 +15953,17 @@ function runSelectedMode() {
 }
 
 function main() {
+  // Fixture verification must not stage a native helper or install live input
+  // cleanup handlers. Only a registered plugin owns those process resources.
+  const verificationOnly = completionContractMode
+    || refreshResilienceContractMode
+    || usageCacheContractMode
+    || voiceSubmitContractMode
+    || interactionContractMode;
+  if (verificationOnly) {
+    runSelectedMode();
+    return;
+  }
   const renderingOnly = Boolean(
     demoOutput
     || demoLightOutput
