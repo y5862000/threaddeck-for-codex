@@ -34,8 +34,29 @@
           <option value="new-task" data-copy="newTask">New task</option>
           <option value="side-chat" data-copy="sideChat">Side Chat</option>
           <option value="send" data-copy="send">Send</option>
+          <option value="approve" data-copy="approve">Approve</option>
+          <option value="decline" data-copy="decline">Decline</option>
         </select>
-        <p data-copy="commandHelp">Send uses Return on a tap and Command+Return after the key turns blue.</p>
+        <p id="command-help" data-copy="commandHelp">Send uses Return on a tap and Command+Return after the key turns blue.</p>
+      </section>
+
+      <section id="task-actions-settings" class="setting-group" hidden>
+        <label for="task-action" data-copy="taskActionLabel">Task action</label>
+        <select id="task-action" data-setting="command">
+          <option value="approve" data-copy="approve">Approve</option>
+          <option value="decline" data-copy="decline">Decline</option>
+        </select>
+        <p id="task-action-help" data-copy="approvalHelp">Approve a pending request once or decline it. Blue Sent means the action was sent.</p>
+      </section>
+
+      <section id="approval-target-settings" class="setting-group" hidden>
+        <label for="approval-target" data-copy="approvalTargetLabel">Approval target</label>
+        <select id="approval-target" data-setting="approvalTarget" aria-describedby="approval-target-help">
+          <option value="" data-copy="chooseApprovalTarget" disabled>Choose an approval target…</option>
+          <option value="task-key" data-copy="approvalTaskKey">Task selected on Stream Deck</option>
+          <option value="current-dialog" data-copy="approvalCurrentDialog">Current dialog (foreground)</option>
+        </select>
+        <p id="approval-target-help"></p>
       </section>
 
       <section id="navigation-settings" class="setting-group" hidden>

@@ -4,6 +4,7 @@
 
 ## Unreleased
 
+- Add Approve/Decline to Codex command and the dedicated Task actions selector. Both share explicit task-key IPC targeting and foreground native-card handling, request revalidation, duplicate-delivery prevention, and English/Korean/Russian feedback. No installed profile or approval-policy changes are required. Background IPC is covered by fixtures and read-only live checks; physical background approval remains unverified.
 - Keep fixture verification offline: mock New Task state reads and permission checks, skip native startup/cleanup in contract modes, and fail verification before any external command, connection, process signal, or file write.
 - Guard inspector bootstrap against Codex builds that disable `SIGUSR1` activation. ThreadDeck checks the loaded Electron framework's inspector fuse and rechecks the process identity before signaling; disabled or unverifiable builds use the existing safe fallback without sending the signal. Existing process-owned inspector connections remain usable.
 - Treat failed local turns as errors instead of successful completions. Task keys show review-required safety pauses as yellow **Need input** and other errors in red, preserve the final elapsed time, and do not return to Thinking while a child process is still running.

@@ -11,7 +11,11 @@
   },
   "com.yechan.threaddeck.newthread": {
     "Name": "Codex 명령",
-    "Tooltip": "속성 검사기에서 새 작업, 사이드챗, 보내기 중 하나를 고릅니다."
+    "Tooltip": "속성 관리자에서 새 작업, 사이드챗, 보내기, 승인 또는 거절을 선택합니다."
+  },
+  "com.yechan.threaddeck.taskactions": {
+    "Name": "작업 액션",
+    "Tooltip": "속성 관리자에서 승인 또는 거절과 승인 대상을 선택합니다."
   },
   "com.yechan.threaddeck.voice": {
     "Name": "Codex 음성 입력",

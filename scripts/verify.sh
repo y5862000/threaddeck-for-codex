@@ -49,6 +49,10 @@ ARCHS="$(lipo -archs "$BRIDGE")"
 "$BRIDGE" side-chat-tab-selftest
 "$BRIDGE" command-palette-selftest
 "$BRIDGE" media-bundle-selftest
+"$BRIDGE" approval-shortcut-selftest
+"$BRIDGE" review-continue-selftest
+"$BRIDGE" approval-card-selftest
+"$BRIDGE" approval-api-context-selftest
 node - "$ROOT_DIR/native/keybridge.m" "$ROOT_DIR/src/plugin.js" "$ROOT_DIR/src/micro-prepared-bridge.js" <<'NODE'
 const fs = require("node:fs");
 const source = fs.readFileSync(process.argv[2], "utf8");

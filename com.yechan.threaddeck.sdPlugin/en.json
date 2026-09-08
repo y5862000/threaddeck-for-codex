@@ -11,7 +11,11 @@
   },
   "com.yechan.threaddeck.newthread": {
     "Name": "Codex command",
-    "Tooltip": "Choose New task, Side Chat, or Send in the Property Inspector."
+    "Tooltip": "Choose New task, Side Chat, Send, Approve, or Decline in the Property Inspector."
+  },
+  "com.yechan.threaddeck.taskactions": {
+    "Name": "Task actions",
+    "Tooltip": "Choose Approve or Decline and an approval target in the Property Inspector."
   },
   "com.yechan.threaddeck.voice": {
     "Name": "Codex dictation",

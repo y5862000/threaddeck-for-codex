@@ -13,6 +13,7 @@ const ACTIONS = {
   thread8: "com.yechan.threaddeck.thread8",
   sideChat: "com.yechan.threaddeck.sidechat",
   newThread: "com.yechan.threaddeck.newthread",
+  taskActions: "com.yechan.threaddeck.taskactions",
   voice: "com.yechan.threaddeck.voice",
   send: "com.yechan.threaddeck.send",
   fastMode: "com.yechan.threaddeck.fastmode",
